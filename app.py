@@ -986,6 +986,25 @@ async def send_group_message(
     return msg
 
 
+@app.get("/api/calls/pending/{call_id}")
+def pending_call(
+    call_id: str,
+    user=Depends(current_user),
+):
+    call = active_calls.get(call_id)
+    if not call or call.get("callee_id") != user["id"] or call.get("answered"):
+        raise HTTPException(404, "Вызов уже завершён")
+    return {
+        "type": "call_offer",
+        "call_id": call["call_id"],
+        "from_user_id": call["caller_id"],
+        "from_name": call["caller_name"],
+        "video": call["video"],
+        "sdp": call["offer_sdp"],
+        "ice_candidates": call.get("caller_ice", []),
+    }
+
+
 CALL_SIGNAL_TYPES = {
     "call_offer",
     "call_answer",
@@ -1112,23 +1131,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     "caller_name": display_name,
                     "callee_id": target_id,
                     "video": bool(data.get("video", False)),
+                    "offer_sdp": payload["sdp"],
+                    "caller_ice": [],
                     "answered": False,
                     "missed_notified": False,
                 }
                 active_calls[call_id] = call
-                delivered = await push(target_id, payload)
-                if delivered == 0:
-                    await notify_missed_call(call)
-                    await websocket.send_json(
-                        {
-                            "type": "call_unavailable",
-                            "to_user_id": target_id,
-                            "call_id": call_id,
-                        }
-                    )
-                    active_calls.pop(call_id, None)
-                else:
-                    asyncio.create_task(expire_call(call_id))
+                await push(target_id, payload)
+
+                kind = "Входящий видеозвонок" if call["video"] else "Входящий звонок"
+                await send_web_push(
+                    target_id,
+                    kind,
+                    f"Звонит {display_name}",
+                    f"/?incoming_call={call_id}",
+                    f"incoming-call-{call_id}",
+                    False,
+                )
+
+                asyncio.create_task(expire_call(call_id))
                 continue
 
             call = active_calls.get(call_id)
@@ -1149,6 +1170,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 if call and not call.get("answered"):
                     await notify_missed_call(call)
                 active_calls.pop(call_id, None)
+                continue
+
+            if signal_type == "ice_candidate":
+                if (
+                    call
+                    and user_id == call.get("caller_id")
+                    and not call.get("answered")
+                ):
+                    candidates = call.setdefault("caller_ice", [])
+                    if len(candidates) < 64:
+                        candidates.append(payload["candidate"])
+                await push(target_id, payload)
                 continue
 
             await push(target_id, payload)
