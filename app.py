@@ -123,6 +123,21 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
       ON push_subscriptions(user_id);
+    CREATE TABLE IF NOT EXISTS call_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      call_id TEXT NOT NULL UNIQUE,
+      caller_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      callee_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      video INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      answered_at TEXT,
+      ended_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_call_history_caller
+      ON call_history(caller_id, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_call_history_callee
+      ON call_history(callee_id, id DESC);
     """)
     for table in ("messages", "group_messages"):
         columns = {
@@ -986,6 +1001,118 @@ async def send_group_message(
     return msg
 
 
+def save_call_started(call: dict):
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute(
+        """INSERT OR IGNORE INTO call_history(
+             call_id,caller_id,callee_id,video,status,started_at
+           ) VALUES(?,?,?,?,?,?)""",
+        (
+            call["call_id"],
+            call["caller_id"],
+            call["callee_id"],
+            1 if call.get("video") else 0,
+            "ringing",
+            call["started_at"],
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_call_answered(call_id: str):
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute(
+        """UPDATE call_history
+           SET status='answered',
+               answered_at=COALESCE(answered_at, ?)
+           WHERE call_id=?""",
+        (now_iso(), call_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def finish_call_history(call_id: str, status: str):
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute(
+        """UPDATE call_history
+           SET status=?, ended_at=COALESCE(ended_at, ?)
+           WHERE call_id=?""",
+        (status, now_iso(), call_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+@app.get("/api/calls/history")
+def call_history(
+    limit: int = Query(30, ge=1, le=100),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    rows = conn.execute(
+        """SELECT ch.*,
+                  CASE
+                    WHEN ch.caller_id=? THEN callee.id
+                    ELSE caller.id
+                  END AS peer_id,
+                  CASE
+                    WHEN ch.caller_id=? THEN callee.username
+                    ELSE caller.username
+                  END AS peer_username,
+                  CASE
+                    WHEN ch.caller_id=? THEN callee.display_name
+                    ELSE caller.display_name
+                  END AS peer_name
+           FROM call_history ch
+           JOIN users caller ON caller.id=ch.caller_id
+           JOIN users callee ON callee.id=ch.callee_id
+           WHERE ch.caller_id=? OR ch.callee_id=?
+           ORDER BY ch.id DESC
+           LIMIT ?""",
+        (
+            user["id"],
+            user["id"],
+            user["id"],
+            user["id"],
+            user["id"],
+            limit,
+        ),
+    ).fetchall()
+
+    result = []
+    for row in rows:
+        duration = 0
+        if row["answered_at"] and row["ended_at"]:
+            try:
+                start = datetime.fromisoformat(row["answered_at"])
+                end = datetime.fromisoformat(row["ended_at"])
+                duration = max(0, int((end - start).total_seconds()))
+            except Exception:
+                duration = 0
+        result.append(
+            {
+                "call_id": row["call_id"],
+                "direction": (
+                    "outgoing"
+                    if row["caller_id"] == user["id"]
+                    else "incoming"
+                ),
+                "peer_id": row["peer_id"],
+                "peer_username": row["peer_username"],
+                "peer_name": row["peer_name"],
+                "video": bool(row["video"]),
+                "status": row["status"],
+                "started_at": row["started_at"],
+                "answered_at": row["answered_at"],
+                "ended_at": row["ended_at"],
+                "duration_seconds": duration,
+            }
+        )
+    return result
+
+
 @app.get("/api/calls/pending/{call_id}")
 def pending_call(
     call_id: str,
@@ -1018,6 +1145,7 @@ async def notify_missed_call(call: dict):
     if call.get("answered") or call.get("missed_notified"):
         return
     call["missed_notified"] = True
+    finish_call_history(call["call_id"], "missed")
     kind = "видеозвонок" if call.get("video") else "голосовой звонок"
     await send_web_push(
         call["callee_id"],
@@ -1147,10 +1275,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     "video": bool(data.get("video", False)),
                     "offer_sdp": payload["sdp"],
                     "caller_ice": [],
+                    "started_at": now_iso(),
                     "answered": False,
                     "missed_notified": False,
                 }
                 active_calls[call_id] = call
+                save_call_started(call)
                 await push(target_id, payload)
 
                 kind = "Входящий видеозвонок" if call["video"] else "Входящий звонок"
@@ -1171,18 +1301,23 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             if signal_type == "call_answer":
                 if call:
                     call["answered"] = True
+                    call["answered_at"] = now_iso()
+                    mark_call_answered(call_id)
                 await push(target_id, payload)
                 continue
 
             if signal_type == "call_reject":
+                finish_call_history(call_id, "rejected")
                 await push(target_id, payload)
                 active_calls.pop(call_id, None)
                 continue
 
             if signal_type == "call_end":
-                await push(target_id, payload)
-                if call and not call.get("answered"):
+                if call and call.get("answered"):
+                    finish_call_history(call_id, "completed")
+                elif call:
                     await notify_missed_call(call)
+                await push(target_id, payload)
                 active_calls.pop(call_id, None)
                 continue
 
@@ -1213,6 +1348,30 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             ]
             for call in unfinished:
                 await notify_missed_call(call)
+                active_calls.pop(call["call_id"], None)
+
+            connected = [
+                call
+                for call in list(active_calls.values())
+                if call.get("answered")
+                and user_id in (call["caller_id"], call["callee_id"])
+            ]
+            for call in connected:
+                finish_call_history(call["call_id"], "completed")
+                peer_id = (
+                    call["callee_id"]
+                    if user_id == call["caller_id"]
+                    else call["caller_id"]
+                )
+                await push(
+                    peer_id,
+                    {
+                        "type": "call_end",
+                        "from_user_id": user_id,
+                        "from_name": display_name,
+                        "call_id": call["call_id"],
+                    },
+                )
                 active_calls.pop(call["call_id"], None)
 
 
