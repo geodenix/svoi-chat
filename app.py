@@ -119,7 +119,8 @@ def init_db():
       sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      client_message_id TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_messages_pair
       ON messages(sender_id, recipient_id, id);
@@ -140,7 +141,8 @@ def init_db():
       group_id INTEGER NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
       sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      client_message_id TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_group_messages
       ON group_messages(group_id, id);
@@ -203,6 +205,10 @@ def init_db():
             conn.execute(
                 f"ALTER TABLE {table} ADD COLUMN attachment_id INTEGER"
             )
+        if "client_message_id" not in columns:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN client_message_id TEXT"
+            )
         if table == "messages":
             if "delivered_at" not in columns:
                 conn.execute(
@@ -229,6 +235,17 @@ def init_db():
                 conn.execute(
                     "ALTER TABLE group_messages ADD COLUMN forwarded INTEGER NOT NULL DEFAULT 0"
                 )
+
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_message
+           ON messages(sender_id, client_message_id)
+           WHERE client_message_id IS NOT NULL"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_group_messages_client_message
+           ON group_messages(sender_id, client_message_id)
+           WHERE client_message_id IS NOT NULL"""
+    )
 
     user_columns = {
         row[1]
@@ -367,6 +384,7 @@ class MessageIn(BaseModel):
     recipient_id: int
     body: str = Field(default="", max_length=4000)
     attachment_id: int | None = None
+    client_message_id: str | None = Field(default=None, max_length=80)
 
 
 class GroupCreateIn(BaseModel):
@@ -385,6 +403,7 @@ class GroupMemberAddIn(BaseModel):
 class GroupMessageIn(BaseModel):
     body: str = Field(default="", max_length=4000)
     attachment_id: int | None = None
+    client_message_id: str | None = Field(default=None, max_length=80)
 
 
 class ForwardMessageIn(BaseModel):
