@@ -84,7 +84,7 @@ check_frontend() {
   fi
 
   local js_file
-  js_file="$(mktemp)"
+  js_file="$(mktemp /tmp/svoi-inline.XXXXXX.js)"
   python3 - "$APP_DIR/index.html" "$js_file" <<'PY'
 import re
 import sys
@@ -98,8 +98,12 @@ blocks = re.findall(
 )
 Path(sys.argv[2]).write_text("\n".join(blocks), encoding="utf-8")
 PY
-  node --check "$js_file"
+  if ! node --check "$js_file"; then
+    rm -f "$js_file"
+    return 1
+  fi
   rm -f "$js_file"
+  return 0
 }
 
 validate_release() {
