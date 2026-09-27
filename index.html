@@ -647,16 +647,96 @@ $('cameraCall').onclick=()=>{
 
 $('switchCamera').onclick=async()=>{
   if(!currentCall?.video)return;
+  const button=$('switchCamera');
+  button.disabled=true;
+
+  const oldTrack=currentCall.localStream.getVideoTracks()[0];
+  const oldFacing=cameraFacing;
+  const nextFacing=oldFacing==='user'?'environment':'user';
+
   try{
-    cameraFacing=cameraFacing==='user'?'environment':'user';
-    const newStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:cameraFacing}},audio:false});
+    let devices=[];
+    try{
+      devices=(await navigator.mediaDevices.enumerateDevices())
+        .filter(device=>device.kind==='videoinput')
+    }catch{}
+
+    if(devices.length===1){
+      throw new Error('Браузер видит только одну камеру')
+    }
+
+    const oldSettings=oldTrack?.getSettings?.()||{};
+    const currentDeviceId=oldSettings.deviceId||'';
+    let targetDevice=null;
+
+    if(devices.length>1){
+      targetDevice=devices.find(device=>
+        device.deviceId &&
+        device.deviceId!==currentDeviceId &&
+        (
+          nextFacing==='environment'
+            ? /back|rear|environment|зад/i.test(device.label||'')
+            : /front|user|face|перед/i.test(device.label||'')
+        )
+      ) || devices.find(device=>
+        device.deviceId && device.deviceId!==currentDeviceId
+      )
+    }
+
+    if(oldTrack){
+      oldTrack.enabled=false;
+      oldTrack.stop();
+      currentCall.localStream.removeTrack(oldTrack)
+    }
+
+    let constraints;
+    if(targetDevice?.deviceId){
+      constraints={video:{deviceId:{exact:targetDevice.deviceId}},audio:false}
+    }else{
+      constraints={video:{facingMode:{exact:nextFacing}},audio:false}
+    }
+
+    let newStream;
+    try{
+      newStream=await navigator.mediaDevices.getUserMedia(constraints)
+    }catch(firstError){
+      newStream=await navigator.mediaDevices.getUserMedia({
+        video:{facingMode:{ideal:nextFacing}},
+        audio:false
+      })
+    }
+
     const newTrack=newStream.getVideoTracks()[0];
+    if(!newTrack)throw new Error('Новая камера не открылась');
+
     const sender=currentCall.pc.getSenders().find(s=>s.track?.kind==='video');
-    if(sender)await sender.replaceTrack(newTrack);
-    const oldTrack=currentCall.localStream.getVideoTracks()[0];
-    if(oldTrack){currentCall.localStream.removeTrack(oldTrack);oldTrack.stop()}
-    currentCall.localStream.addTrack(newTrack);$('localVideo').srcObject=currentCall.localStream
-  }catch(err){alert('Не удалось переключить камеру')}
+    if(!sender)throw new Error('Видеотрек звонка не найден');
+
+    await sender.replaceTrack(newTrack);
+    currentCall.localStream.addTrack(newTrack);
+    cameraFacing=nextFacing;
+
+    $('localVideo').srcObject=currentCall.localStream;
+    $('localVideo').play().catch(()=>{})
+  }catch(err){
+    try{
+      const restore=await navigator.mediaDevices.getUserMedia({
+        video:{facingMode:{ideal:oldFacing}},
+        audio:false
+      });
+      const restoreTrack=restore.getVideoTracks()[0];
+      const sender=currentCall?.pc?.getSenders().find(s=>s.track?.kind==='video');
+      if(sender&&restoreTrack){
+        await sender.replaceTrack(restoreTrack);
+        currentCall.localStream.addTrack(restoreTrack);
+        $('localVideo').srcObject=currentCall.localStream;
+        $('localVideo').play().catch(()=>{})
+      }
+    }catch{}
+    alert(err.message||'Не удалось переключить камеру')
+  }finally{
+    button.disabled=false
+  }
 };
 
 function connectWs(){
