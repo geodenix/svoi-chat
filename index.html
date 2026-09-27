@@ -310,10 +310,29 @@ async function removePushSubscription(){
   }catch{}
 }
 
-const RTC_CONFIG={iceServers:[
-  {urls:'stun:stun.l.google.com:19302'},
-  {urls:'stun:stun1.l.google.com:19302'}
-]};
+let rtcConfigCache=null,rtcConfigFetchedAt=0;
+
+async function getRtcConfig(){
+  const now=Date.now();
+  if(rtcConfigCache&&now-rtcConfigFetchedAt<30*60*1000)return rtcConfigCache;
+  try{
+    const data=await api('/api/turn');
+    rtcConfigCache={
+      iceServers:data.ice_servers||[
+        {urls:['stun:stun.l.google.com:19302']}
+      ]
+    };
+  }catch{
+    rtcConfigCache={
+      iceServers:[
+        {urls:['stun:stun.l.google.com:19302']},
+        {urls:['stun:stun1.l.google.com:19302']}
+      ]
+    };
+  }
+  rtcConfigFetchedAt=now;
+  return rtcConfigCache
+}
 
 function wsSend(payload){
   if(!socket||socket.readyState!==WebSocket.OPEN)throw new Error('Нет соединения с сервером');
@@ -345,7 +364,8 @@ async function getCallMedia(video){
 }
 
 async function createPeer(peerId,peerName,id,video,stream){
-  const pc=new RTCPeerConnection(RTC_CONFIG);
+  const config=await getRtcConfig();
+  const pc=new RTCPeerConnection(config);
   currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:false};
   for(const track of stream.getTracks())pc.addTrack(track,stream);
   $('localVideo').srcObject=stream;
