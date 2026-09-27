@@ -58,10 +58,20 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+def connect_db():
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=5.0,
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def db():
+    conn = connect_db()
     try:
         yield conn
     finally:
@@ -69,7 +79,7 @@ def db():
 
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = connect_db()
     conn.executescript("""
     PRAGMA journal_mode=WAL;
     CREATE TABLE IF NOT EXISTS users (
@@ -299,7 +309,17 @@ class GroupCallIn(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "svoi-chat"}
+    try:
+        conn = connect_db()
+        conn.execute("SELECT 1").fetchone()
+        conn.close()
+    except Exception:
+        raise HTTPException(503, "database unavailable")
+    return {
+        "status": "ok",
+        "service": "svoi-chat",
+        "database": "ok",
+    }
 
 
 @app.post("/api/register")
@@ -539,7 +559,7 @@ def _avatar_suffix(content: bytes, mime: str) -> str:
 
 async def _broadcast_profile(user_data: dict):
     profile_id = int(user_data["id"])
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = connect_db()
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """SELECT DISTINCT peer_id FROM (
@@ -788,7 +808,7 @@ async def send_web_push(
     if not stats["configured"]:
         return stats
 
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = connect_db()
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """SELECT endpoint,p256dh,auth
@@ -838,7 +858,7 @@ async def send_web_push(
     stats["errors"] = stats["errors"][:3]
 
     if stale:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = connect_db()
         conn.executemany(
             "DELETE FROM push_subscriptions WHERE endpoint=?",
             [(endpoint,) for endpoint in stale],
@@ -1411,7 +1431,7 @@ async def group_call_token(
 
 
 def save_call_started(call: dict):
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = connect_db()
     conn.execute(
         """INSERT OR IGNORE INTO call_history(
              call_id,caller_id,callee_id,video,status,started_at
@@ -1430,7 +1450,7 @@ def save_call_started(call: dict):
 
 
 def mark_call_answered(call_id: str):
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = connect_db()
     conn.execute(
         """UPDATE call_history
            SET status='answered',
@@ -1443,7 +1463,7 @@ def mark_call_answered(call_id: str):
 
 
 def finish_call_history(call_id: str, status: str):
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = connect_db()
     conn.execute(
         """UPDATE call_history
            SET status=?, ended_at=COALESCE(ended_at, ?)
@@ -1595,7 +1615,7 @@ async def expire_call(call_id: str):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = connect_db()
     conn.row_factory = sqlite3.Row
     row = get_user_from_token(conn, token)
     conn.close()
@@ -1647,7 +1667,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             if not call_id:
                 continue
 
-            check = sqlite3.connect(DB_PATH, check_same_thread=False)
+            check = connect_db()
             exists = check.execute(
                 "SELECT 1 FROM users WHERE id=?",
                 (target_id,),
