@@ -7,7 +7,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 PRIVATE_PATH = Path("/etc/svoi-vapid-private.pem")
 ENV_PATH = Path("/etc/svoi-chat.env")
-SUBJECT = "https://epl-gruz.duckdns.org/"
+SUBJECT = "mailto:admin@epl-gruz.duckdns.org"
 
 if PRIVATE_PATH.exists():
     private_key = serialization.load_pem_private_key(
