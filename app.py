@@ -211,6 +211,8 @@ def init_db():
     }
     if "avatar_id" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN avatar_id INTEGER")
+    if "last_seen_at" not in user_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT")
 
     group_columns = {
         row[1]
@@ -488,7 +490,7 @@ def turn_credentials(user=Depends(current_user)):
 @app.get("/api/users")
 def users(user=Depends(current_user), conn=Depends(db)):
     rows = conn.execute(
-        """SELECT u.id,u.username,u.display_name,
+        """SELECT u.id,u.username,u.display_name,u.last_seen_at,
                   a.stored_name AS avatar_stored_name,
                   EXISTS(
                     SELECT 1 FROM contacts c
@@ -521,6 +523,7 @@ def users(user=Depends(current_user), conn=Depends(db)):
         {
             **user_json(r),
             "online": bool(connections.get(r["id"])),
+            "last_seen_at": r["last_seen_at"],
             "in_contacts": bool(r["in_contacts"]),
         }
         for r in rows
@@ -557,6 +560,7 @@ def search_user(
     return {
         **user_json(row),
         "online": bool(connections.get(row["id"])),
+        "last_seen_at": row["last_seen_at"],
         "in_contacts": bool(row["in_contacts"]),
     }
 
@@ -580,7 +584,7 @@ async def add_contact(
     conn.commit()
 
     row = conn.execute(
-        """SELECT u.id,u.username,u.display_name,
+        """SELECT u.id,u.username,u.display_name,u.last_seen_at,
                   a.stored_name AS avatar_stored_name
            FROM users u
            LEFT JOIN uploads a ON a.id=u.avatar_id
@@ -591,6 +595,7 @@ async def add_contact(
     return {
         **user_json(row),
         "online": bool(connections.get(other_id)),
+        "last_seen_at": row["last_seen_at"],
         "in_contacts": True,
     }
 
@@ -2478,6 +2483,43 @@ async def expire_call(call_id: str):
     active_calls.pop(call_id, None)
 
 
+def presence_peer_ids(user_id: int) -> set[int]:
+    conn = connect_db()
+    rows = conn.execute(
+        """SELECT DISTINCT peer_id FROM (
+             SELECT contact_user_id AS peer_id
+             FROM contacts WHERE user_id=?
+             UNION
+             SELECT user_id AS peer_id
+             FROM contacts WHERE contact_user_id=?
+             UNION
+             SELECT recipient_id AS peer_id
+             FROM messages WHERE sender_id=?
+             UNION
+             SELECT sender_id AS peer_id
+             FROM messages WHERE recipient_id=?
+           ) WHERE peer_id<>?""",
+        (user_id, user_id, user_id, user_id, user_id),
+    ).fetchall()
+    conn.close()
+    return {int(row["peer_id"]) for row in rows}
+
+
+async def broadcast_presence(
+    user_id: int,
+    online: bool,
+    last_seen_at: str | None,
+):
+    payload = {
+        "type": "presence",
+        "user_id": user_id,
+        "online": bool(online),
+        "last_seen_at": last_seen_at,
+    }
+    for peer_id in presence_peer_ids(user_id):
+        await push(peer_id, payload)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     conn = connect_db()
@@ -2491,7 +2533,21 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     user_id = row["id"]
     display_name = row["display_name"]
     await websocket.accept()
+    was_offline = not bool(connections.get(user_id))
     connections.setdefault(user_id, set()).add(websocket)
+
+    if was_offline:
+        presence_conn = connect_db()
+        last_seen_row = presence_conn.execute(
+            "SELECT last_seen_at FROM users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+        presence_conn.close()
+        await broadcast_presence(
+            user_id,
+            True,
+            last_seen_row["last_seen_at"] if last_seen_row else None,
+        )
 
     for call in list(active_calls.values()):
         if call.get("callee_id") == user_id and not call.get("answered"):
@@ -2655,6 +2711,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         connections.get(user_id, set()).discard(websocket)
         if not connections.get(user_id):
             connections.pop(user_id, None)
+            last_seen_at = now_iso()
+            presence_conn = connect_db()
+            presence_conn.execute(
+                "UPDATE users SET last_seen_at=? WHERE id=?",
+                (last_seen_at, user_id),
+            )
+            presence_conn.commit()
+            presence_conn.close()
+            await broadcast_presence(user_id, False, last_seen_at)
+
             unfinished = [
                 call
                 for call in list(active_calls.values())
