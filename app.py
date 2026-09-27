@@ -355,7 +355,7 @@ def unsubscribe_push(
     return {"ok": True}
 
 
-def _webpush_one(subscription: dict, payload: str) -> bool:
+def _webpush_one(subscription: dict, payload: str) -> dict:
     try:
         webpush(
             subscription_info=subscription,
@@ -364,14 +364,24 @@ def _webpush_one(subscription: dict, payload: str) -> bool:
             vapid_claims={"sub": VAPID_SUBJECT},
             ttl=120,
         )
-        return True
+        return {"ok": True, "stale": False, "error": None}
     except WebPushException as exc:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
-        if status in (404, 410):
-            return False
-        return True
-    except Exception:
-        return True
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(
+                getattr(exc, "response", None),
+                "status_code",
+                None,
+            )
+        stale = status in (404, 410)
+        error = f"HTTP {status}" if status else str(exc)[:180]
+        return {"ok": False, "stale": stale, "error": error}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "stale": False,
+            "error": str(exc)[:180],
+        }
 
 
 async def send_web_push(
@@ -380,9 +390,18 @@ async def send_web_push(
     body: str,
     url: str = "/",
     tag: str = "svoi",
+    force: bool = False,
 ):
-    if not push_configured():
-        return
+    stats = {
+        "configured": push_configured(),
+        "attempted": 0,
+        "sent": 0,
+        "stale": 0,
+        "errors": [],
+    }
+    if not stats["configured"]:
+        return stats
+
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
@@ -391,17 +410,22 @@ async def send_web_push(
         (user_id,),
     ).fetchall()
     conn.close()
+
+    stats["attempted"] = len(rows)
     if not rows:
-        return
+        return stats
+
     payload = json.dumps(
         {
             "title": title,
             "body": body[:180],
             "url": url,
             "tag": tag,
+            "force": force,
         },
         ensure_ascii=False,
     )
+
     stale = []
     for row in rows:
         subscription = {
@@ -411,13 +435,22 @@ async def send_web_push(
                 "auth": row["auth"],
             },
         }
-        ok = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             _webpush_one,
             subscription,
             payload,
         )
-        if not ok:
-            stale.append(row["endpoint"])
+        if result["ok"]:
+            stats["sent"] += 1
+        else:
+            if result["error"]:
+                stats["errors"].append(result["error"])
+            if result["stale"]:
+                stale.append(row["endpoint"])
+
+    stats["stale"] = len(stale)
+    stats["errors"] = stats["errors"][:3]
+
     if stale:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         conn.executemany(
@@ -426,6 +459,51 @@ async def send_web_push(
         )
         conn.commit()
         conn.close()
+
+    return stats
+
+
+@app.get("/api/push/status")
+def push_status(
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    count = conn.execute(
+        "SELECT COUNT(*) FROM push_subscriptions WHERE user_id=?",
+        (user["id"],),
+    ).fetchone()[0]
+    return {
+        "configured": push_configured(),
+        "subscriptions": count,
+    }
+
+
+@app.post("/api/push/test")
+async def test_push(user=Depends(current_user)):
+    stats = await send_web_push(
+        user["id"],
+        "Свои",
+        "Тестовое уведомление работает ✅",
+        "/",
+        f"test-{user['id']}",
+        True,
+    )
+    if not stats["configured"]:
+        raise HTTPException(
+            503,
+            "Push-ключи не настроены на сервере",
+        )
+    if stats["attempted"] == 0:
+        raise HTTPException(
+            409,
+            "На этом аккаунте нет push-подписки",
+        )
+    if stats["sent"] == 0:
+        detail = "Push-сервис не принял уведомление"
+        if stats["errors"]:
+            detail += ": " + "; ".join(stats["errors"])
+        raise HTTPException(502, detail)
+    return stats
 
 
 def attachment_json(row):
