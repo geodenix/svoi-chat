@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -134,6 +135,13 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_group_messages
       ON group_messages(group_id, id);
+    CREATE TABLE IF NOT EXISTS group_message_mentions (
+      message_id INTEGER NOT NULL REFERENCES group_messages(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      PRIMARY KEY(message_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_message_mentions_user
+      ON group_message_mentions(user_id, message_id);
     CREATE TABLE IF NOT EXISTS uploads (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1171,6 +1179,39 @@ def attachment_json(row):
     }
 
 
+MENTION_RE = re.compile(r"(?<![A-Za-z0-9_.-])@([A-Za-z0-9_.-]{3,32})")
+
+
+def resolve_group_mentions(conn, group_id: int, body: str) -> set[int]:
+    usernames = {
+        match.group(1).lower()
+        for match in MENTION_RE.finditer(body or "")
+    }
+    if not usernames:
+        return set()
+
+    marks = ",".join("?" for _ in usernames)
+    rows = conn.execute(
+        f"""SELECT u.id
+            FROM group_members gm
+            JOIN users u ON u.id=gm.user_id
+            WHERE gm.group_id=?
+              AND u.username IN ({marks})""",
+        (group_id, *sorted(usernames)),
+    ).fetchall()
+    return {int(row["id"]) for row in rows}
+
+
+def store_group_mentions(conn, message_id: int, user_ids: set[int]):
+    if not user_ids:
+        return
+    conn.executemany(
+        """INSERT OR IGNORE INTO group_message_mentions(message_id,user_id)
+           VALUES(?,?)""",
+        [(message_id, user_id) for user_id in sorted(user_ids)],
+    )
+
+
 def owned_upload(conn, attachment_id: int | None, user_id: int):
     if attachment_id is None:
         return None
@@ -1711,6 +1752,8 @@ async def forward_message(
             attachment_id,
         ),
     )
+    mention_ids = resolve_group_mentions(conn, data.target_chat_id, body)
+    store_group_mentions(conn, cur.lastrowid, mention_ids)
     conn.commit()
 
     msg = {
@@ -1724,6 +1767,7 @@ async def forward_message(
         "deleted": False,
         "deleted_at": None,
         "forwarded": True,
+        "mentioned_me": user["id"] in mention_ids,
         "can_delete": True,
         "can_restore": False,
     }
@@ -1742,21 +1786,37 @@ async def forward_message(
     for member in members:
         if member["user_id"] == user["id"]:
             continue
+        recipient_id = int(member["user_id"])
         live_msg = {
             **msg,
+            "mentioned_me": recipient_id in mention_ids,
             "can_delete": bool(member["is_admin"]),
         }
         await push(
-            member["user_id"],
+            recipient_id,
             {"type": "group_message", "message": live_msg},
         )
-        await send_web_push(
-            member["user_id"],
-            f"{group['name']} · {user['display_name']}",
-            "↪ " + preview,
-            "/",
-            f"group-{data.target_chat_id}",
+        should_notify = (
+            recipient_id in mention_ids
+            if mention_ids
+            else True
         )
+        if should_notify:
+            await send_web_push(
+                recipient_id,
+                (
+                    f"Упоминание · {group['name']}"
+                    if mention_ids
+                    else f"{group['name']} · {user['display_name']}"
+                ),
+                (
+                    f"{user['display_name']}: ↪ {preview}"
+                    if mention_ids
+                    else "↪ " + preview
+                ),
+                "/",
+                f"group-{data.target_chat_id}",
+            )
 
     return msg
 
@@ -2143,6 +2203,10 @@ def get_group_messages(
     rows = conn.execute(
         """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
                   gm.deleted_at,gm.deleted_by,gm.forwarded,
+                  EXISTS(
+                    SELECT 1 FROM group_message_mentions gmm
+                    WHERE gmm.message_id=gm.id AND gmm.user_id=?
+                  ) AS mentioned_me,
                   u.display_name AS sender_name,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
@@ -2154,7 +2218,7 @@ def get_group_messages(
            LEFT JOIN uploads up ON up.id=gm.attachment_id
            WHERE gm.group_id=?
            ORDER BY gm.id DESC LIMIT ?""",
-        (group_id, limit),
+        (user["id"], group_id, limit),
     ).fetchall()
     result = []
     is_admin = bool(group["is_admin"])
@@ -2170,6 +2234,7 @@ def get_group_messages(
             "deleted": deleted,
             "deleted_at": row["deleted_at"],
             "forwarded": bool(row["forwarded"]),
+            "mentioned_me": bool(row["mentioned_me"]) and not deleted,
             "can_delete": (
                 not deleted
                 and (is_admin or row["sender_id"] == user["id"])
@@ -2207,6 +2272,8 @@ async def send_group_message(
             data.attachment_id,
         ),
     )
+    mention_ids = resolve_group_mentions(conn, group_id, body)
+    store_group_mentions(conn, cur.lastrowid, mention_ids)
     conn.commit()
     attachment = None
     if upload_row:
@@ -2235,6 +2302,7 @@ async def send_group_message(
         "deleted": False,
         "deleted_at": None,
         "forwarded": False,
+        "mentioned_me": user["id"] in mention_ids,
         "can_delete": True,
         "can_restore": False,
     }
@@ -2254,21 +2322,37 @@ async def send_group_message(
         preview = "Новое сообщение"
     for row in member_rows:
         if row["user_id"] != user["id"]:
+            recipient_id = int(row["user_id"])
             live_msg = {
                 **msg,
+                "mentioned_me": recipient_id in mention_ids,
                 "can_delete": bool(row["is_admin"]),
             }
             await push(
-                row["user_id"],
+                recipient_id,
                 {"type": "group_message", "message": live_msg},
             )
-            await send_web_push(
-                row["user_id"],
-                f"{group['name']} · {user['display_name']}",
-                preview,
-                "/",
-                f"group-{group_id}",
+            should_notify = (
+                recipient_id in mention_ids
+                if mention_ids
+                else True
             )
+            if should_notify:
+                await send_web_push(
+                    recipient_id,
+                    (
+                        f"Упоминание · {group['name']}"
+                        if mention_ids
+                        else f"{group['name']} · {user['display_name']}"
+                    ),
+                    (
+                        f"{user['display_name']}: {preview}"
+                        if mention_ids
+                        else preview
+                    ),
+                    "/",
+                    f"group-{group_id}",
+                )
     return msg
 
 
@@ -2287,7 +2371,7 @@ async def delete_group_message(
         """SELECT id,sender_id,deleted_at
            FROM group_messages
            WHERE id=? AND group_id=?""",
-        (message_id, group_id),
+        (user["id"], message_id, group_id),
     ).fetchone()
     if not row:
         raise HTTPException(404, "Сообщение не найдено")
@@ -2343,6 +2427,10 @@ async def restore_group_message(
     row = conn.execute(
         """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
                   gm.deleted_at,gm.deleted_by,gm.forwarded,
+                  EXISTS(
+                    SELECT 1 FROM group_message_mentions gmm
+                    WHERE gmm.message_id=gm.id AND gmm.user_id=?
+                  ) AS mentioned_me,
                   u.display_name AS sender_name,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
@@ -2379,6 +2467,7 @@ async def restore_group_message(
         "deleted": False,
         "deleted_at": None,
         "forwarded": bool(row["forwarded"]),
+        "mentioned_me": bool(row["mentioned_me"]),
         "can_delete": True,
         "can_restore": False,
     }
@@ -2387,9 +2476,17 @@ async def restore_group_message(
         "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
         (group_id,),
     ).fetchall()
+    mentioned_ids = {
+        int(r["user_id"])
+        for r in conn.execute(
+            "SELECT user_id FROM group_message_mentions WHERE message_id=?",
+            (message_id,),
+        ).fetchall()
+    }
     for member in members:
         payload = {
             **restored,
+            "mentioned_me": int(member["user_id"]) in mentioned_ids,
             "can_delete": (
                 bool(member["is_admin"])
                 or int(member["user_id"]) == int(row["sender_id"])
