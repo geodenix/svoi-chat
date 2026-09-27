@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - "app.py"
+      - "index.html"
+      - "deploy.sh"
       - "requirements.txt"
       - ".github/workflows/check-backend.yml"
   workflow_dispatch:
@@ -23,6 +25,25 @@ jobs:
 
       - name: Compile backend
         run: python -m py_compile app.py
+
+      - name: Check deploy script
+        run: bash -n deploy.sh
+
+      - name: Check frontend JavaScript
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          html = Path("index.html").read_text(encoding="utf-8")
+          blocks = re.findall(
+              r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>",
+              html,
+              flags=re.IGNORECASE | re.DOTALL,
+          )
+          Path("/tmp/svoi-inline.js").write_text("\n".join(blocks), encoding="utf-8")
+          PY
+          node --check /tmp/svoi-inline.js
 
       - name: Initialize clean database
         env:
