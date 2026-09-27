@@ -116,7 +116,7 @@ const $=id=>document.getElementById(id);
 let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],callHistory=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false,foundUser=null;
 let currentCall=null,pendingCall=null,pendingIce=[],cameraFacing='user',acceptingCall=false,preparedMediaStream=null;
 let callAudioSinkId='',callSpeakerMode=false;
-let soundsEnabled=localStorage.getItem('svoi_sounds')!=='0',audioContext=null,ringtoneTimer=null;
+let soundsEnabled=localStorage.getItem('svoi_sounds')!=='0',audioContext=null,ringtoneTimer=null,outgoingToneTimer=null;
 let deferredInstallPrompt=null;
 let groupCallState=null;
 
@@ -184,6 +184,34 @@ async function playRingPulse(){
   for(const [freq,offset,duration] of notes){
     tone(freq,t+offset,duration,0.045,'sine');
     tone(freq*2,t+offset,duration*0.75,0.010,'triangle')
+  }
+}
+
+async function playOutgoingTonePulse(){
+  if(!soundsEnabled)return;
+  const ctx=await unlockAudio();
+  if(!ctx||ctx.state!=='running')return;
+  const t=ctx.currentTime+0.01;
+
+  // Soft original waiting melody for the caller.
+  tone(523,t,0.18,0.022,'sine');
+  tone(659,t+0.20,0.18,0.020,'sine');
+  tone(784,t+0.42,0.24,0.018,'sine');
+  tone(659,t+0.70,0.16,0.014,'sine')
+}
+
+async function startOutgoingTone(){
+  if(!soundsEnabled||outgoingToneTimer)return;
+  await playOutgoingTonePulse();
+  outgoingToneTimer=setInterval(()=>{
+    playOutgoingTonePulse().catch(()=>{})
+  },2400)
+}
+
+function stopOutgoingTone(){
+  if(outgoingToneTimer){
+    clearInterval(outgoingToneTimer);
+    outgoingToneTimer=null
   }
 }
 
@@ -262,7 +290,8 @@ $('soundBtn').onclick=async()=>{
   soundsEnabled=!soundsEnabled;
   localStorage.setItem('svoi_sounds',soundsEnabled?'1':'0');
   if(!soundsEnabled){
-    stopRingtone()
+    stopRingtone();
+    stopOutgoingTone()
   }else{
     await unlockAudio();
     playMessageSound().catch(()=>{})
@@ -1099,6 +1128,7 @@ function showCallUi(name,status,video,incoming=false){
 
 function resetCallUi(){
   stopRingtone();
+  stopOutgoingTone();
   $('callOverlay').classList.add('hidden');$('remoteVideo').srcObject=null;$('localVideo').srcObject=null;
   $('incomingActions').classList.add('hidden');$('activeCallControls').classList.add('hidden');$('mediaPermission').classList.add('hidden');
   $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');updateSpeakerButtons();
@@ -1139,7 +1169,7 @@ async function createPeer(peerId,peerName,id,video,stream){
   pc.onconnectionstatechange=()=>{
     if(!currentCall||currentCall.pc!==pc)return;
     const state=pc.connectionState;
-    if(state==='connected')$('callStatus').textContent='Соединено';
+    if(state==='connected'){stopOutgoingTone();$('callStatus').textContent='Соединено'}
     else if(state==='connecting')$('callStatus').textContent='Соединение…';
     else if(state==='failed'){ $('callStatus').textContent='Не удалось соединиться'; setTimeout(()=>finishCall(false),1200) }
     else if(state==='closed')finishCall(false)
@@ -1166,7 +1196,8 @@ async function startCallTo(u,video){
     showCallUi(u.display_name,'Вызов…',video,false);
     const offer=await pc.createOffer();
     await pc.setLocalDescription(offer);
-    wsSend({type:'call_offer',to_user_id:u.id,call_id:id,video,sdp:pc.localDescription.toJSON?pc.localDescription.toJSON():pc.localDescription})
+    wsSend({type:'call_offer',to_user_id:u.id,call_id:id,video,sdp:pc.localDescription.toJSON?pc.localDescription.toJSON():pc.localDescription});
+    startOutgoingTone().catch(()=>{})
   }catch(err){
     finishCall(false);
     alert(err.name==='NotAllowedError'?'Нужен доступ к микрофону/камере':(err.message||'Не удалось начать звонок'))
@@ -1312,11 +1343,11 @@ function finishCall(notify=true){
 async function handleCallSignal(data){
   if(data.type==='call_offer'){incomingCall(data);return}
   if(data.type==='call_unavailable'){
-    if(currentCall&&currentCall.callId===data.call_id){alert('Пользователь сейчас недоступен');finishCall(false)}
+    if(currentCall&&currentCall.callId===data.call_id){stopOutgoingTone();alert('Пользователь сейчас недоступен');finishCall(false)}
     return
   }
   if(data.type==='call_reject'){
-    if(currentCall&&currentCall.callId===data.call_id){$('callStatus').textContent='Звонок отклонён';setTimeout(()=>finishCall(false),900)}
+    if(currentCall&&currentCall.callId===data.call_id){stopOutgoingTone();$('callStatus').textContent='Звонок отклонён';setTimeout(()=>finishCall(false),900)}
     return
   }
   if(data.type==='call_end'){
@@ -1333,6 +1364,7 @@ async function handleCallSignal(data){
   }
   if(data.type==='call_answer'){
     if(!currentCall||currentCall.callId!==data.call_id)return;
+    stopOutgoingTone();
     try{
       await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
       await flushPendingIce();$('callStatus').textContent='Соединение…'
