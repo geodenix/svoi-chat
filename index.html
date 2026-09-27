@@ -600,6 +600,36 @@ function renderCallHistory(){
   }
 }
 
+function formatLastSeen(user){
+  if(user?.online)return 'в сети';
+  if(!user?.last_seen_at)return 'время последнего входа ещё не записано';
+
+  const date=new Date(user.last_seen_at);
+  if(Number.isNaN(date.getTime()))return 'не в сети';
+
+  const now=new Date();
+  const sameDay=date.getFullYear()===now.getFullYear()
+    && date.getMonth()===now.getMonth()
+    && date.getDate()===now.getDate();
+
+  const yesterday=new Date(now);
+  yesterday.setDate(now.getDate()-1);
+  const wasYesterday=date.getFullYear()===yesterday.getFullYear()
+    && date.getMonth()===yesterday.getMonth()
+    && date.getDate()===yesterday.getDate();
+
+  const time=date.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+  if(sameDay)return 'был в сети сегодня в '+time;
+  if(wasYesterday)return 'был в сети вчера в '+time;
+
+  const dateText=date.toLocaleDateString('ru-RU',{
+    day:'2-digit',
+    month:'2-digit',
+    year:date.getFullYear()===now.getFullYear()?undefined:'numeric'
+  });
+  return 'был в сети '+dateText+' в '+time
+}
+
 function renderUserSearchResult(user=null,message='',isError=false){
   const box=$('userSearchResult');box.replaceChildren();
   if(message){
@@ -612,7 +642,7 @@ function renderUserSearchResult(user=null,message='',isError=false){
   const av=document.createElement('span');av.className='avatar';setAvatar(av,user);
   const txt=document.createElement('span');txt.className='txt';
   const name=document.createElement('strong');name.textContent=user.display_name;
-  const tag=document.createElement('small');tag.className='muted';tag.textContent='@'+user.username;
+  const tag=document.createElement('small');tag.className='muted';tag.textContent='@'+user.username+' · '+formatLastSeen(user);
   txt.append(name,tag);main.append(av,txt);main.onclick=()=>openUser(user);
 
   const add=document.createElement('button');add.type='button';add.className='search-add';
@@ -654,8 +684,11 @@ function renderUsers(){
   if(!users.length){box.innerHTML='<div class="muted" style="padding:12px">Контактов и личных диалогов пока нет. Найди человека по @тегу.</div>';return}
   for(const u of users){
     const b=document.createElement('button');b.className='item'+(active?.type==='user'&&active.data.id===u.id?' active':'');
-    b.innerHTML='<span class="avatar"></span><span class="txt"><strong></strong><small class="muted">@'+u.username+'</small></span><span class="dot '+(u.online?'on':'')+'"></span>';
-    setAvatar(b.querySelector('.avatar'),u);b.querySelector('strong').textContent=u.display_name;b.onclick=()=>openUser(u);box.append(b)
+    b.innerHTML='<span class="avatar"></span><span class="txt"><strong></strong><small class="muted"></small></span><span class="dot '+(u.online?'on':'')+'"></span>';
+    setAvatar(b.querySelector('.avatar'),u);
+    b.querySelector('strong').textContent=u.display_name;
+    b.querySelector('small').textContent='@'+u.username+' · '+formatLastSeen(u);
+    b.onclick=()=>openUser(u);box.append(b)
   }
 }
 
@@ -748,7 +781,7 @@ async function openGroup(g){
 function updateHead(){
   if(!active)return;
   if(active.type==='user'){
-    const u=active.data;$('chatName').textContent=u.display_name;$('chatAvatar').classList.remove('group-avatar');setAvatar($('chatAvatar'),u);$('chatStatus').textContent=u.online?'в сети':'не в сети';
+    const u=active.data;$('chatName').textContent=u.display_name;$('chatAvatar').classList.remove('group-avatar');setAvatar($('chatAvatar'),u);$('chatStatus').textContent=formatLastSeen(u);
     $('chatAvatar').style.cursor='default';$('chatAvatar').title='Аватар пользователя';
     $('chatName').style.cursor='pointer';$('chatName').title='Меню чата';
     $('groupInfoBtn').classList.add('hidden');
@@ -810,7 +843,7 @@ function renderGroupMembers(data){
 
     const online=document.createElement('span');
     online.className='member-online'+(member.online?' on':'');
-    online.textContent=member.online?'● в сети':'○ не в сети';
+    online.textContent=(member.online?'● ':'○ ')+formatLastSeen(member);
     meta.append(online);
     info.append(name,tag,meta);
     row.append(avatar,info);
@@ -2956,6 +2989,51 @@ function connectWs(){
       loadUsers().catch(()=>{});
       return
     }
+    if(data.type==='presence'){
+      const userId=Number(data.user_id);
+      users=users.map(u=>Number(u.id)===userId?{
+        ...u,
+        online:!!data.online,
+        last_seen_at:data.last_seen_at||u.last_seen_at||null
+      }:u);
+
+      if(foundUser&&Number(foundUser.id)===userId){
+        foundUser={
+          ...foundUser,
+          online:!!data.online,
+          last_seen_at:data.last_seen_at||foundUser.last_seen_at||null
+        };
+        renderUserSearchResult(foundUser)
+      }
+
+      if(active?.type==='user'&&Number(active.data.id)===userId){
+        active.data={
+          ...active.data,
+          online:!!data.online,
+          last_seen_at:data.last_seen_at||active.data.last_seen_at||null
+        };
+        updateHead()
+      }
+
+      if(groupMembersData?.members?.some(member=>Number(member.id)===userId)){
+        groupMembersData={
+          ...groupMembersData,
+          members:groupMembersData.members.map(member=>
+            Number(member.id)===userId
+              ?{
+                  ...member,
+                  online:!!data.online,
+                  last_seen_at:data.last_seen_at||member.last_seen_at||null
+                }
+              :member
+          )
+        };
+        if($('groupMembersDialog').open)renderGroupMembers(groupMembersData)
+      }
+
+      renderUsers();
+      return
+    }
     if(data.type==='contacts_updated'){
       loadUsers().catch(()=>{});
       return
@@ -3190,7 +3268,7 @@ function openChatMenu(){
     :active.data.display_name;
   $('chatMenuStatus').textContent=active.type==='group'
     ?(active.data.member_count+' участников')
-    :(active.data.online?'в сети':'не в сети');
+    :formatLastSeen(active.data);
   $('groupInfoBtn').classList.toggle('hidden',active.type!=='group');
   $('groupMembersBtn').classList.toggle('hidden',active.type!=='group');
   $('chatMenuDialog').showModal()
