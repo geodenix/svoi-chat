@@ -6,8 +6,9 @@
 <style>
 :root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#eef4ff;background:#09111f}*{box-sizing:border-box}body{margin:0}button,input,textarea{font:inherit}.hidden{display:none!important}
 .auth{min-height:100dvh;display:grid;place-items:center;padding:20px;background:radial-gradient(circle at top,#18375e,#09111f 65%)}.auth-card{width:min(420px,100%);background:#111f34;border:1px solid #293d58;border-radius:24px;padding:26px}.brand{display:flex;align-items:center;gap:12px;margin-bottom:22px}.mark{width:48px;height:48px;border-radius:16px;display:grid;place-items:center;background:#2b86fa;font-size:25px;font-weight:800}.auth h1{margin:0}.muted{color:#aab9cf}.tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:18px 0}.tabs button,.auth button{border:0;border-radius:12px;padding:12px;background:#203552;color:#eef4ff}.tabs .active,.primary{background:#2b86fa!important}.field{margin:12px 0}.field label{display:block;font-size:13px;color:#b7c5d9;margin-bottom:6px}.field input{width:100%;border:1px solid #354b68;background:#0c1728;color:#fff;border-radius:12px;padding:12px}.error{color:#ffb4b4;min-height:22px}
-.app{height:100dvh;display:grid;grid-template-columns:320px 1fr;background:#0d1829}.sidebar{border-right:1px solid #26364d;display:flex;flex-direction:column;min-width:0}.side-head{padding:18px;border-bottom:1px solid #26364d;display:flex;align-items:center;gap:10px}.side-head .me{min-width:0;flex:1}.side-head strong,.side-head small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.logout{border:1px solid #334965;background:#17283f;color:#fff;border-radius:10px;padding:8px 10px}.users{overflow:auto;flex:1;padding:8px}.user{width:100%;border:0;background:transparent;color:#fff;text-align:left;display:flex;gap:12px;align-items:center;padding:12px;border-radius:14px}.user:hover,.user.active{background:#1a304d}.avatar{width:44px;height:44px;border-radius:15px;background:#244f7e;display:grid;place-items:center;font-weight:700;flex-shrink:0}.user .txt{min-width:0;flex:1}.user strong,.user small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dot{width:9px;height:9px;border-radius:50%;background:#54647b}.dot.on{background:#45d78e}
-.chat{display:flex;flex-direction:column;min-width:0;min-height:0}.chat-head{height:74px;padding:14px 20px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #26364d}.back{display:none;border:0;background:#1b2e49;color:white;border-radius:11px;width:42px;height:42px}.chat-title{min-width:0}.chat-title strong,.chat-title small{display:block}.messages{flex:1;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:10px;background:radial-gradient(ellipse at top,#132944,transparent 72%)}.empty{margin:auto;text-align:center;color:#9fb0c8;max-width:320px}.bubble{max-width:min(78%,560px);padding:10px 13px;border-radius:17px 17px 17px 5px;background:#1c2d45;align-self:flex-start;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.mine{align-self:flex-end;background:#2565b5;border-radius:17px 17px 5px 17px}.bubble time{display:block;margin-top:4px;text-align:right;font-size:11px;color:#c1d1e7}.composer{display:flex;gap:10px;align-items:flex-end;padding:12px 18px max(12px,env(safe-area-inset-bottom));border-top:1px solid #26364d}.composer textarea{flex:1;resize:none;max-height:120px;min-height:48px;border:1px solid #354b68;background:#15263d;color:#fff;border-radius:16px;padding:12px 14px}.send{width:48px;height:48px;border:0;border-radius:15px;background:#2b86fa;color:white;font-size:22px}.send:disabled{opacity:.4}.welcome{margin:auto;text-align:center;color:#9fb0c8}.welcome .mark{margin:0 auto 16px}
+.app{height:100dvh;display:grid;grid-template-columns:330px 1fr;background:#0d1829}.sidebar{border-right:1px solid #26364d;display:flex;flex-direction:column;min-width:0}.side-head{padding:18px;border-bottom:1px solid #26364d;display:flex;align-items:center;gap:10px}.side-head .me{min-width:0;flex:1}.side-head strong,.side-head small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.logout{border:1px solid #334965;background:#17283f;color:#fff;border-radius:10px;padding:8px 10px}.scroll{overflow:auto;flex:1}.section-head{padding:14px 14px 8px;display:flex;align-items:center;justify-content:space-between}.section-head span{font-size:12px;color:#8fa3be;text-transform:uppercase;letter-spacing:.08em}.new-group{border:0;background:#244f7e;color:#fff;border-radius:10px;padding:7px 10px}.list{padding:0 8px 8px}.item{width:100%;border:0;background:transparent;color:#fff;text-align:left;display:flex;gap:12px;align-items:center;padding:12px;border-radius:14px}.item:hover,.item.active{background:#1a304d}.avatar{width:44px;height:44px;border-radius:15px;background:#244f7e;display:grid;place-items:center;font-weight:700;flex-shrink:0}.group-avatar{background:#5a3d85}.item .txt{min-width:0;flex:1}.item strong,.item small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dot{width:9px;height:9px;border-radius:50%;background:#54647b}.dot.on{background:#45d78e}
+.chat{display:flex;flex-direction:column;min-width:0;min-height:0}.chat-head{height:74px;padding:14px 20px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #26364d}.back{display:none;border:0;background:#1b2e49;color:white;border-radius:11px;width:42px;height:42px}.chat-title{min-width:0}.chat-title strong,.chat-title small{display:block}.messages{flex:1;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:10px;background:radial-gradient(ellipse at top,#132944,transparent 72%)}.empty{margin:auto;text-align:center;color:#9fb0c8;max-width:320px}.bubble{max-width:min(78%,560px);padding:10px 13px;border-radius:17px 17px 17px 5px;background:#1c2d45;align-self:flex-start;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.mine{align-self:flex-end;background:#2565b5;border-radius:17px 17px 5px 17px}.sender{font-size:12px;font-weight:700;color:#8ec4ff;margin-bottom:4px}.bubble time{display:block;margin-top:4px;text-align:right;font-size:11px;color:#c1d1e7}.composer{display:flex;gap:10px;align-items:flex-end;padding:12px 18px max(12px,env(safe-area-inset-bottom));border-top:1px solid #26364d}.composer textarea{flex:1;resize:none;max-height:120px;min-height:48px;border:1px solid #354b68;background:#15263d;color:#fff;border-radius:16px;padding:12px 14px}.send{width:48px;height:48px;border:0;border-radius:15px;background:#2b86fa;color:white;font-size:22px}.send:disabled{opacity:.4}.welcome{margin:auto;text-align:center;color:#9fb0c8}.welcome .mark{margin:0 auto 16px}
+dialog{width:min(92vw,460px);border:1px solid #334965;border-radius:20px;background:#111f34;color:#fff;padding:20px}dialog::backdrop{background:#000a}.member-list{max-height:300px;overflow:auto;margin:14px 0}.member-row{display:flex;align-items:center;gap:10px;padding:10px;border-radius:10px;background:#17283f;margin-bottom:8px}.member-row input{width:20px;height:20px}.dialog-actions{display:flex;gap:10px}.dialog-actions button{flex:1;border:0;border-radius:12px;padding:12px;color:#fff;background:#203552}.dialog-actions .primary{background:#2b86fa}.dialog-title{margin:0 0 8px}.group-name{width:100%;border:1px solid #354b68;background:#0c1728;color:#fff;border-radius:12px;padding:12px}
 @media(max-width:720px){.app{display:block}.sidebar{height:100dvh}.chat{height:100dvh;display:none}.app.chat-open .sidebar{display:none}.app.chat-open .chat{display:flex}.back{display:block}.side-head{padding-top:max(18px,env(safe-area-inset-top))}}
 </style></head>
 <body>
@@ -22,33 +23,189 @@
     </form>
   </div>
 </div>
+
 <div id="app" class="app hidden">
-  <aside class="sidebar"><div class="side-head"><div class="mark">С</div><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="logout" class="logout">Выйти</button></div><div id="users" class="users"></div></aside>
-  <main class="chat"><div id="chatHead" class="chat-head hidden"><button id="back" class="back">←</button><div class="avatar" id="peerAvatar"></div><div class="chat-title"><strong id="peerName"></strong><small id="peerStatus" class="muted"></small></div></div>
-    <div id="messages" class="messages"><div class="welcome"><div class="mark">С</div><h2>Выбери собеседника</h2><p>Сообщения будут сохраняться на сервере и приходить в реальном времени.</p></div></div>
+  <aside class="sidebar">
+    <div class="side-head"><div class="mark">С</div><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="logout" class="logout">Выйти</button></div>
+    <div class="scroll">
+      <div class="section-head"><span>Группы</span><button id="newGroup" class="new-group">+ Новая</button></div>
+      <div id="groups" class="list"></div>
+      <div class="section-head"><span>Личные чаты</span></div>
+      <div id="users" class="list"></div>
+    </div>
+  </aside>
+
+  <main class="chat">
+    <div id="chatHead" class="chat-head hidden"><button id="back" class="back">←</button><div class="avatar" id="chatAvatar"></div><div class="chat-title"><strong id="chatName"></strong><small id="chatStatus" class="muted"></small></div></div>
+    <div id="messages" class="messages"><div class="welcome"><div class="mark">С</div><h2>Выбери чат</h2><p>Личные и групповые сообщения приходят в реальном времени.</p></div></div>
     <form id="composer" class="composer hidden"><textarea id="text" placeholder="Сообщение…" maxlength="4000" rows="1"></textarea><button id="send" class="send" disabled>↑</button></form>
   </main>
 </div>
+
+<dialog id="groupDialog">
+  <h2 class="dialog-title">Новая группа</h2>
+  <p class="muted">Укажи название и выбери участников.</p>
+  <input id="groupName" class="group-name" maxlength="80" placeholder="Название группы">
+  <div id="memberList" class="member-list"></div>
+  <div class="dialog-actions"><button id="cancelGroup">Отмена</button><button id="createGroup" class="primary">Создать</button></div>
+  <div id="groupError" class="error"></div>
+</dialog>
+
 <script>
-const $=id=>document.getElementById(id);let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],peer=null,socket=null,retry=null;
-const api=async(path,opt={})=>{opt.headers={...(opt.headers||{}),...(token?{Authorization:'Bearer '+token}:{})};if(opt.body&&typeof opt.body!=='string'){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(opt.body)}const r=await fetch(path,opt);let data=null;try{data=await r.json()}catch{}if(!r.ok)throw new Error(data?.detail||'Ошибка сервера');return data};
-function setMode(next){mode=next;const reg=next==='register';$('tabLogin').classList.toggle('active',!reg);$('tabRegister').classList.toggle('active',reg);$('nameField').classList.toggle('hidden',!reg);$('authSubmit').textContent=reg?'Создать аккаунт':'Войти';$('password').autocomplete=reg?'new-password':'current-password';$('authError').textContent=''}
+const $=id=>document.getElementById(id);
+let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],active=null,socket=null,retry=null;
+
+const api=async(path,opt={})=>{
+  opt.headers={...(opt.headers||{}),...(token?{Authorization:'Bearer '+token}:{})};
+  if(opt.body&&typeof opt.body!=='string'){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(opt.body)}
+  const r=await fetch(path,opt);let data=null;try{data=await r.json()}catch{}
+  if(!r.ok)throw new Error(data?.detail||'Ошибка сервера');return data
+};
+
+function setMode(next){
+  mode=next;const reg=next==='register';
+  $('tabLogin').classList.toggle('active',!reg);$('tabRegister').classList.toggle('active',reg);
+  $('nameField').classList.toggle('hidden',!reg);$('authSubmit').textContent=reg?'Создать аккаунт':'Войти';
+  $('password').autocomplete=reg?'new-password':'current-password';$('authError').textContent=''
+}
 $('tabLogin').onclick=()=>setMode('login');$('tabRegister').onclick=()=>setMode('register');
-$('authForm').onsubmit=async e=>{e.preventDefault();$('authError').textContent='';try{const body={username:$('username').value.trim(),password:$('password').value};if(mode==='register')body.display_name=$('displayName').value.trim();const data=await api(mode==='register'?'/api/register':'/api/login',{method:'POST',body});token=data.token;localStorage.setItem('svoi_token',token);await enter()}catch(err){$('authError').textContent=err.message}};
+
+$('authForm').onsubmit=async e=>{
+  e.preventDefault();$('authError').textContent='';
+  try{
+    const body={username:$('username').value.trim(),password:$('password').value};
+    if(mode==='register')body.display_name=$('displayName').value.trim();
+    const data=await api(mode==='register'?'/api/register':'/api/login',{method:'POST',body});
+    token=data.token;localStorage.setItem('svoi_token',token);await enter()
+  }catch(err){$('authError').textContent=err.message}
+};
+
 function initials(name){return(name||'?').trim().split(/\s+/).slice(0,2).map(x=>x[0]).join('').toUpperCase()}
-function showAuth(){me=null;peer=null;if(socket)socket.close();$('auth').classList.remove('hidden');$('app').classList.add('hidden')}
-async function enter(){try{me=await api('/api/me');$('meName').textContent=me.display_name;$('meUser').textContent='@'+me.username;$('auth').classList.add('hidden');$('app').classList.remove('hidden');await loadUsers();connectWs()}catch{token='';localStorage.removeItem('svoi_token');showAuth()}}
-async function loadUsers(){users=await api('/api/users');renderUsers();if(peer){peer=users.find(u=>u.id===peer.id)||peer;updatePeerHead()}}
-function renderUsers(){const box=$('users');box.replaceChildren();if(!users.length){box.innerHTML='<div class="muted" style="padding:18px">Пока кроме тебя никого нет. Зарегистрируй второй аккаунт на другом телефоне.</div>';return}for(const u of users){const b=document.createElement('button');b.className='user'+(peer?.id===u.id?' active':'');b.innerHTML='<span class="avatar">'+initials(u.display_name)+'</span><span class="txt"><strong></strong><small class="muted">@'+u.username+'</small></span><span class="dot '+(u.online?'on':'')+'"></span>';b.querySelector('strong').textContent=u.display_name;b.onclick=()=>openChat(u);box.append(b)}}
-async function openChat(u){peer=u;$('app').classList.add('chat-open');$('chatHead').classList.remove('hidden');$('composer').classList.remove('hidden');updatePeerHead();renderUsers();const msgs=await api('/api/messages/'+u.id);renderMessages(msgs);$('text').focus()}
-function updatePeerHead(){$('peerName').textContent=peer?.display_name||'';$('peerAvatar').textContent=initials(peer?.display_name);$('peerStatus').textContent=peer?.online?'в сети':'не в сети'}
-function msgNode(m){const d=document.createElement('div');d.className='bubble'+(m.sender_id===me.id?' mine':'');d.append(document.createTextNode(m.body));const t=document.createElement('time');t.textContent=new Date(m.created_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});d.append(t);return d}
-function renderMessages(items){const box=$('messages');box.replaceChildren();if(!items.length)box.innerHTML='<div class="empty">Сообщений пока нет. Напиши первым.</div>';else for(const m of items)box.append(msgNode(m));box.scrollTop=box.scrollHeight}
-function appendMessage(m){const box=$('messages');const empty=box.querySelector('.empty');if(empty)empty.remove();box.append(msgNode(m));box.scrollTop=box.scrollHeight}
+function showAuth(){me=null;active=null;if(socket)socket.close();$('auth').classList.remove('hidden');$('app').classList.add('hidden')}
+
+async function enter(){
+  try{
+    me=await api('/api/me');$('meName').textContent=me.display_name;$('meUser').textContent='@'+me.username;
+    $('auth').classList.add('hidden');$('app').classList.remove('hidden');
+    await Promise.all([loadUsers(),loadGroups()]);connectWs()
+  }catch{token='';localStorage.removeItem('svoi_token');showAuth()}
+}
+
+async function loadUsers(){users=await api('/api/users');renderUsers();if(active?.type==='user'){active.data=users.find(u=>u.id===active.data.id)||active.data;updateHead()}}
+async function loadGroups(){groups=await api('/api/groups');renderGroups();if(active?.type==='group'){active.data=groups.find(g=>g.id===active.data.id)||active.data;updateHead()}}
+
+function renderUsers(){
+  const box=$('users');box.replaceChildren();
+  if(!users.length){box.innerHTML='<div class="muted" style="padding:12px">Других пользователей пока нет.</div>';return}
+  for(const u of users){
+    const b=document.createElement('button');b.className='item'+(active?.type==='user'&&active.data.id===u.id?' active':'');
+    b.innerHTML='<span class="avatar">'+initials(u.display_name)+'</span><span class="txt"><strong></strong><small class="muted">@'+u.username+'</small></span><span class="dot '+(u.online?'on':'')+'"></span>';
+    b.querySelector('strong').textContent=u.display_name;b.onclick=()=>openUser(u);box.append(b)
+  }
+}
+
+function renderGroups(){
+  const box=$('groups');box.replaceChildren();
+  if(!groups.length){box.innerHTML='<div class="muted" style="padding:12px">Групп пока нет.</div>';return}
+  for(const g of groups){
+    const b=document.createElement('button');b.className='item'+(active?.type==='group'&&active.data.id===g.id?' active':'');
+    b.innerHTML='<span class="avatar group-avatar">#</span><span class="txt"><strong></strong><small class="muted">'+g.member_count+' участников</small></span>';
+    b.querySelector('strong').textContent=g.name;b.onclick=()=>openGroup(g);box.append(b)
+  }
+}
+
+async function openUser(u){
+  active={type:'user',data:u};$('app').classList.add('chat-open');$('chatHead').classList.remove('hidden');$('composer').classList.remove('hidden');
+  updateHead();renderUsers();renderGroups();const msgs=await api('/api/messages/'+u.id);renderMessages(msgs);$('text').focus()
+}
+
+async function openGroup(g){
+  active={type:'group',data:g};$('app').classList.add('chat-open');$('chatHead').classList.remove('hidden');$('composer').classList.remove('hidden');
+  updateHead();renderUsers();renderGroups();const msgs=await api('/api/groups/'+g.id+'/messages');renderMessages(msgs);$('text').focus()
+}
+
+function updateHead(){
+  if(!active)return;
+  if(active.type==='user'){
+    const u=active.data;$('chatName').textContent=u.display_name;$('chatAvatar').textContent=initials(u.display_name);$('chatAvatar').classList.remove('group-avatar');$('chatStatus').textContent=u.online?'в сети':'не в сети'
+  }else{
+    const g=active.data;$('chatName').textContent=g.name;$('chatAvatar').textContent='#';$('chatAvatar').classList.add('group-avatar');$('chatStatus').textContent=g.member_count+' участников'
+  }
+}
+
+function msgNode(m){
+  const d=document.createElement('div');d.className='bubble'+(m.sender_id===me.id?' mine':'');
+  if(active?.type==='group'&&m.sender_id!==me.id){const s=document.createElement('div');s.className='sender';s.textContent=m.sender_name||'Участник';d.append(s)}
+  d.append(document.createTextNode(m.body));const t=document.createElement('time');
+  t.textContent=new Date(m.created_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});d.append(t);return d
+}
+
+function renderMessages(items){
+  const box=$('messages');box.replaceChildren();
+  if(!items.length)box.innerHTML='<div class="empty">Сообщений пока нет. Напиши первым.</div>';
+  else for(const m of items)box.append(msgNode(m));box.scrollTop=box.scrollHeight
+}
+
+function appendMessage(m){
+  const box=$('messages');box.querySelector('.empty')?.remove();box.append(msgNode(m));box.scrollTop=box.scrollHeight
+}
+
 $('text').oninput=()=>{$('send').disabled=!$('text').value.trim();$('text').style.height='auto';$('text').style.height=Math.min(120,$('text').scrollHeight)+'px'};
-$('composer').onsubmit=async e=>{e.preventDefault();const body=$('text').value.trim();if(!body||!peer)return;try{const m=await api('/api/messages',{method:'POST',body:{recipient_id:peer.id,body}});appendMessage(m);$('text').value='';$('text').style.height='auto';$('send').disabled=true}catch(err){alert(err.message)}};
-function connectWs(){if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));socket.onmessage=e=>{const data=JSON.parse(e.data);if(data.type==='message'){const m=data.message;if(peer&&(m.sender_id===peer.id||m.recipient_id===peer.id))appendMessage(m);loadUsers().catch(()=>{})}};socket.onclose=()=>{clearTimeout(retry);if(token)retry=setTimeout(connectWs,2500)}}
+
+$('composer').onsubmit=async e=>{
+  e.preventDefault();const body=$('text').value.trim();if(!body||!active)return;
+  try{
+    const m=active.type==='user'
+      ?await api('/api/messages',{method:'POST',body:{recipient_id:active.data.id,body}})
+      :await api('/api/groups/'+active.data.id+'/messages',{method:'POST',body:{body}});
+    appendMessage(m);$('text').value='';$('text').style.height='auto';$('send').disabled=true
+  }catch(err){alert(err.message)}
+};
+
+function connectWs(){
+  if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';
+  socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));
+  socket.onmessage=e=>{
+    const data=JSON.parse(e.data);
+    if(data.type==='message'){
+      const m=data.message;
+      if(active?.type==='user'&&(m.sender_id===active.data.id||m.recipient_id===active.data.id))appendMessage(m);
+      loadUsers().catch(()=>{})
+    }
+    if(data.type==='group_message'){
+      const m=data.message;
+      if(active?.type==='group'&&m.group_id===active.data.id)appendMessage(m);
+      loadGroups().catch(()=>{})
+    }
+    if(data.type==='group_created')loadGroups().catch(()=>{})
+  };
+  socket.onclose=()=>{clearTimeout(retry);if(token)retry=setTimeout(connectWs,2500)}
+}
+
+$('newGroup').onclick=()=>{
+  $('groupName').value='';$('groupError').textContent='';const box=$('memberList');box.replaceChildren();
+  if(!users.length)box.innerHTML='<div class="muted">Сначала нужен хотя бы один другой пользователь.</div>';
+  for(const u of users){
+    const row=document.createElement('label');row.className='member-row';
+    row.innerHTML='<input type="checkbox" value="'+u.id+'"><span><strong></strong><br><small class="muted">@'+u.username+'</small></span>';
+    row.querySelector('strong').textContent=u.display_name;box.append(row)
+  }
+  $('groupDialog').showModal()
+};
+
+$('cancelGroup').onclick=()=>$('groupDialog').close();
+
+$('createGroup').onclick=async()=>{
+  const name=$('groupName').value.trim();const member_ids=[...$('memberList').querySelectorAll('input:checked')].map(x=>Number(x.value));
+  if(!name){$('groupError').textContent='Укажи название группы';return}
+  try{
+    const g=await api('/api/groups',{method:'POST',body:{name,member_ids}});
+    $('groupDialog').close();await loadGroups();await openGroup(g)
+  }catch(err){$('groupError').textContent=err.message}
+};
+
 $('logout').onclick=async()=>{try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
 $('back').onclick=()=>{$('app').classList.remove('chat-open')};
+
 if(token)enter();else showAuth();
 </script></body></html>
