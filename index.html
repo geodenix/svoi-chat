@@ -7,9 +7,9 @@
 :root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#eef4ff;background:#09111f}*{box-sizing:border-box}body{margin:0}button,input,textarea{font:inherit}.hidden{display:none!important}
 .auth{min-height:100dvh;display:grid;place-items:center;padding:20px;background:radial-gradient(circle at top,#18375e,#09111f 65%)}.auth-card{width:min(420px,100%);background:#111f34;border:1px solid #293d58;border-radius:24px;padding:26px}.brand{display:flex;align-items:center;gap:12px;margin-bottom:22px}.mark{width:48px;height:48px;border-radius:16px;display:grid;place-items:center;background:#2b86fa;font-size:25px;font-weight:800}.auth h1{margin:0}.muted{color:#aab9cf}.tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:18px 0}.tabs button,.auth button{border:0;border-radius:12px;padding:12px;background:#203552;color:#eef4ff}.tabs .active,.primary{background:#2b86fa!important}.field{margin:12px 0}.field label{display:block;font-size:13px;color:#b7c5d9;margin-bottom:6px}.field input{width:100%;border:1px solid #354b68;background:#0c1728;color:#fff;border-radius:12px;padding:12px}.error{color:#ffb4b4;min-height:22px}
 .app{height:100dvh;display:grid;grid-template-columns:330px 1fr;background:#0d1829}.sidebar{border-right:1px solid #26364d;display:flex;flex-direction:column;min-width:0}.side-head{padding:18px;border-bottom:1px solid #26364d;display:flex;align-items:center;gap:10px}.side-head .me{min-width:0;flex:1}.side-head strong,.side-head small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.logout{border:1px solid #334965;background:#17283f;color:#fff;border-radius:10px;padding:8px 10px}.scroll{overflow:auto;flex:1}.section-head{padding:14px 14px 8px;display:flex;align-items:center;justify-content:space-between}.section-head span{font-size:12px;color:#8fa3be;text-transform:uppercase;letter-spacing:.08em}.new-group{border:0;background:#244f7e;color:#fff;border-radius:10px;padding:7px 10px}.list{padding:0 8px 8px}.item{width:100%;border:0;background:transparent;color:#fff;text-align:left;display:flex;gap:12px;align-items:center;padding:12px;border-radius:14px}.item:hover,.item.active{background:#1a304d}.avatar{width:44px;height:44px;border-radius:15px;background:#244f7e;display:grid;place-items:center;font-weight:700;flex-shrink:0}.group-avatar{background:#5a3d85}.item .txt{min-width:0;flex:1}.item strong,.item small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dot{width:9px;height:9px;border-radius:50%;background:#54647b}.dot.on{background:#45d78e}
-.chat{display:flex;flex-direction:column;min-width:0;min-height:0}.chat-head{height:74px;padding:14px 20px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #26364d}.back{display:none;border:0;background:#1b2e49;color:white;border-radius:11px;width:42px;height:42px}.chat-title{min-width:0}.chat-title strong,.chat-title small{display:block}.messages{flex:1;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:10px;background:radial-gradient(ellipse at top,#132944,transparent 72%)}.empty{margin:auto;text-align:center;color:#9fb0c8;max-width:320px}.bubble{max-width:min(78%,560px);padding:10px 13px;border-radius:17px 17px 17px 5px;background:#1c2d45;align-self:flex-start;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.mine{align-self:flex-end;background:#2565b5;border-radius:17px 17px 5px 17px}.sender{font-size:12px;font-weight:700;color:#8ec4ff;margin-bottom:4px}.meta{display:flex;justify-content:flex-end;align-items:center;gap:5px;margin-top:4px;font-size:11px;color:#c1d1e7}.receipt.read{color:#8ec4ff;font-weight:700}.bubble time{font-size:11px;color:inherit}.pending-file{display:flex;align-items:center;gap:10px;padding:8px 18px;background:#101e31;border-top:1px solid #26364d;color:#cbd8ea}.pending-file span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pending-file button{border:0;background:#263a56;color:#fff;border-radius:10px;width:32px;height:32px}.composer{display:flex;gap:10px;align-items:flex-end;padding:12px 18px max(12px,env(safe-area-inset-bottom));border-top:1px solid #26364d}.composer textarea{flex:1;resize:none;max-height:120px;min-height:48px;border:1px solid #354b68;background:#15263d;color:#fff;border-radius:16px;padding:12px 14px}.attach,.send{width:48px;height:48px;border:0;border-radius:15px;color:white;font-size:22px;flex-shrink:0}.attach{background:#203552}.send{background:#2b86fa}.send:disabled,.attach:disabled{opacity:.4}.attachment-img{display:block;max-width:min(100%,360px);max-height:360px;border-radius:12px;margin-top:6px;object-fit:cover}.attachment-file{display:flex;gap:8px;align-items:center;margin-top:6px;padding:10px 12px;border-radius:12px;background:#101d2f;color:#dcecff;text-decoration:none}.attachment-file small{opacity:.75}.welcome{margin:auto;text-align:center;color:#9fb0c8}.welcome .mark{margin:0 auto 16px}
+.chat{display:flex;flex-direction:column;min-width:0;min-height:0}.chat-head{height:74px;padding:14px 20px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #26364d}.back{display:none;border:0;background:#1b2e49;color:white;border-radius:11px;width:42px;height:42px}.chat-title{min-width:0;flex:1}.chat-title strong,.chat-title small{display:block}.call-actions{display:flex;gap:8px}.call-btn{width:42px;height:42px;border:0;border-radius:13px;background:#1b3658;color:#fff;font-size:20px}.call-btn:disabled{opacity:.4}.messages{flex:1;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:10px;background:radial-gradient(ellipse at top,#132944,transparent 72%)}.empty{margin:auto;text-align:center;color:#9fb0c8;max-width:320px}.bubble{max-width:min(78%,560px);padding:10px 13px;border-radius:17px 17px 17px 5px;background:#1c2d45;align-self:flex-start;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.mine{align-self:flex-end;background:#2565b5;border-radius:17px 17px 5px 17px}.sender{font-size:12px;font-weight:700;color:#8ec4ff;margin-bottom:4px}.meta{display:flex;justify-content:flex-end;align-items:center;gap:5px;margin-top:4px;font-size:11px;color:#c1d1e7}.receipt.read{color:#8ec4ff;font-weight:700}.bubble time{font-size:11px;color:inherit}.pending-file{display:flex;align-items:center;gap:10px;padding:8px 18px;background:#101e31;border-top:1px solid #26364d;color:#cbd8ea}.pending-file span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pending-file button{border:0;background:#263a56;color:#fff;border-radius:10px;width:32px;height:32px}.composer{display:flex;gap:10px;align-items:flex-end;padding:12px 18px max(12px,env(safe-area-inset-bottom));border-top:1px solid #26364d}.composer textarea{flex:1;resize:none;max-height:120px;min-height:48px;border:1px solid #354b68;background:#15263d;color:#fff;border-radius:16px;padding:12px 14px}.attach,.send{width:48px;height:48px;border:0;border-radius:15px;color:white;font-size:22px;flex-shrink:0}.attach{background:#203552}.send{background:#2b86fa}.send:disabled,.attach:disabled{opacity:.4}.attachment-img{display:block;max-width:min(100%,360px);max-height:360px;border-radius:12px;margin-top:6px;object-fit:cover}.attachment-file{display:flex;gap:8px;align-items:center;margin-top:6px;padding:10px 12px;border-radius:12px;background:#101d2f;color:#dcecff;text-decoration:none}.attachment-file small{opacity:.75}.welcome{margin:auto;text-align:center;color:#9fb0c8}.welcome .mark{margin:0 auto 16px}.call-overlay{position:fixed;inset:0;z-index:1000;background:#07101eeF;display:flex;align-items:center;justify-content:center;padding:18px}.call-shell{position:relative;width:min(100%,760px);height:min(88dvh,760px);border:1px solid #2b405c;border-radius:26px;background:#0b1728;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 70px #0008}.call-stage{position:relative;flex:1;min-height:0;background:#050b14;display:grid;place-items:center}.remote-video{width:100%;height:100%;object-fit:cover;background:#050b14}.local-video{position:absolute;right:14px;top:14px;width:min(30%,180px);aspect-ratio:3/4;object-fit:cover;border-radius:16px;border:2px solid #ffffff55;background:#101a29;box-shadow:0 8px 25px #0008}.call-avatar{position:absolute;width:112px;height:112px;border-radius:36px;background:#244f7e;display:grid;place-items:center;font-size:40px;font-weight:700}.call-info{position:absolute;left:0;right:0;bottom:24px;text-align:center;text-shadow:0 2px 8px #000}.call-info strong{display:block;font-size:24px}.call-info span{display:block;margin-top:5px;color:#c8d6e8}.call-controls{display:flex;justify-content:center;gap:12px;padding:16px;background:#0e1b2d;flex-wrap:wrap}.round-call{width:56px;height:56px;border:0;border-radius:50%;background:#223955;color:#fff;font-size:23px}.round-call.off{background:#844047}.round-call.end{background:#d7424b}.incoming-actions{display:flex;justify-content:center;gap:28px;padding:18px;background:#0e1b2d}.incoming-actions button{width:68px;height:68px;border:0;border-radius:50%;color:#fff;font-size:27px}.accept-call{background:#2da96a}.reject-call{background:#d7424b}
 dialog{width:min(92vw,460px);border:1px solid #334965;border-radius:20px;background:#111f34;color:#fff;padding:20px}dialog::backdrop{background:#000a}.member-list{max-height:300px;overflow:auto;margin:14px 0}.member-row{display:flex;align-items:center;gap:10px;padding:10px;border-radius:10px;background:#17283f;margin-bottom:8px}.member-row input{width:20px;height:20px}.dialog-actions{display:flex;gap:10px}.dialog-actions button{flex:1;border:0;border-radius:12px;padding:12px;color:#fff;background:#203552}.dialog-actions .primary{background:#2b86fa}.dialog-title{margin:0 0 8px}.group-name{width:100%;border:1px solid #354b68;background:#0c1728;color:#fff;border-radius:12px;padding:12px}
-@media(max-width:720px){.app{display:block}.sidebar{height:100dvh}.chat{height:100dvh;display:none}.app.chat-open .sidebar{display:none}.app.chat-open .chat{display:flex}.back{display:block}.side-head{padding-top:max(18px,env(safe-area-inset-top))}}
+@media(max-width:720px){.app{display:block}.sidebar{height:100dvh}.chat{height:100dvh;display:none}.app.chat-open .sidebar{display:none}.app.chat-open .chat{display:flex}.back{display:block}.side-head{padding-top:max(18px,env(safe-area-inset-top))}.call-shell{width:100%;height:100dvh;border-radius:0;border:0}.call-overlay{padding:0}.local-video{width:30%;max-width:145px}}
 </style></head>
 <body>
 <div id="auth" class="auth">
@@ -36,11 +36,32 @@ dialog{width:min(92vw,460px);border:1px solid #334965;border-radius:20px;backgro
   </aside>
 
   <main class="chat">
-    <div id="chatHead" class="chat-head hidden"><button id="back" class="back">←</button><div class="avatar" id="chatAvatar"></div><div class="chat-title"><strong id="chatName"></strong><small id="chatStatus" class="muted"></small></div></div>
+    <div id="chatHead" class="chat-head hidden"><button id="back" class="back">←</button><div class="avatar" id="chatAvatar"></div><div class="chat-title"><strong id="chatName"></strong><small id="chatStatus" class="muted"></small></div><div id="callActions" class="call-actions hidden"><button id="audioCallBtn" class="call-btn" type="button" title="Голосовой звонок">📞</button><button id="videoCallBtn" class="call-btn" type="button" title="Видеозвонок">🎥</button></div></div>
     <div id="messages" class="messages"><div class="welcome"><div class="mark">С</div><h2>Выбери чат</h2><p>Личные и групповые сообщения приходят в реальном времени.</p></div></div>
     <div id="pendingFile" class="pending-file hidden"><span id="pendingFileName"></span><button id="removeFile" type="button">×</button></div>
     <form id="composer" class="composer hidden"><button id="attach" class="attach" type="button" aria-label="Прикрепить файл">📎</button><input id="fileInput" type="file" hidden><textarea id="text" placeholder="Сообщение…" maxlength="4000" rows="1"></textarea><button id="send" class="send" disabled>↑</button></form>
   </main>
+</div>
+
+<div id="callOverlay" class="call-overlay hidden">
+  <div class="call-shell">
+    <div class="call-stage">
+      <video id="remoteVideo" class="remote-video" autoplay playsinline></video>
+      <div id="callAvatar" class="call-avatar">С</div>
+      <video id="localVideo" class="local-video hidden" autoplay muted playsinline></video>
+      <div class="call-info"><strong id="callName">Звонок</strong><span id="callStatus">Соединение…</span></div>
+    </div>
+    <div id="incomingActions" class="incoming-actions hidden">
+      <button id="rejectCall" class="reject-call" type="button" title="Отклонить">✕</button>
+      <button id="acceptCall" class="accept-call" type="button" title="Принять">✓</button>
+    </div>
+    <div id="activeCallControls" class="call-controls hidden">
+      <button id="muteCall" class="round-call" type="button" title="Микрофон">🎤</button>
+      <button id="cameraCall" class="round-call" type="button" title="Камера">📷</button>
+      <button id="switchCamera" class="round-call" type="button" title="Сменить камеру">🔄</button>
+      <button id="endCall" class="round-call end" type="button" title="Завершить">☎</button>
+    </div>
+  </div>
 </div>
 
 <dialog id="groupDialog">
@@ -55,6 +76,7 @@ dialog{width:min(92vw,460px);border:1px solid #334965;border-radius:20px;backgro
 <script>
 const $=id=>document.getElementById(id);
 let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false;
+let currentCall=null,pendingCall=null,pendingIce=[],cameraFacing='user';
 
 const api=async(path,opt={})=>{
   opt.headers={...(opt.headers||{}),...(token?{Authorization:'Bearer '+token}:{})};
@@ -136,9 +158,11 @@ async function openGroup(g){
 function updateHead(){
   if(!active)return;
   if(active.type==='user'){
-    const u=active.data;$('chatName').textContent=u.display_name;$('chatAvatar').textContent=initials(u.display_name);$('chatAvatar').classList.remove('group-avatar');$('chatStatus').textContent=u.online?'в сети':'не в сети'
+    const u=active.data;$('chatName').textContent=u.display_name;$('chatAvatar').textContent=initials(u.display_name);$('chatAvatar').classList.remove('group-avatar');$('chatStatus').textContent=u.online?'в сети':'не в сети';
+    $('callActions').classList.remove('hidden');$('audioCallBtn').disabled=!u.online;$('videoCallBtn').disabled=!u.online
   }else{
-    const g=active.data;$('chatName').textContent=g.name;$('chatAvatar').textContent='#';$('chatAvatar').classList.add('group-avatar');$('chatStatus').textContent=g.member_count+' участников'
+    const g=active.data;$('chatName').textContent=g.name;$('chatAvatar').textContent='#';$('chatAvatar').classList.add('group-avatar');$('chatStatus').textContent=g.member_count+' участников';
+    $('callActions').classList.add('hidden')
   }
 }
 
@@ -286,11 +310,210 @@ async function removePushSubscription(){
   }catch{}
 }
 
+const RTC_CONFIG={iceServers:[
+  {urls:'stun:stun.l.google.com:19302'},
+  {urls:'stun:stun1.l.google.com:19302'}
+]};
+
+function wsSend(payload){
+  if(!socket||socket.readyState!==WebSocket.OPEN)throw new Error('Нет соединения с сервером');
+  socket.send(JSON.stringify(payload))
+}
+
+function callId(){return crypto.randomUUID?crypto.randomUUID():(Date.now()+'-'+Math.random().toString(16).slice(2))}
+
+function showCallUi(name,status,video,incoming=false){
+  $('callOverlay').classList.remove('hidden');$('callName').textContent=name||'Звонок';$('callStatus').textContent=status;
+  $('callAvatar').textContent=initials(name||'С');$('callAvatar').classList.toggle('hidden',video);
+  $('localVideo').classList.toggle('hidden',!video);
+  $('incomingActions').classList.toggle('hidden',!incoming);
+  $('activeCallControls').classList.toggle('hidden',incoming);
+  $('cameraCall').classList.toggle('hidden',!video);$('switchCamera').classList.toggle('hidden',!video)
+}
+
+function resetCallUi(){
+  $('callOverlay').classList.add('hidden');$('remoteVideo').srcObject=null;$('localVideo').srcObject=null;
+  $('incomingActions').classList.add('hidden');$('activeCallControls').classList.add('hidden');
+  $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off')
+}
+
+async function getCallMedia(video){
+  return navigator.mediaDevices.getUserMedia({
+    audio:true,
+    video:video?{facingMode:{ideal:cameraFacing}}:false
+  })
+}
+
+async function createPeer(peerId,peerName,id,video,stream){
+  const pc=new RTCPeerConnection(RTC_CONFIG);
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:false};
+  for(const track of stream.getTracks())pc.addTrack(track,stream);
+  $('localVideo').srcObject=stream;
+  pc.ontrack=e=>{
+    const stream=e.streams?.[0];
+    if(stream)$('remoteVideo').srcObject=stream;
+    $('callStatus').textContent='Соединено'
+  };
+  pc.onicecandidate=e=>{
+    if(!e.candidate||!currentCall)return;
+    try{wsSend({type:'ice_candidate',to_user_id:peerId,call_id:id,candidate:e.candidate.toJSON()})}catch{}
+  };
+  pc.onconnectionstatechange=()=>{
+    if(!currentCall||currentCall.pc!==pc)return;
+    const state=pc.connectionState;
+    if(state==='connected')$('callStatus').textContent='Соединено';
+    else if(state==='connecting')$('callStatus').textContent='Соединение…';
+    else if(state==='failed'){ $('callStatus').textContent='Не удалось соединиться'; setTimeout(()=>finishCall(false),1200) }
+    else if(state==='closed')finishCall(false)
+  };
+  return pc
+}
+
+async function flushPendingIce(){
+  if(!currentCall?.pc?.remoteDescription)return;
+  const list=pendingIce.splice(0);
+  for(const candidate of list){
+    try{await currentCall.pc.addIceCandidate(new RTCIceCandidate(candidate))}catch{}
+  }
+}
+
+async function startCall(video){
+  if(active?.type!=='user'||currentCall||pendingCall)return;
+  const u=active.data;
+  if(!u.online){alert('Пользователь сейчас не в сети');return}
+  if(!navigator.mediaDevices?.getUserMedia){alert('Браузер не поддерживает звонки');return}
+  try{
+    const stream=await getCallMedia(video);
+    const id=callId();pendingIce=[];
+    const pc=await createPeer(u.id,u.display_name,id,video,stream);
+    showCallUi(u.display_name,'Вызов…',video,false);
+    const offer=await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    wsSend({type:'call_offer',to_user_id:u.id,call_id:id,video,sdp:pc.localDescription.toJSON?pc.localDescription.toJSON():pc.localDescription})
+  }catch(err){
+    finishCall(false);
+    alert(err.name==='NotAllowedError'?'Нужен доступ к микрофону/камере':(err.message||'Не удалось начать звонок'))
+  }
+}
+
+function incomingCall(data){
+  if(currentCall||pendingCall){
+    try{wsSend({type:'call_reject',to_user_id:data.from_user_id,call_id:data.call_id})}catch{}
+    return
+  }
+  pendingIce=[];pendingCall=data;
+  showCallUi(data.from_name,data.video?'Входящий видеозвонок':'Входящий голосовой звонок',data.video,true)
+}
+
+async function acceptIncomingCall(){
+  if(!pendingCall)return;
+  const data=pendingCall;pendingCall=null;
+  try{
+    const stream=await getCallMedia(!!data.video);
+    const pc=await createPeer(data.from_user_id,data.from_name,data.call_id,!!data.video,stream);
+    showCallUi(data.from_name,'Соединение…',!!data.video,false);
+    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    await flushPendingIce();
+    const answer=await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    wsSend({type:'call_answer',to_user_id:data.from_user_id,call_id:data.call_id,video:!!data.video,sdp:pc.localDescription.toJSON?pc.localDescription.toJSON():pc.localDescription})
+  }catch(err){
+    try{wsSend({type:'call_reject',to_user_id:data.from_user_id,call_id:data.call_id})}catch{}
+    finishCall(false);
+    alert(err.name==='NotAllowedError'?'Нужен доступ к микрофону/камере':(err.message||'Не удалось принять звонок'))
+  }
+}
+
+function rejectIncomingCall(){
+  if(!pendingCall)return;
+  try{wsSend({type:'call_reject',to_user_id:pendingCall.from_user_id,call_id:pendingCall.call_id})}catch{}
+  pendingCall=null;pendingIce=[];resetCallUi()
+}
+
+function finishCall(notify=true){
+  if(notify&&currentCall){
+    try{wsSend({type:'call_end',to_user_id:currentCall.peerId,call_id:currentCall.callId})}catch{}
+  }
+  if(currentCall){
+    try{currentCall.pc.onicecandidate=null;currentCall.pc.ontrack=null;currentCall.pc.close()}catch{}
+    try{currentCall.localStream?.getTracks().forEach(t=>t.stop())}catch{}
+  }
+  currentCall=null;pendingCall=null;pendingIce=[];resetCallUi()
+}
+
+async function handleCallSignal(data){
+  if(data.type==='call_offer'){incomingCall(data);return}
+  if(data.type==='call_unavailable'){
+    if(currentCall&&currentCall.callId===data.call_id){alert('Пользователь сейчас недоступен');finishCall(false)}
+    return
+  }
+  if(data.type==='call_reject'){
+    if(currentCall&&currentCall.callId===data.call_id){$('callStatus').textContent='Звонок отклонён';setTimeout(()=>finishCall(false),900)}
+    return
+  }
+  if(data.type==='call_end'){
+    if((currentCall&&currentCall.callId===data.call_id)||(pendingCall&&pendingCall.call_id===data.call_id)){finishCall(false)}
+    return
+  }
+  if(data.type==='ice_candidate'){
+    if(currentCall&&currentCall.callId===data.call_id&&currentCall.pc.remoteDescription){
+      try{await currentCall.pc.addIceCandidate(new RTCIceCandidate(data.candidate))}catch{}
+    }else if((currentCall&&currentCall.callId===data.call_id)||(pendingCall&&pendingCall.call_id===data.call_id)){
+      pendingIce.push(data.candidate)
+    }
+    return
+  }
+  if(data.type==='call_answer'){
+    if(!currentCall||currentCall.callId!==data.call_id)return;
+    try{
+      await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      await flushPendingIce();$('callStatus').textContent='Соединение…'
+    }catch{finishCall(false)}
+  }
+}
+
+$('audioCallBtn').onclick=()=>startCall(false);
+$('videoCallBtn').onclick=()=>startCall(true);
+$('acceptCall').onclick=acceptIncomingCall;
+$('rejectCall').onclick=rejectIncomingCall;
+$('endCall').onclick=()=>finishCall(true);
+
+$('muteCall').onclick=()=>{
+  if(!currentCall)return;
+  currentCall.muted=!currentCall.muted;
+  currentCall.localStream.getAudioTracks().forEach(t=>t.enabled=!currentCall.muted);
+  $('muteCall').classList.toggle('off',currentCall.muted);$('muteCall').textContent=currentCall.muted?'🔇':'🎤'
+};
+
+$('cameraCall').onclick=()=>{
+  if(!currentCall?.video)return;
+  currentCall.cameraOff=!currentCall.cameraOff;
+  currentCall.localStream.getVideoTracks().forEach(t=>t.enabled=!currentCall.cameraOff);
+  $('cameraCall').classList.toggle('off',currentCall.cameraOff);$('cameraCall').textContent=currentCall.cameraOff?'🚫':'📷'
+};
+
+$('switchCamera').onclick=async()=>{
+  if(!currentCall?.video)return;
+  try{
+    cameraFacing=cameraFacing==='user'?'environment':'user';
+    const newStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:cameraFacing}},audio:false});
+    const newTrack=newStream.getVideoTracks()[0];
+    const sender=currentCall.pc.getSenders().find(s=>s.track?.kind==='video');
+    if(sender)await sender.replaceTrack(newTrack);
+    const oldTrack=currentCall.localStream.getVideoTracks()[0];
+    if(oldTrack){currentCall.localStream.removeTrack(oldTrack);oldTrack.stop()}
+    currentCall.localStream.addTrack(newTrack);$('localVideo').srcObject=currentCall.localStream
+  }catch(err){alert('Не удалось переключить камеру')}
+};
+
 function connectWs(){
   if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';
   socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));
   socket.onmessage=e=>{
     const data=JSON.parse(e.data);
+    if(['call_offer','call_answer','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
+      handleCallSignal(data);return
+    }
     if(data.type==='message'){
       const m=data.message;
       if(active?.type==='user'&&(m.sender_id===active.data.id||m.recipient_id===active.data.id)){
@@ -317,7 +540,7 @@ function connectWs(){
     }
     if(data.type==='group_created')loadGroups().catch(()=>{})
   };
-  socket.onclose=()=>{clearTimeout(retry);if(token)retry=setTimeout(connectWs,2500)}
+  socket.onclose=()=>{if(currentCall||pendingCall)finishCall(false);clearTimeout(retry);if(token)retry=setTimeout(connectWs,2500)}
 }
 
 $('newGroup').onclick=()=>{
@@ -342,7 +565,7 @@ $('createGroup').onclick=async()=>{
   }catch(err){$('groupError').textContent=err.message}
 };
 
-$('logout').onclick=async()=>{await removePushSubscription();try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
+$('logout').onclick=async()=>{if(currentCall||pendingCall)finishCall(true);await removePushSubscription();try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
 $('back').onclick=()=>{$('app').classList.remove('chat-open')};
 
 if(token)enter();else showAuth();
