@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/svoi-chat
 Environment=SVOI_DATA_DIR=/opt/svoi-chat/data
+EnvironmentFile=-/etc/svoi-chat.env
 ExecStart=/opt/svoi-chat/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8010
 Restart=always
 RestartSec=3
