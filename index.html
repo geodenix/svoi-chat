@@ -52,7 +52,7 @@
   </aside>
 
   <main class="chat">
-    <div id="chatHead" class="chat-head hidden"><button id="back" class="back">←</button><div class="avatar" id="chatAvatar"></div><input id="groupAvatarInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="chat-title"><strong id="chatName"></strong><small id="chatStatus" class="muted"></small></div><div id="callActions" class="call-actions hidden"><button id="groupMembersBtn" class="call-btn hidden" type="button" title="Участники группы">👥</button><button id="audioCallBtn" class="call-btn" type="button" title="Голосовой звонок">📞</button><button id="videoCallBtn" class="call-btn" type="button" title="Видеозвонок">🎥</button></div></div>
+    <div id="chatHead" class="chat-head hidden"><button id="back" class="back">←</button><div class="avatar" id="chatAvatar"></div><input id="groupAvatarInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="chat-title"><strong id="chatName"></strong><small id="chatStatus" class="muted"></small></div><div id="callActions" class="call-actions hidden"><button id="groupRenameBtn" class="call-btn hidden" type="button" title="Изменить название группы">✏️</button><button id="groupMembersBtn" class="call-btn hidden" type="button" title="Участники группы">👥</button><button id="audioCallBtn" class="call-btn" type="button" title="Голосовой звонок">📞</button><button id="videoCallBtn" class="call-btn" type="button" title="Видеозвонок">🎥</button></div></div>
     <div id="messages" class="messages"><div class="welcome"><div class="mark">С</div><h2>Выбери чат</h2><p>Личные и групповые сообщения приходят в реальном времени.</p></div></div>
     <div id="pendingFile" class="pending-file hidden"><span id="pendingFileName"></span><button id="removeFile" type="button">×</button></div>
     <div id="recordingPanel" class="recording-panel hidden">
@@ -137,6 +137,14 @@
   <div class="calls-dialog-body">
     <div id="calls" class="call-list"></div>
   </div>
+</dialog>
+
+<dialog id="groupRenameDialog">
+  <h2 class="dialog-title">Название группы</h2>
+  <p class="muted">Новое название увидят все участники.</p>
+  <input id="groupRenameInput" class="group-name" maxlength="80" autocomplete="off" placeholder="Название группы">
+  <div class="dialog-actions"><button id="cancelGroupRename" type="button">Отмена</button><button id="saveGroupRename" class="primary" type="button">Сохранить</button></div>
+  <div id="groupRenameError" class="error"></div>
 </dialog>
 
 <dialog id="groupMembersDialog" class="group-members-dialog">
@@ -629,12 +637,14 @@ function renderGroups(){
 
 async function openUser(u){
   if($('groupMembersDialog').open)$('groupMembersDialog').close();
+  if($('groupRenameDialog').open)$('groupRenameDialog').close();
   active={type:'user',data:u};$('app').classList.add('chat-open');$('chatHead').classList.remove('hidden');$('composer').classList.remove('hidden');
   updateHead();renderUsers();renderGroups();const msgs=await api('/api/messages/'+u.id);renderMessages(msgs);$('text').focus()
 }
 
 async function openGroup(g){
   if($('groupMembersDialog').open)$('groupMembersDialog').close();
+  if($('groupRenameDialog').open)$('groupRenameDialog').close();
   active={type:'group',data:g};$('app').classList.add('chat-open');$('chatHead').classList.remove('hidden');$('composer').classList.remove('hidden');
   updateHead();renderUsers();renderGroups();const msgs=await api('/api/groups/'+g.id+'/messages');renderMessages(msgs);$('text').focus()
 }
@@ -644,6 +654,7 @@ function updateHead(){
   if(active.type==='user'){
     const u=active.data;$('chatName').textContent=u.display_name;$('chatAvatar').classList.remove('group-avatar');setAvatar($('chatAvatar'),u);$('chatStatus').textContent=u.online?'в сети':'не в сети';
     $('chatAvatar').style.cursor='default';$('chatAvatar').title='Аватар пользователя';
+    $('groupRenameBtn').classList.add('hidden');
     $('groupMembersBtn').classList.add('hidden');
     $('callActions').classList.remove('hidden');$('audioCallBtn').disabled=false;$('videoCallBtn').disabled=false
   }else{
@@ -651,6 +662,7 @@ function updateHead(){
     const canEditAvatar=!!g.is_admin;
     $('chatAvatar').style.cursor=canEditAvatar?'pointer':'default';
     $('chatAvatar').title=canEditAvatar?'Изменить аватар группы':'Аватар группы';
+    $('groupRenameBtn').classList.toggle('hidden',!g.is_admin);
     $('groupMembersBtn').classList.remove('hidden');
     $('callActions').classList.remove('hidden');$('audioCallBtn').disabled=false;$('videoCallBtn').disabled=false
   }
@@ -2551,6 +2563,7 @@ function connectWs(){
         leaveGroupCall(true)
       }
       if($('groupMembersDialog').open)$('groupMembersDialog').close();
+      if($('groupRenameDialog').open)$('groupRenameDialog').close();
 
       groups=groups.filter(g=>Number(g.id)!==removedGroupId);
       if(active?.type==='group'&&Number(active.data.id)===removedGroupId){
@@ -2592,6 +2605,12 @@ function connectWs(){
         if($('groupMembersDialog').open){
           loadGroupMembers(updated.id).catch(()=>{})
         }
+        if($('groupRenameDialog').open){
+          $('groupRenameInput').value=updated.name||''
+        }
+      }
+      if(groupCallState&&Number(groupCallState.groupId)===Number(updated.id)){
+        $('groupCallName').textContent=updated.name
       }
       renderGroups();
       return
@@ -2600,6 +2619,53 @@ function connectWs(){
   };
   socket.onclose=()=>{if(currentCall||pendingCall)finishCall(false);clearTimeout(retry);if(token)retry=setTimeout(connectWs,2500)}
 }
+
+$('groupRenameBtn').onclick=()=>{
+  if(active?.type!=='group'||!active.data.is_admin)return;
+  $('groupRenameInput').value=active.data.name||'';
+  $('groupRenameError').textContent='';
+  $('groupRenameDialog').showModal();
+  setTimeout(()=>{$('groupRenameInput').focus();$('groupRenameInput').select()},0)
+};
+
+$('cancelGroupRename').onclick=()=>$('groupRenameDialog').close();
+
+$('saveGroupRename').onclick=async()=>{
+  if(active?.type!=='group'||!active.data.is_admin)return;
+  const name=$('groupRenameInput').value.trim();
+  if(!name){
+    $('groupRenameError').textContent='Название группы не может быть пустым';
+    return
+  }
+
+  const button=$('saveGroupRename');
+  button.disabled=true;
+  $('groupRenameError').textContent='';
+  try{
+    const updated=await api('/api/groups/'+active.data.id,{
+      method:'PATCH',
+      body:{name}
+    });
+    groups=groups.map(g=>g.id===updated.id?updated:g);
+    if(active?.type==='group'&&active.data.id===updated.id){
+      active.data=updated;
+      updateHead()
+    }
+    renderGroups();
+    $('groupRenameDialog').close()
+  }catch(err){
+    $('groupRenameError').textContent=err.message||'Не удалось изменить название'
+  }finally{
+    button.disabled=false
+  }
+};
+
+$('groupRenameInput').addEventListener('keydown',event=>{
+  if(event.key==='Enter'){
+    event.preventDefault();
+    $('saveGroupRename').click()
+  }
+});
 
 $('groupMembersBtn').onclick=()=>openGroupMembers();
 $('closeGroupMembers').onclick=()=>$('groupMembersDialog').close();
