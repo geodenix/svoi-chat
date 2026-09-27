@@ -1768,6 +1768,7 @@ async def forward_message(
         "deleted_at": None,
         "forwarded": True,
         "mentioned_me": user["id"] in mention_ids,
+        "has_mentions": bool(mention_ids),
         "can_delete": True,
         "can_restore": False,
     }
@@ -2207,6 +2208,10 @@ def get_group_messages(
                     SELECT 1 FROM group_message_mentions gmm
                     WHERE gmm.message_id=gm.id AND gmm.user_id=?
                   ) AS mentioned_me,
+                  EXISTS(
+                    SELECT 1 FROM group_message_mentions gmm_any
+                    WHERE gmm_any.message_id=gm.id
+                  ) AS has_mentions,
                   u.display_name AS sender_name,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
@@ -2235,6 +2240,7 @@ def get_group_messages(
             "deleted_at": row["deleted_at"],
             "forwarded": bool(row["forwarded"]),
             "mentioned_me": bool(row["mentioned_me"]) and not deleted,
+            "has_mentions": bool(row["has_mentions"]) and not deleted,
             "can_delete": (
                 not deleted
                 and (is_admin or row["sender_id"] == user["id"])
@@ -2303,6 +2309,7 @@ async def send_group_message(
         "deleted_at": None,
         "forwarded": False,
         "mentioned_me": user["id"] in mention_ids,
+        "has_mentions": bool(mention_ids),
         "can_delete": True,
         "can_restore": False,
     }
@@ -2431,6 +2438,10 @@ async def restore_group_message(
                     SELECT 1 FROM group_message_mentions gmm
                     WHERE gmm.message_id=gm.id AND gmm.user_id=?
                   ) AS mentioned_me,
+                  EXISTS(
+                    SELECT 1 FROM group_message_mentions gmm_any
+                    WHERE gmm_any.message_id=gm.id
+                  ) AS has_mentions,
                   u.display_name AS sender_name,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
@@ -2468,6 +2479,7 @@ async def restore_group_message(
         "deleted_at": None,
         "forwarded": bool(row["forwarded"]),
         "mentioned_me": bool(row["mentioned_me"]),
+        "has_mentions": bool(row["has_mentions"]),
         "can_delete": True,
         "can_restore": False,
     }
