@@ -68,6 +68,7 @@
   <div id="groupCallGrid" class="group-call-grid"></div>
   <div class="group-call-controls">
     <button id="groupMuteBtn" type="button" title="Микрофон">🎤</button>
+    <button id="groupSpeakerBtn" type="button" title="Аудиовыход: обычный">🔈</button>
     <button id="groupCameraBtn" type="button" title="Камера">📷</button>
     <button id="groupSwitchCameraBtn" type="button" title="Сменить камеру">🔄</button>
     <button id="groupEndBtn" class="end" type="button" title="Выйти">☎</button>
@@ -92,6 +93,7 @@
     </div>
     <div id="activeCallControls" class="call-controls hidden">
       <button id="muteCall" class="round-call" type="button" title="Микрофон">🎤</button>
+      <button id="speakerCall" class="round-call" type="button" title="Аудиовыход: обычный">🔈</button>
       <button id="cameraCall" class="round-call" type="button" title="Камера">📷</button>
       <button id="switchCamera" class="round-call" type="button" title="Сменить камеру">🔄</button>
       <button id="endCall" class="round-call end" type="button" title="Завершить">☎</button>
@@ -113,6 +115,7 @@
 const $=id=>document.getElementById(id);
 let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],callHistory=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false,foundUser=null;
 let currentCall=null,pendingCall=null,pendingIce=[],cameraFacing='user',acceptingCall=false,preparedMediaStream=null;
+let callAudioSinkId='',callSpeakerMode=false;
 let deferredInstallPrompt=null;
 let groupCallState=null;
 
@@ -533,6 +536,93 @@ async function removePushSubscription(){
   }catch{}
 }
 
+function audioOutputElements(){
+  return [
+    $('remoteVideo'),
+    ...document.querySelectorAll('#groupCallGrid audio')
+  ].filter(Boolean)
+}
+
+async function applyAudioOutput(element){
+  if(!element||typeof element.setSinkId!=='function')return false;
+  try{
+    await element.setSinkId(callAudioSinkId||'');
+    return true
+  }catch{
+    return false
+  }
+}
+
+async function applyAudioOutputToAll(){
+  const items=audioOutputElements();
+  const results=await Promise.all(items.map(el=>applyAudioOutput(el)));
+  return results.some(Boolean)
+}
+
+function updateSpeakerButtons(){
+  for(const id of ['speakerCall','groupSpeakerBtn']){
+    const button=$(id);
+    if(!button)continue;
+    button.textContent=callSpeakerMode?'🔊':'🔈';
+    button.classList.toggle('off',callSpeakerMode);
+    button.title=callSpeakerMode
+      ?'Громкая связь включена · нажми для обычного режима'
+      :'Обычный режим · нажми для громкой связи'
+  }
+}
+
+async function chooseSpeakerOutput(){
+  const media=navigator.mediaDevices;
+  const remote=$('remoteVideo');
+
+  if(!remote||typeof remote.setSinkId!=='function'){
+    alert('Этот браузер не даёт сайту переключать разговорный и громкий динамик. Используй системную кнопку аудиовыхода телефона.');
+    return
+  }
+
+  if(callSpeakerMode){
+    callAudioSinkId='';
+    callSpeakerMode=false;
+    await applyAudioOutputToAll();
+    updateSpeakerButtons();
+    return
+  }
+
+  try{
+    let device=null;
+
+    try{
+      const outputs=(await media.enumerateDevices()).filter(d=>d.kind==='audiooutput');
+      device=outputs.find(d=>/speaker|loudspeaker|speakerphone|динамик|громк/i.test(d.label||''))
+    }catch{}
+
+    if(!device&&typeof media.selectAudioOutput==='function'){
+      device=await media.selectAudioOutput()
+    }
+
+    if(!device?.deviceId){
+      alert('Браузер не показал отдельный громкий динамик. На этом телефоне аудиовыходом управляет система.');
+      return
+    }
+
+    callAudioSinkId=device.deviceId;
+    callSpeakerMode=true;
+    const applied=await applyAudioOutputToAll();
+    if(!applied){
+      callAudioSinkId='';
+      callSpeakerMode=false;
+      throw new Error('Не удалось переключить аудиовыход')
+    }
+    updateSpeakerButtons()
+  }catch(err){
+    if(err?.name==='NotAllowedError'){
+      alert('Разреши выбор аудиовыхода для этого сайта')
+    }else if(err?.name!=='AbortError'){
+      alert(err?.message||'Не удалось включить громкую связь')
+    }
+  }
+}
+
 function groupTileId(identity){
   return 'group-tile-'+String(identity).replace(/[^a-zA-Z0-9_-]/g,'_')
 }
@@ -564,7 +654,8 @@ function attachGroupTrack(track,participant,isLocal=false){
   }else if(track.kind===LivekitClient.Track.Kind.Audio){
     const element=track.attach();
     element.autoplay=true;element.style.display='none';
-    tile.append(element)
+    tile.append(element);
+    applyAudioOutput(element).catch(()=>{})
   }
 }
 
@@ -705,6 +796,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
     $('groupCallName').textContent=credentials.group_name;
     $('groupCallStatus').textContent='Подключение…';
     $('groupCallOverlay').classList.remove('hidden');
+    updateSpeakerButtons();
     $('groupCameraBtn').classList.toggle('off',!video);
     $('groupSwitchCameraBtn').classList.toggle('hidden',!video);
 
@@ -809,6 +901,8 @@ $('groupMuteBtn').onclick=async()=>{
   }catch(err){alert(err.message||'Не удалось изменить микрофон')}
 };
 
+$('groupSpeakerBtn').onclick=()=>chooseSpeakerOutput();
+
 $('groupCameraBtn').onclick=async()=>{
   if(!groupCallState)return;
   try{
@@ -885,13 +979,14 @@ function showCallUi(name,status,video,incoming=false){
   $('localVideo').classList.toggle('hidden',!video);
   $('incomingActions').classList.toggle('hidden',!incoming);
   $('activeCallControls').classList.toggle('hidden',incoming);
+  updateSpeakerButtons();
   $('cameraCall').classList.toggle('hidden',!video);$('switchCamera').classList.toggle('hidden',!video)
 }
 
 function resetCallUi(){
   $('callOverlay').classList.add('hidden');$('remoteVideo').srcObject=null;$('localVideo').srcObject=null;
   $('incomingActions').classList.add('hidden');$('activeCallControls').classList.add('hidden');$('mediaPermission').classList.add('hidden');
-  $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');
+  $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');updateSpeakerButtons();
   if(preparedMediaStream){try{preparedMediaStream.getTracks().forEach(t=>t.stop())}catch{}preparedMediaStream=null}
 }
 
@@ -917,6 +1012,7 @@ async function createPeer(peerId,peerName,id,video,stream){
     const stream=e.streams?.[0];
     if(stream){
       $('remoteVideo').srcObject=stream;
+      applyAudioOutput($('remoteVideo')).catch(()=>{});
       $('remoteVideo').play().catch(()=>{})
     }
     $('callStatus').textContent='Соединено'
@@ -1145,6 +1241,8 @@ $('muteCall').onclick=()=>{
   currentCall.localStream.getAudioTracks().forEach(t=>t.enabled=!currentCall.muted);
   $('muteCall').classList.toggle('off',currentCall.muted);$('muteCall').textContent=currentCall.muted?'🔇':'🎤'
 };
+
+$('speakerCall').onclick=()=>chooseSpeakerOutput();
 
 $('cameraCall').onclick=()=>{
   if(!currentCall?.video)return;
