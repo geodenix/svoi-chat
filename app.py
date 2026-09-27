@@ -2142,7 +2142,7 @@ def get_group_messages(
         raise HTTPException(404, "Группа не найдена")
     rows = conn.execute(
         """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
-                  gm.deleted_at,gm.deleted_by,gm.forwarded,gm.forwarded,
+                  gm.deleted_at,gm.deleted_by,gm.forwarded,
                   u.display_name AS sender_name,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
@@ -2342,7 +2342,7 @@ async def restore_group_message(
 
     row = conn.execute(
         """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
-                  gm.deleted_at,gm.deleted_by,
+                  gm.deleted_at,gm.deleted_by,gm.forwarded,
                   u.display_name AS sender_name,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
