@@ -143,6 +143,15 @@ def init_db():
       size INTEGER NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS chat_backgrounds (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      chat_type TEXT NOT NULL,
+      chat_id INTEGER NOT NULL,
+      upload_id INTEGER NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(user_id, chat_type, chat_id),
+      CHECK(chat_type IN ('user','group'))
+    );
     CREATE TABLE IF NOT EXISTS push_subscriptions (
       endpoint TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1153,6 +1162,162 @@ def owned_upload(conn, attachment_id: int | None, user_id: int):
     if not row:
         raise HTTPException(400, "Вложение не найдено")
     return row
+
+
+def validate_chat_background_target(conn, user_id: int, chat_type: str, chat_id: int):
+    if chat_type == "user":
+        if chat_id == user_id:
+            raise HTTPException(400, "Нельзя выбрать фон для чата с самим собой")
+        row = conn.execute(
+            "SELECT 1 FROM users WHERE id=?",
+            (chat_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Пользователь не найден")
+        return
+    if chat_type == "group":
+        if not group_for_user(conn, chat_id, user_id):
+            raise HTTPException(404, "Группа не найдена")
+        return
+    raise HTTPException(400, "Неизвестный тип чата")
+
+
+@app.get("/api/chat-background")
+def get_chat_background(
+    chat_type: str,
+    chat_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    validate_chat_background_target(conn, user["id"], chat_type, chat_id)
+    row = conn.execute(
+        """SELECT cb.upload_id,u.stored_name,u.original_name,u.mime_type,u.size
+           FROM chat_backgrounds cb
+           JOIN uploads u ON u.id=cb.upload_id
+           WHERE cb.user_id=? AND cb.chat_type=? AND cb.chat_id=?""",
+        (user["id"], chat_type, chat_id),
+    ).fetchone()
+    if not row:
+        return {"background_url": None}
+    return {
+        "background_url": f"/uploads/{row['stored_name']}",
+        "upload_id": row["upload_id"],
+        "name": row["original_name"],
+        "mime_type": row["mime_type"],
+        "size": row["size"],
+    }
+
+
+@app.post("/api/chat-background")
+async def set_chat_background(
+    chat_type: str,
+    chat_id: int,
+    file: UploadFile = File(...),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    validate_chat_background_target(conn, user["id"], chat_type, chat_id)
+
+    mime = (file.content_type or "").lower().split(";", 1)[0].strip()
+    if mime not in AVATAR_IMAGE_TYPES:
+        await file.close()
+        raise HTTPException(400, "Для фона выбери JPEG, PNG или WebP")
+
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    await file.close()
+    if not content:
+        raise HTTPException(400, "Файл пустой")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "Фон больше 20 МБ")
+
+    suffix = _avatar_suffix(content, mime)
+    stored = "chat-bg-" + secrets.token_hex(24) + suffix
+    path = UPLOAD_DIR / stored
+    path.write_bytes(content)
+
+    old = conn.execute(
+        """SELECT cb.upload_id,u.stored_name
+           FROM chat_backgrounds cb
+           LEFT JOIN uploads u ON u.id=cb.upload_id
+           WHERE cb.user_id=? AND cb.chat_type=? AND cb.chat_id=?""",
+        (user["id"], chat_type, chat_id),
+    ).fetchone()
+
+    try:
+        cur = conn.execute(
+            """INSERT INTO uploads(
+                 owner_id,stored_name,original_name,mime_type,size,created_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (
+                user["id"],
+                stored,
+                f"chat-background{suffix}",
+                mime,
+                len(content),
+                now_iso(),
+            ),
+        )
+        upload_id = cur.lastrowid
+        conn.execute(
+            """INSERT INTO chat_backgrounds(
+                 user_id,chat_type,chat_id,upload_id,updated_at
+               ) VALUES(?,?,?,?,?)
+               ON CONFLICT(user_id,chat_type,chat_id)
+               DO UPDATE SET upload_id=excluded.upload_id,updated_at=excluded.updated_at""",
+            (user["id"], chat_type, chat_id, upload_id, now_iso()),
+        )
+        conn.commit()
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+    if old and old["upload_id"]:
+        conn.execute(
+            "DELETE FROM uploads WHERE id=? AND owner_id=?",
+            (old["upload_id"], user["id"]),
+        )
+        conn.commit()
+        if old["stored_name"]:
+            (UPLOAD_DIR / old["stored_name"]).unlink(missing_ok=True)
+
+    return {
+        "background_url": f"/uploads/{stored}",
+        "upload_id": upload_id,
+        "mime_type": mime,
+        "size": len(content),
+    }
+
+
+@app.delete("/api/chat-background")
+def delete_chat_background(
+    chat_type: str,
+    chat_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    validate_chat_background_target(conn, user["id"], chat_type, chat_id)
+    old = conn.execute(
+        """SELECT cb.upload_id,u.stored_name
+           FROM chat_backgrounds cb
+           LEFT JOIN uploads u ON u.id=cb.upload_id
+           WHERE cb.user_id=? AND cb.chat_type=? AND cb.chat_id=?""",
+        (user["id"], chat_type, chat_id),
+    ).fetchone()
+    if not old:
+        return {"ok": True, "background_url": None}
+
+    conn.execute(
+        "DELETE FROM chat_backgrounds WHERE user_id=? AND chat_type=? AND chat_id=?",
+        (user["id"], chat_type, chat_id),
+    )
+    conn.execute(
+        "DELETE FROM uploads WHERE id=? AND owner_id=?",
+        (old["upload_id"], user["id"]),
+    )
+    conn.commit()
+    if old["stored_name"]:
+        (UPLOAD_DIR / old["stored_name"]).unlink(missing_ok=True)
+    return {"ok": True, "background_url": None}
 
 
 @app.post("/api/uploads")
