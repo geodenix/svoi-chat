@@ -7,7 +7,7 @@ import os
 import secrets
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Set
 
@@ -15,6 +15,8 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from pywebpush import WebPushException, webpush
+from livekit import api as livekit_api
+from livekit.protocol.room import RoomConfiguration
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("SVOI_DATA_DIR", BASE_DIR / "data"))
@@ -37,6 +39,12 @@ TURN_SHARED_SECRET = os.getenv("TURN_SHARED_SECRET", "").strip()
 TURN_HOST = os.getenv(
     "TURN_HOST",
     "epl-gruz.duckdns.org",
+).strip()
+LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "").strip()
+LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "").strip()
+LIVEKIT_WS_URL = os.getenv(
+    "LIVEKIT_WS_URL",
+    "wss://epl-gruz.duckdns.org",
 ).strip()
 
 app = FastAPI(title="Свои", version="0.1.0")
@@ -257,6 +265,11 @@ class PushKeysIn(BaseModel):
 class PushSubscriptionIn(BaseModel):
     endpoint: str = Field(min_length=20, max_length=2048)
     keys: PushKeysIn
+
+
+class GroupCallIn(BaseModel):
+    video: bool = False
+    invite: bool = False
 
 
 @app.get("/health")
@@ -999,6 +1012,94 @@ async def send_group_message(
                 f"group-{group_id}",
             )
     return msg
+
+
+@app.post("/api/groups/{group_id}/call-token")
+async def group_call_token(
+    group_id: int,
+    data: GroupCallIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+    if not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        raise HTTPException(
+            503,
+            "Сервер групповых звонков пока не настроен",
+        )
+
+    room_name = f"svoi-group-{group_id}"
+    identity = f"user-{user['id']}"
+
+    grants = livekit_api.VideoGrants(
+        room_join=True,
+        room=room_name,
+        can_publish=True,
+        can_subscribe=True,
+    )
+    token = (
+        livekit_api.AccessToken(
+            LIVEKIT_API_KEY,
+            LIVEKIT_API_SECRET,
+        )
+        .with_identity(identity)
+        .with_name(user["display_name"])
+        .with_grants(grants)
+        .with_room_config(
+            RoomConfiguration(
+                name=room_name,
+                max_participants=10,
+                empty_timeout=60,
+                departure_timeout=20,
+            )
+        )
+        .with_ttl(timedelta(hours=2))
+        .to_jwt()
+    )
+
+    if data.invite:
+        members = conn.execute(
+            """SELECT gm.user_id
+               FROM group_members gm
+               WHERE gm.group_id=? AND gm.user_id<>?""",
+            (group_id, user["id"]),
+        ).fetchall()
+        invite_payload = {
+            "type": "group_call_invite",
+            "group_id": group_id,
+            "group_name": group["name"],
+            "from_user_id": user["id"],
+            "from_name": user["display_name"],
+            "video": bool(data.video),
+        }
+        kind = (
+            "Групповой видеозвонок"
+            if data.video
+            else "Групповой звонок"
+        )
+        for member in members:
+            member_id = member["user_id"]
+            await push(member_id, invite_payload)
+            await send_web_push(
+                member_id,
+                kind,
+                f"{user['display_name']} зовёт в «{group['name']}»",
+                f"/?group_call={group_id}&video={1 if data.video else 0}",
+                f"group-call-{group_id}",
+                False,
+            )
+
+    return {
+        "server_url": LIVEKIT_WS_URL,
+        "participant_token": token,
+        "room_name": room_name,
+        "group_id": group_id,
+        "group_name": group["name"],
+        "video": bool(data.video),
+        "max_participants": 10,
+    }
 
 
 def save_call_started(call: dict):
