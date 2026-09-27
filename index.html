@@ -2,73 +2,53 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#101b2d">
-<title>Свои — тест мессенджера</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232b86fa'/%3E%3Cpath d='M8 9h16v11H14l-6 5z' fill='white'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#101b2d"><title>Свои</title>
 <style>
-:root{color-scheme:dark;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#eef4ff;background:#0b1220}
-*{box-sizing:border-box}body{margin:0}button,input,textarea{font:inherit}button{cursor:pointer;color:inherit}button:focus-visible,textarea:focus-visible{outline:3px solid #75b8ff;outline-offset:3px}
-.app{display:grid;grid-template-columns:310px 1fr;height:100vh;height:100dvh;max-width:1300px;margin:auto;background:#101b2d}
-aside{border-right:1px solid #2a3649;padding:28px 18px;display:flex;flex-direction:column;gap:24px}h1{margin:0;font-size:28px;letter-spacing:-1px}.brand{display:flex;align-items:center;gap:12px}.mark{display:grid;place-items:center;width:42px;height:42px;border-radius:14px;background:#2b86fa;font-weight:800}
-.subtle{color:#aebcd2;font-size:14px;line-height:1.5}.room{display:flex;gap:12px;align-items:center;background:#1c3556;padding:16px;border-radius:18px}.avatar{width:44px;height:44px;display:grid;place-items:center;border-radius:16px;background:#275685;font-size:22px;flex-shrink:0}.room strong{display:block;font-size:16px}.room p{margin:4px 0 0;font-size:14px;color:#b6c8e2}
-.aside-note{margin-top:auto;padding:16px;border:1px solid #30425d;border-radius:16px}.aside-note p{margin:8px 0 0}
-main{min-width:0;display:flex;flex-direction:column;min-height:0}header{padding:18px 24px;display:flex;gap:12px;align-items:center;border-bottom:1px solid #2a3649}header .title{flex:1;min-width:0}header strong{font-size:18px}header p{margin:3px 0 0}button.icon{width:44px;height:44px;display:grid;place-items:center;border:1px solid #354760;border-radius:14px;background:#1a2940}.icon svg{width:22px;height:22px}
-.banner{background:#1a2b42;padding:12px 24px;color:#c1d3ec;font-size:14px;line-height:1.5}
-#messages{overflow:auto;flex:1;padding:24px;display:flex;flex-direction:column;gap:12px;background:radial-gradient(ellipse at top,#14263e,transparent 70%)}.welcome{margin:auto;max-width:340px;text-align:center;padding:24px 10px}.welcome .mark{margin:0 auto 18px;width:64px;height:64px;font-size:28px;border-radius:22px}.welcome h2{font-size:24px;margin:0 0 12px;letter-spacing:-.5px}.bubble{align-self:flex-end;max-width:min(85%,520px);background:#235fab;padding:12px 16px;border-radius:19px 19px 5px 19px;overflow-wrap:anywhere;white-space:pre-wrap;font-size:16px;line-height:1.5}.bubble small{display:block;text-align:right;color:#c4ddff;font-size:12px;margin-top:6px;white-space:normal}
-form{display:flex;gap:12px;align-items:flex-end;padding:16px 24px max(16px,env(safe-area-inset-bottom));border-top:1px solid #2a3649;background:#101b2d}textarea{resize:none;flex:1;min-width:0;border:1px solid #354760;background:#192940;color:#fff;border-radius:18px;padding:13px 16px;min-height:50px;max-height:130px}textarea::placeholder{color:#9eafc8}.send{border:0;background:#2b86fa;border-radius:16px;width:50px;height:50px;font-size:24px;flex-shrink:0}.send:disabled{opacity:.4;cursor:default}
-dialog{width:min(94vw,520px);max-height:90dvh;overflow:auto;border:1px solid #36506e;border-radius:24px;padding:24px;background:#132139;color:#eef4ff}dialog::backdrop{background:#030814c9}dialog h2{margin:0 0 10px;font-size:22px}video{background:#080f1c;border-radius:16px;width:100%;aspect-ratio:4/3;object-fit:cover;transform:scaleX(-1)}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}.actions button{border:1px solid #415976;border-radius:12px;padding:12px 16px;background:#223956}.actions button.primary{background:#2b86fa;border-color:#2b86fa}.meter{height:8px;background:#080f1c;border-radius:8px;overflow:hidden;margin:10px 0}.meter span{display:block;height:100%;width:0;background:#62b6ff}
-#status{min-height:22px;font-size:14px;line-height:1.5;color:#c7d6ed}#notice{margin:0;padding:0 24px;color:#ffd899;font-size:14px}#notice:not(:empty){padding-bottom:8px}
-@media(max-width:680px){aside{display:none} .app{display:flex}main{width:100%}header{padding:14px 16px}.banner{padding:10px 16px}#messages{padding:16px}form{padding-left:12px;padding-right:12px}.bubble{max-width:90%}}
-</style>
-</head>
+:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#eef4ff;background:#09111f}*{box-sizing:border-box}body{margin:0}button,input,textarea{font:inherit}.hidden{display:none!important}
+.auth{min-height:100dvh;display:grid;place-items:center;padding:20px;background:radial-gradient(circle at top,#18375e,#09111f 65%)}.auth-card{width:min(420px,100%);background:#111f34;border:1px solid #293d58;border-radius:24px;padding:26px}.brand{display:flex;align-items:center;gap:12px;margin-bottom:22px}.mark{width:48px;height:48px;border-radius:16px;display:grid;place-items:center;background:#2b86fa;font-size:25px;font-weight:800}.auth h1{margin:0}.muted{color:#aab9cf}.tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:18px 0}.tabs button,.auth button{border:0;border-radius:12px;padding:12px;background:#203552;color:#eef4ff}.tabs .active,.primary{background:#2b86fa!important}.field{margin:12px 0}.field label{display:block;font-size:13px;color:#b7c5d9;margin-bottom:6px}.field input{width:100%;border:1px solid #354b68;background:#0c1728;color:#fff;border-radius:12px;padding:12px}.error{color:#ffb4b4;min-height:22px}
+.app{height:100dvh;display:grid;grid-template-columns:320px 1fr;background:#0d1829}.sidebar{border-right:1px solid #26364d;display:flex;flex-direction:column;min-width:0}.side-head{padding:18px;border-bottom:1px solid #26364d;display:flex;align-items:center;gap:10px}.side-head .me{min-width:0;flex:1}.side-head strong,.side-head small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.logout{border:1px solid #334965;background:#17283f;color:#fff;border-radius:10px;padding:8px 10px}.users{overflow:auto;flex:1;padding:8px}.user{width:100%;border:0;background:transparent;color:#fff;text-align:left;display:flex;gap:12px;align-items:center;padding:12px;border-radius:14px}.user:hover,.user.active{background:#1a304d}.avatar{width:44px;height:44px;border-radius:15px;background:#244f7e;display:grid;place-items:center;font-weight:700;flex-shrink:0}.user .txt{min-width:0;flex:1}.user strong,.user small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dot{width:9px;height:9px;border-radius:50%;background:#54647b}.dot.on{background:#45d78e}
+.chat{display:flex;flex-direction:column;min-width:0;min-height:0}.chat-head{height:74px;padding:14px 20px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #26364d}.back{display:none;border:0;background:#1b2e49;color:white;border-radius:11px;width:42px;height:42px}.chat-title{min-width:0}.chat-title strong,.chat-title small{display:block}.messages{flex:1;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:10px;background:radial-gradient(ellipse at top,#132944,transparent 72%)}.empty{margin:auto;text-align:center;color:#9fb0c8;max-width:320px}.bubble{max-width:min(78%,560px);padding:10px 13px;border-radius:17px 17px 17px 5px;background:#1c2d45;align-self:flex-start;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.mine{align-self:flex-end;background:#2565b5;border-radius:17px 17px 5px 17px}.bubble time{display:block;margin-top:4px;text-align:right;font-size:11px;color:#c1d1e7}.composer{display:flex;gap:10px;align-items:flex-end;padding:12px 18px max(12px,env(safe-area-inset-bottom));border-top:1px solid #26364d}.composer textarea{flex:1;resize:none;max-height:120px;min-height:48px;border:1px solid #354b68;background:#15263d;color:#fff;border-radius:16px;padding:12px 14px}.send{width:48px;height:48px;border:0;border-radius:15px;background:#2b86fa;color:white;font-size:22px}.send:disabled{opacity:.4}.welcome{margin:auto;text-align:center;color:#9fb0c8}.welcome .mark{margin:0 auto 16px}
+@media(max-width:720px){.app{display:block}.sidebar{height:100dvh}.chat{height:100dvh;display:none}.app.chat-open .sidebar{display:none}.app.chat-open .chat{display:flex}.back{display:block}.side-head{padding-top:max(18px,env(safe-area-inset-top))}}
+</style></head>
 <body>
-<div class="app">
-<aside><div class="brand"><span class="mark">С</span><h1>Свои</h1></div><div class="room"><span class="avatar">С</span><div><strong>Тестовый чат</strong><p>Сообщения на этом устройстве</p></div></div><div class="aside-note"><strong>Первый запуск</strong><p class="subtle">Проверь чат, камеру и микрофон. Подключение участников и видеозвонки появятся после настройки облака.</p></div></aside>
-<main>
-<header><div class="avatar">С</div><div class="title"><strong>Тестовый чат</strong><p class="subtle">Свои · локальный тест</p></div><button class="icon" id="camera" aria-label="Проверить камеру и микрофон" title="Проверить камеру и микрофон"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="12" height="12" rx="3"/><path d="m15 10 6-3v10l-6-3z"/></svg></button></header>
-<div class="banner">Сообщения видны только тебе на этом устройстве. Звонки между участниками ещё не подключены.</div>
-<section id="messages" aria-label="Сообщения" aria-live="polite"></section>
-<p id="notice" role="status"></p>
-<form id="composer"><textarea id="text" rows="1" maxlength="4000" placeholder="Написать сообщение…" aria-label="Текст сообщения"></textarea><button class="send" id="send" type="submit" aria-label="Отправить сообщение" disabled>↑</button></form>
-</main>
+<div id="auth" class="auth">
+  <div class="auth-card"><div class="brand"><div class="mark">С</div><div><h1>Свои</h1><div class="muted">приватный мессенджер</div></div></div>
+    <div class="tabs"><button id="tabLogin" class="active">Войти</button><button id="tabRegister">Регистрация</button></div>
+    <form id="authForm">
+      <div id="nameField" class="field hidden"><label>Имя</label><input id="displayName" maxlength="60" autocomplete="name"></div>
+      <div class="field"><label>Логин</label><input id="username" maxlength="32" autocomplete="username" required></div>
+      <div class="field"><label>Пароль</label><input id="password" type="password" minlength="6" autocomplete="current-password" required></div>
+      <button id="authSubmit" class="primary" style="width:100%">Войти</button><div id="authError" class="error"></div>
+    </form>
+  </div>
 </div>
-<dialog id="media"><h2>Камера и микрофон</h2><p class="subtle">Локальная проверка: изображение и звук никому не передаются. Для начала разреши доступ в браузере.</p><video id="video" autoplay muted playsinline></video><p class="subtle">Уровень микрофона</p><div class="meter" aria-hidden="true"><span id="level"></span></div><p id="status" role="status">Нажми «Начать проверку».</p><div class="actions"><button id="start" class="primary">Начать проверку</button><button id="close">Закрыть</button></div></dialog>
+<div id="app" class="app hidden">
+  <aside class="sidebar"><div class="side-head"><div class="mark">С</div><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="logout" class="logout">Выйти</button></div><div id="users" class="users"></div></aside>
+  <main class="chat"><div id="chatHead" class="chat-head hidden"><button id="back" class="back">←</button><div class="avatar" id="peerAvatar"></div><div class="chat-title"><strong id="peerName"></strong><small id="peerStatus" class="muted"></small></div></div>
+    <div id="messages" class="messages"><div class="welcome"><div class="mark">С</div><h2>Выбери собеседника</h2><p>Сообщения будут сохраняться на сервере и приходить в реальном времени.</p></div></div>
+    <form id="composer" class="composer hidden"><textarea id="text" placeholder="Сообщение…" maxlength="4000" rows="1"></textarea><button id="send" class="send" disabled>↑</button></form>
+  </main>
+</div>
 <script>
-'use strict';
-const $=id=>document.getElementById(id);
-const key='svoi-chat-demo-v1';
-let messages=[];
-try{const saved=JSON.parse(localStorage.getItem(key)||'[]');if(Array.isArray(saved))messages=saved.filter(m=>m&&typeof m.text==='string'&&typeof m.time==='number').slice(-200)}catch{$('notice').textContent='Сохранение недоступно. Сообщения останутся до закрытия страницы.'}
-function render(){
- const box=$('messages');box.replaceChildren();
- if(!messages.length){const empty=document.createElement('div');empty.className='welcome';empty.innerHTML='<div class="mark">С</div><h2>Здесь начинается общение</h2><p class="subtle">Напиши первое тестовое сообщение. Оно сохранится в этом браузере. Камеру и микрофон можно проверить кнопкой сверху.</p>';box.append(empty)}
- for(const m of messages){const item=document.createElement('div');item.className='bubble';item.append(document.createTextNode(m.text));const time=document.createElement('small');time.textContent=new Date(m.time).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})+' · сохранено локально';item.append(time);box.append(item)}
- box.scrollTop=box.scrollHeight;
-}
-$('text').addEventListener('input',()=>{$('send').disabled=!$('text').value.trim();$('text').style.height='auto';$('text').style.height=Math.min(130,$('text').scrollHeight)+'px'});
-$('composer').addEventListener('submit',e=>{e.preventDefault();const text=$('text').value.trim();if(!text)return;messages.push({text,time:Date.now()});messages=messages.slice(-200);try{localStorage.setItem(key,JSON.stringify(messages))}catch{$('notice').textContent='Не удалось сохранить. Сообщения доступны до перезагрузки.'}$('text').value='';$('text').style.height='auto';$('send').disabled=true;render()});
-let stream=null,ctx=null,frame=0,request=0;
-function stop(){request++;cancelAnimationFrame(frame);if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;$('video').srcObject=null;if(ctx){ctx.close().catch(()=>{});ctx=null}$('level').style.width='0%';$('start').disabled=false}
-$('camera').onclick=()=>{$('status').textContent='Нажми «Начать проверку».';$('media').showModal()};
-$('close').onclick=()=>{$('media').close()};
-$('media').addEventListener('close',stop);
-$('media').addEventListener('cancel',stop);
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&$('media').open){stop();$('status').textContent='Проверка остановлена. Чтобы продолжить, нажми «Начать проверку».'}});
-window.addEventListener('pagehide',stop);
-$('start').onclick=async()=>{
- stop();const current=request;$('start').disabled=true;$('status').textContent='Ожидаем разрешение на камеру и микрофон…';
- try{
-  if(!navigator.mediaDevices?.getUserMedia)throw new Error('UNSUPPORTED');
-  const acquired=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640}},audio:true});
-  if(current!==request||!$('media').open){acquired.getTracks().forEach(t=>t.stop());return}
-  stream=acquired;$('video').srcObject=stream;await $('video').play();
-  if(current!==request)return;
-  $('status').textContent='Камера и микрофон включены. Скажи несколько слов — индикатор должен двигаться.';
-  const AudioContext=window.AudioContext||window.webkitAudioContext;
-  if(AudioContext){ctx=new AudioContext();await ctx.resume();if(current!==request||!ctx)return;const source=ctx.createMediaStreamSource(stream),analyser=ctx.createAnalyser();analyser.fftSize=256;source.connect(analyser);const data=new Uint8Array(analyser.fftSize);function tick(){analyser.getByteTimeDomainData(data);let power=0;for(const n of data)power+=(n-128)*(n-128);$('level').style.width=Math.min(100,Math.sqrt(power/data.length)*5)+'%';frame=requestAnimationFrame(tick)}tick()}
- }catch(error){if(current!==request)return;stop();$('status').textContent=error.name==='NotAllowedError'?'Доступ запрещён. Разреши камеру и микрофон в настройках сайта и повтори.':error.name==='NotFoundError'?'Камера или микрофон не найдены. Проверь устройство.':error.name==='NotReadableError'?'Камера или микрофон заняты другим приложением. Закрой его и повтори.':'Не удалось запустить проверку. Открой HTTPS-ссылку в Chrome или Safari и проверь разрешения.'}
-};
-render();
-</script>
-</body>
-</html>
+const $=id=>document.getElementById(id);let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],peer=null,socket=null,retry=null;
+const api=async(path,opt={})=>{opt.headers={...(opt.headers||{}),...(token?{Authorization:'Bearer '+token}:{})};if(opt.body&&typeof opt.body!=='string'){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(opt.body)}const r=await fetch(path,opt);let data=null;try{data=await r.json()}catch{}if(!r.ok)throw new Error(data?.detail||'Ошибка сервера');return data};
+function setMode(next){mode=next;const reg=next==='register';$('tabLogin').classList.toggle('active',!reg);$('tabRegister').classList.toggle('active',reg);$('nameField').classList.toggle('hidden',!reg);$('authSubmit').textContent=reg?'Создать аккаунт':'Войти';$('password').autocomplete=reg?'new-password':'current-password';$('authError').textContent=''}
+$('tabLogin').onclick=()=>setMode('login');$('tabRegister').onclick=()=>setMode('register');
+$('authForm').onsubmit=async e=>{e.preventDefault();$('authError').textContent='';try{const body={username:$('username').value.trim(),password:$('password').value};if(mode==='register')body.display_name=$('displayName').value.trim();const data=await api(mode==='register'?'/api/register':'/api/login',{method:'POST',body});token=data.token;localStorage.setItem('svoi_token',token);await enter()}catch(err){$('authError').textContent=err.message}};
+function initials(name){return(name||'?').trim().split(/\s+/).slice(0,2).map(x=>x[0]).join('').toUpperCase()}
+function showAuth(){me=null;peer=null;if(socket)socket.close();$('auth').classList.remove('hidden');$('app').classList.add('hidden')}
+async function enter(){try{me=await api('/api/me');$('meName').textContent=me.display_name;$('meUser').textContent='@'+me.username;$('auth').classList.add('hidden');$('app').classList.remove('hidden');await loadUsers();connectWs()}catch{token='';localStorage.removeItem('svoi_token');showAuth()}}
+async function loadUsers(){users=await api('/api/users');renderUsers();if(peer){peer=users.find(u=>u.id===peer.id)||peer;updatePeerHead()}}
+function renderUsers(){const box=$('users');box.replaceChildren();if(!users.length){box.innerHTML='<div class="muted" style="padding:18px">Пока кроме тебя никого нет. Зарегистрируй второй аккаунт на другом телефоне.</div>';return}for(const u of users){const b=document.createElement('button');b.className='user'+(peer?.id===u.id?' active':'');b.innerHTML='<span class="avatar">'+initials(u.display_name)+'</span><span class="txt"><strong></strong><small class="muted">@'+u.username+'</small></span><span class="dot '+(u.online?'on':'')+'"></span>';b.querySelector('strong').textContent=u.display_name;b.onclick=()=>openChat(u);box.append(b)}}
+async function openChat(u){peer=u;$('app').classList.add('chat-open');$('chatHead').classList.remove('hidden');$('composer').classList.remove('hidden');updatePeerHead();renderUsers();const msgs=await api('/api/messages/'+u.id);renderMessages(msgs);$('text').focus()}
+function updatePeerHead(){$('peerName').textContent=peer?.display_name||'';$('peerAvatar').textContent=initials(peer?.display_name);$('peerStatus').textContent=peer?.online?'в сети':'не в сети'}
+function msgNode(m){const d=document.createElement('div');d.className='bubble'+(m.sender_id===me.id?' mine':'');d.append(document.createTextNode(m.body));const t=document.createElement('time');t.textContent=new Date(m.created_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});d.append(t);return d}
+function renderMessages(items){const box=$('messages');box.replaceChildren();if(!items.length)box.innerHTML='<div class="empty">Сообщений пока нет. Напиши первым.</div>';else for(const m of items)box.append(msgNode(m));box.scrollTop=box.scrollHeight}
+function appendMessage(m){const box=$('messages');const empty=box.querySelector('.empty');if(empty)empty.remove();box.append(msgNode(m));box.scrollTop=box.scrollHeight}
+$('text').oninput=()=>{$('send').disabled=!$('text').value.trim();$('text').style.height='auto';$('text').style.height=Math.min(120,$('text').scrollHeight)+'px'};
+$('composer').onsubmit=async e=>{e.preventDefault();const body=$('text').value.trim();if(!body||!peer)return;try{const m=await api('/api/messages',{method:'POST',body:{recipient_id:peer.id,body}});appendMessage(m);$('text').value='';$('text').style.height='auto';$('send').disabled=true}catch(err){alert(err.message)}};
+function connectWs(){if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));socket.onmessage=e=>{const data=JSON.parse(e.data);if(data.type==='message'){const m=data.message;if(peer&&(m.sender_id===peer.id||m.recipient_id===peer.id))appendMessage(m);loadUsers().catch(()=>{})}};socket.onclose=()=>{clearTimeout(retry);if(token)retry=setTimeout(connectWs,2500)}}
+$('logout').onclick=async()=>{try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
+$('back').onclick=()=>{$('app').classList.remove('chat-open')};
+if(token)enter();else showAuth();
+</script></body></html>
