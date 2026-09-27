@@ -45,12 +45,11 @@ jobs:
 
           STORE_PASS="${RAW_KEYSTORE_PASSWORD#ANDROID_KEYSTORE_PASSWORD=}"
           KEY_ALIAS="${RAW_KEY_ALIAS#ANDROID_KEY_ALIAS=}"
-          KEY_PASS="${RAW_KEY_PASSWORD#ANDROID_KEY_PASSWORD=}"
+          KEY_PASS="$STORE_PASS"
 
           test -n "$KEYSTORE_B64"
           test -n "$STORE_PASS"
           test -n "$KEY_ALIAS"
-          test -n "$KEY_PASS"
 
           echo "::add-mask::$KEYSTORE_B64"
           echo "::add-mask::$STORE_PASS"
