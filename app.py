@@ -936,6 +936,15 @@ async def send_group_message(
     return msg
 
 
+CALL_SIGNAL_TYPES = {
+    "call_offer",
+    "call_answer",
+    "ice_candidate",
+    "call_reject",
+    "call_end",
+}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -946,11 +955,64 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         await websocket.close(code=4401)
         return
     user_id = row["id"]
+    display_name = row["display_name"]
     await websocket.accept()
     connections.setdefault(user_id, set()).add(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            raw = await websocket.receive_text()
+            if len(raw) > 30000:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            signal_type = data.get("type")
+            if signal_type not in CALL_SIGNAL_TYPES:
+                continue
+            try:
+                target_id = int(data.get("to_user_id"))
+            except (TypeError, ValueError):
+                continue
+            if target_id == user_id:
+                continue
+
+            check = sqlite3.connect(DB_PATH, check_same_thread=False)
+            exists = check.execute(
+                "SELECT 1 FROM users WHERE id=?",
+                (target_id,),
+            ).fetchone()
+            check.close()
+            if not exists:
+                continue
+
+            payload = {
+                "type": signal_type,
+                "from_user_id": user_id,
+                "from_name": display_name,
+                "call_id": str(data.get("call_id", ""))[:80],
+            }
+            if signal_type in {"call_offer", "call_answer"}:
+                sdp = data.get("sdp")
+                if not isinstance(sdp, dict):
+                    continue
+                payload["sdp"] = sdp
+                payload["video"] = bool(data.get("video", False))
+            elif signal_type == "ice_candidate":
+                candidate = data.get("candidate")
+                if not isinstance(candidate, dict):
+                    continue
+                payload["candidate"] = candidate
+
+            delivered = await push(target_id, payload)
+            if signal_type == "call_offer" and delivered == 0:
+                await websocket.send_json(
+                    {
+                        "type": "call_unavailable",
+                        "to_user_id": target_id,
+                        "call_id": payload["call_id"],
+                    }
+                )
     except WebSocketDisconnect:
         pass
     finally:
