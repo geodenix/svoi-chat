@@ -89,7 +89,7 @@ async function enter(){
   try{
     me=await api('/api/me');$('meName').textContent=me.display_name;$('meUser').textContent='@'+me.username;
     $('authError').textContent='';$('auth').classList.add('hidden');$('app').classList.remove('hidden');
-    await Promise.all([loadUsers(),loadGroups()]);connectWs();initPush().catch(()=>{})
+    await Promise.all([loadUsers(),loadGroups()]);connectWs();initPush().catch(err=>{$('notifyBtn').textContent='⚠️';$('notifyBtn').title=err.message||'Ошибка push'})
   }catch(err){
     if(err?.status===401){
       token='';localStorage.removeItem('svoi_token');showAuth();return
@@ -235,7 +235,7 @@ async function ensurePushSubscription(registration){
     })
   }
   await api('/api/push/subscribe',{method:'POST',body:sub.toJSON()});
-  $('notifyBtn').textContent='🔔';$('notifyBtn').title='Уведомления включены';
+  $('notifyBtn').textContent='✅';$('notifyBtn').title='Уведомления включены — нажми для теста';
   return sub
 }
 
@@ -245,6 +245,7 @@ async function initPush(){
     btn.classList.add('hidden');return
   }
   const registration=await navigator.serviceWorker.register('/sw.js');
+  try{await registration.update()}catch{}
   if(Notification.permission==='granted'){
     await ensurePushSubscription(registration)
   }else if(Notification.permission==='denied'){
@@ -263,8 +264,15 @@ $('notifyBtn').onclick=async()=>{
       :await Notification.requestPermission();
     if(permission!=='granted')return;
     const registration=await navigator.serviceWorker.ready;
-    await ensurePushSubscription(registration)
-  }catch(err){alert(err.message)}
+    await ensurePushSubscription(registration);
+    const result=await api('/api/push/test',{method:'POST'});
+    $('notifyBtn').textContent='✅';
+    $('notifyBtn').title='Тестовый push отправлен. Подписок: '+result.attempted
+  }catch(err){
+    $('notifyBtn').textContent='⚠️';
+    $('notifyBtn').title='Ошибка push';
+    alert(err.message)
+  }
 };
 
 async function removePushSubscription(){
