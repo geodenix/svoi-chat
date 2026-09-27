@@ -1497,6 +1497,65 @@ async def remove_group_admin(
     return {"ok": True, "member_id": member_id, "is_admin": False}
 
 
+@app.delete("/api/groups/{group_id}/members/{member_id}")
+async def remove_group_member(
+    group_id: int,
+    member_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+    if not bool(group["is_admin"]):
+        raise HTTPException(403, "Исключать участников может только администратор")
+    if member_id == group["owner_id"]:
+        raise HTTPException(400, "Владельца группы исключить нельзя")
+    if member_id == user["id"]:
+        raise HTTPException(400, "Нельзя исключить самого себя")
+
+    target = conn.execute(
+        """SELECT gm.user_id,gm.is_admin,u.display_name
+           FROM group_members gm
+           JOIN users u ON u.id=gm.user_id
+           WHERE gm.group_id=? AND gm.user_id=?""",
+        (group_id, member_id),
+    ).fetchone()
+    if not target:
+        raise HTTPException(404, "Участник не найден")
+
+    actor_is_owner = group["owner_id"] == user["id"]
+    if bool(target["is_admin"]) and not actor_is_owner:
+        raise HTTPException(
+            403,
+            "Исключить другого администратора может только владелец",
+        )
+
+    conn.execute(
+        "DELETE FROM group_members WHERE group_id=? AND user_id=?",
+        (group_id, member_id),
+    )
+    conn.commit()
+
+    await push(
+        member_id,
+        {
+            "type": "group_removed",
+            "group_id": group_id,
+            "group_name": group["name"],
+            "removed_by": user["id"],
+        },
+    )
+    await _broadcast_group_update(group_id)
+
+    return {
+        "ok": True,
+        "group_id": group_id,
+        "member_id": member_id,
+        "member_name": target["display_name"],
+    }
+
+
 @app.get("/api/groups/{group_id}/messages")
 def get_group_messages(
     group_id: int,
