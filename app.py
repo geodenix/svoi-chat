@@ -103,6 +103,15 @@ def init_db():
             conn.execute(
                 f"ALTER TABLE {table} ADD COLUMN attachment_id INTEGER"
             )
+        if table == "messages":
+            if "delivered_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN delivered_at TEXT"
+                )
+            if "read_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN read_at TEXT"
+                )
     conn.commit()
     conn.close()
 
@@ -342,7 +351,7 @@ def get_upload(stored_name: str, conn=Depends(db)):
 
 
 @app.get("/api/messages/{other_id}")
-def history(
+async def history(
     other_id: int,
     limit: int = Query(100, ge=1, le=300),
     user=Depends(current_user),
@@ -350,8 +359,33 @@ def history(
 ):
     if not conn.execute("SELECT 1 FROM users WHERE id=?", (other_id,)).fetchone():
         raise HTTPException(404, "Пользователь не найден")
+    unread_rows = conn.execute(
+        """SELECT id FROM messages
+           WHERE sender_id=? AND recipient_id=? AND read_at IS NULL""",
+        (other_id, user["id"]),
+    ).fetchall()
+    if unread_rows:
+        seen_at = now_iso()
+        conn.execute(
+            """UPDATE messages
+               SET delivered_at=COALESCE(delivered_at, ?),
+                   read_at=?
+               WHERE sender_id=? AND recipient_id=? AND read_at IS NULL""",
+            (seen_at, seen_at, other_id, user["id"]),
+        )
+        conn.commit()
+        await push(
+            other_id,
+            {
+                "type": "read_receipt",
+                "reader_id": user["id"],
+                "message_ids": [row["id"] for row in unread_rows],
+                "read_at": seen_at,
+            },
+        )
     rows = conn.execute(
         """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
+                  m.delivered_at,m.read_at,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
                   up.original_name AS attachment_name,
@@ -372,21 +406,26 @@ def history(
             "recipient_id": row["recipient_id"],
             "body": row["body"],
             "created_at": row["created_at"],
+            "delivered_at": row["delivered_at"],
+            "read_at": row["read_at"],
             "attachment": attachment_json(row),
         }
         result.append(item)
     return result
 
 
-async def push(user_id: int, payload: dict):
+async def push(user_id: int, payload: dict) -> int:
     dead = []
+    sent = 0
     for ws in list(connections.get(user_id, set())):
         try:
             await ws.send_json(payload)
+            sent += 1
         except Exception:
             dead.append(ws)
     for ws in dead:
         connections.get(user_id, set()).discard(ws)
+    return sent
 
 
 @app.post("/api/messages")
@@ -402,14 +441,17 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
     created = now_iso()
     cur = conn.execute(
         """INSERT INTO messages(
-             sender_id,recipient_id,body,created_at,attachment_id
-           ) VALUES(?,?,?,?,?)""",
+             sender_id,recipient_id,body,created_at,attachment_id,
+             delivered_at,read_at
+           ) VALUES(?,?,?,?,?,?,?)""",
         (
             user["id"],
             data.recipient_id,
             body,
             created,
             data.attachment_id,
+            None,
+            None,
         ),
     )
     conn.commit()
@@ -429,9 +471,22 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         "recipient_id": data.recipient_id,
         "body": body,
         "created_at": created,
+        "delivered_at": None,
+        "read_at": None,
         "attachment": attachment,
     }
-    await push(data.recipient_id, {"type": "message", "message": msg})
+    sent = await push(
+        data.recipient_id,
+        {"type": "message", "message": msg},
+    )
+    if sent:
+        delivered_at = now_iso()
+        conn.execute(
+            "UPDATE messages SET delivered_at=? WHERE id=?",
+            (delivered_at, cur.lastrowid),
+        )
+        conn.commit()
+        msg["delivered_at"] = delivered_at
     return msg
 
 
