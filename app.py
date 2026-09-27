@@ -2575,6 +2575,67 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 continue
 
             signal_type = data.get("type")
+
+            if signal_type == "typing":
+                chat_type = str(data.get("chat_type", ""))[:12]
+                typing = bool(data.get("typing", False))
+                try:
+                    chat_id = int(data.get("chat_id"))
+                except (TypeError, ValueError):
+                    continue
+
+                if chat_type == "user":
+                    if chat_id == user_id:
+                        continue
+                    check = connect_db()
+                    exists = check.execute(
+                        "SELECT 1 FROM users WHERE id=?",
+                        (chat_id,),
+                    ).fetchone()
+                    check.close()
+                    if not exists:
+                        continue
+                    await push(
+                        chat_id,
+                        {
+                            "type": "typing",
+                            "chat_type": "user",
+                            "chat_id": user_id,
+                            "from_user_id": user_id,
+                            "from_name": display_name,
+                            "typing": typing,
+                        },
+                    )
+                    continue
+
+                if chat_type == "group":
+                    check = connect_db()
+                    member = check.execute(
+                        "SELECT 1 FROM group_members WHERE group_id=? AND user_id=?",
+                        (chat_id, user_id),
+                    ).fetchone()
+                    if not member:
+                        check.close()
+                        continue
+                    members = check.execute(
+                        "SELECT user_id FROM group_members WHERE group_id=? AND user_id<>?",
+                        (chat_id, user_id),
+                    ).fetchall()
+                    check.close()
+                    payload = {
+                        "type": "typing",
+                        "chat_type": "group",
+                        "chat_id": chat_id,
+                        "from_user_id": user_id,
+                        "from_name": display_name,
+                        "typing": typing,
+                    }
+                    for member_row in members:
+                        await push(int(member_row["user_id"]), payload)
+                    continue
+
+                continue
+
             if signal_type not in CALL_SIGNAL_TYPES:
                 continue
 
