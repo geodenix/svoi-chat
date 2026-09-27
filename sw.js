@@ -1,4 +1,4 @@
-const CACHE_NAME = 'svoi-shell-v1';
+const CACHE_NAME = 'svoi-shell-v2';
 const SHELL = [
   '/',
   '/manifest.webmanifest',
@@ -79,10 +79,14 @@ self.addEventListener('push', event => {
       return;
     }
 
+    const incomingCall = String(data.tag || '').startsWith('incoming-call-');
+
     await self.registration.showNotification(data.title || 'Свои', {
       body: data.body || 'Новое сообщение',
       tag: data.tag || 'svoi',
       renotify: true,
+      requireInteraction: incomingCall,
+      vibrate: incomingCall ? [500, 180, 500, 180, 900] : [180],
       icon: '/icon-192.svg',
       badge: '/icon-192.svg',
       data: {
