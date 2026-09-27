@@ -10,7 +10,6 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Set
-from urllib.parse import parse_qsl, urlencode
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -49,12 +48,6 @@ LIVEKIT_WS_URL = os.getenv(
     "LIVEKIT_WS_URL",
     "wss://epl-gruz.duckdns.org",
 ).strip()
-VK_APP_ID = os.getenv("VK_APP_ID", "").strip()
-VK_APP_SECRET = os.getenv("VK_APP_SECRET", "").strip()
-VK_LAUNCH_MAX_AGE_SECONDS = int(
-    os.getenv("VK_LAUNCH_MAX_AGE_SECONDS", "86400")
-)
-
 
 app = FastAPI(title="Свои", version="0.1.0")
 connections: Dict[int, Set[WebSocket]] = {}
@@ -200,12 +193,6 @@ def init_db():
     }
     if "avatar_id" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN avatar_id INTEGER")
-    if "vk_id" not in user_columns:
-        conn.execute("ALTER TABLE users ADD COLUMN vk_id INTEGER")
-    conn.execute(
-        """CREATE UNIQUE INDEX IF NOT EXISTS idx_users_vk_id
-           ON users(vk_id) WHERE vk_id IS NOT NULL"""
-    )
 
     conn.commit()
     conn.close()
@@ -289,11 +276,6 @@ class LoginIn(BaseModel):
     password: str
 
 
-class VkLoginIn(BaseModel):
-    launch_params: str = Field(min_length=10, max_length=8192)
-    display_name: str | None = Field(default=None, max_length=60)
-
-
 class MessageIn(BaseModel):
     recipient_id: int
     body: str = Field(default="", max_length=4000)
@@ -340,80 +322,6 @@ def health():
     }
 
 
-def validate_vk_launch_params(raw: str) -> tuple[int, dict]:
-    if not VK_APP_ID or not VK_APP_SECRET:
-        raise HTTPException(503, "VK вход пока не настроен")
-
-    try:
-        pairs = parse_qsl(raw, keep_blank_values=True)
-        params = dict(pairs)
-    except Exception:
-        raise HTTPException(400, "Некорректные параметры VK")
-
-    sign = params.get("sign", "")
-    if not sign:
-        raise HTTPException(401, "Нет подписи VK")
-
-    vk_pairs = sorted(
-        (key, value)
-        for key, value in params.items()
-        if key.startswith("vk_")
-    )
-    if not vk_pairs:
-        raise HTTPException(401, "Нет параметров запуска VK")
-
-    signed_query = urlencode(vk_pairs, doseq=True)
-    digest = hmac.new(
-        VK_APP_SECRET.encode(),
-        signed_query.encode(),
-        hashlib.sha256,
-    ).digest()
-    expected = base64.urlsafe_b64encode(digest).decode().rstrip("=")
-
-    if not secrets.compare_digest(sign, expected):
-        raise HTTPException(401, "Неверная подпись VK")
-
-    if str(params.get("vk_app_id", "")) != VK_APP_ID:
-        raise HTTPException(401, "Неверный VK App ID")
-
-    try:
-        vk_user_id = int(params.get("vk_user_id", "0"))
-    except (TypeError, ValueError):
-        raise HTTPException(401, "Некорректный пользователь VK")
-    if vk_user_id <= 0:
-        raise HTTPException(401, "Некорректный пользователь VK")
-
-    # Modern VK launches include vk_ts. If present, reject stale/replayed launch data.
-    raw_ts = params.get("vk_ts")
-    if raw_ts:
-        try:
-            launch_ts = int(raw_ts)
-            if launch_ts > 10_000_000_000:
-                launch_ts //= 1000
-            age = int(time.time()) - launch_ts
-            if age < -300 or age > VK_LAUNCH_MAX_AGE_SECONDS:
-                raise HTTPException(401, "Параметры запуска VK устарели")
-        except HTTPException:
-            raise
-        except (TypeError, ValueError):
-            raise HTTPException(401, "Некорректное время запуска VK")
-
-    return vk_user_id, params
-
-
-def unique_vk_username(conn, vk_user_id: int) -> str:
-    base = f"vk_{vk_user_id}"
-    candidate = base
-    suffix = 1
-    while conn.execute(
-        "SELECT 1 FROM users WHERE username=?",
-        (candidate,),
-    ).fetchone():
-        candidate = f"{base}_{suffix}"
-        suffix += 1
-    return candidate
-
-
 @app.post("/api/register")
 def register(data: RegisterIn, conn=Depends(db)):
     username = data.username.strip().lower()
@@ -449,82 +357,6 @@ def login(data: LoginIn, conn=Depends(db)):
     if not row or not verify_password(data.password, row["password_hash"], row["salt"]):
         raise HTTPException(401, "Неверный логин или пароль")
     return {"token": make_session(conn, row["id"]), "user": user_json(row)}
-
-
-@app.post("/api/vk/login")
-def vk_login(data: VkLoginIn, conn=Depends(db)):
-    vk_user_id, _ = validate_vk_launch_params(data.launch_params)
-
-    row = conn.execute(
-        """SELECT u.*, a.stored_name AS avatar_stored_name
-           FROM users u
-           LEFT JOIN uploads a ON a.id=u.avatar_id
-           WHERE u.vk_id=?""",
-        (vk_user_id,),
-    ).fetchone()
-
-    display_name = (data.display_name or "").strip()[:60]
-    if not display_name:
-        display_name = f"VK {vk_user_id}"
-
-    if not row:
-        username = unique_vk_username(conn, vk_user_id)
-        # VK users authenticate through signed launch params, not this random password.
-        password_hash, salt = hash_password(secrets.token_urlsafe(32))
-        try:
-            cur = conn.execute(
-                """INSERT INTO users(
-                       username,display_name,password_hash,salt,created_at,vk_id
-                   ) VALUES(?,?,?,?,?,?)""",
-                (
-                    username,
-                    display_name,
-                    password_hash,
-                    salt,
-                    now_iso(),
-                    vk_user_id,
-                ),
-            )
-            conn.commit()
-            user_id = cur.lastrowid
-        except sqlite3.IntegrityError:
-            row = conn.execute(
-                """SELECT u.*, a.stored_name AS avatar_stored_name
-                   FROM users u
-                   LEFT JOIN uploads a ON a.id=u.avatar_id
-                   WHERE u.vk_id=?""",
-                (vk_user_id,),
-            ).fetchone()
-            if not row:
-                raise HTTPException(409, "Не удалось создать VK аккаунт")
-            user_id = row["id"]
-
-        row = conn.execute(
-            """SELECT u.*, a.stored_name AS avatar_stored_name
-               FROM users u
-               LEFT JOIN uploads a ON a.id=u.avatar_id
-               WHERE u.id=?""",
-            (user_id,),
-        ).fetchone()
-    elif display_name and row["display_name"].startswith("VK "):
-        conn.execute(
-            "UPDATE users SET display_name=? WHERE id=?",
-            (display_name, row["id"]),
-        )
-        conn.commit()
-        row = conn.execute(
-            """SELECT u.*, a.stored_name AS avatar_stored_name
-               FROM users u
-               LEFT JOIN uploads a ON a.id=u.avatar_id
-               WHERE u.id=?""",
-            (row["id"],),
-        ).fetchone()
-
-    return {
-        "token": make_session(conn, row["id"]),
-        "user": user_json(row),
-        "provider": "vk",
-    }
 
 
 @app.post("/api/logout")
