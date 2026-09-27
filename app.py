@@ -41,6 +41,7 @@ TURN_HOST = os.getenv(
 
 app = FastAPI(title="Свои", version="0.1.0")
 connections: Dict[int, Set[WebSocket]] = {}
+active_calls: dict[str, dict] = {}
 
 
 def now_iso() -> str:
@@ -994,6 +995,48 @@ CALL_SIGNAL_TYPES = {
 }
 
 
+async def notify_missed_call(call: dict):
+    if call.get("answered") or call.get("missed_notified"):
+        return
+    call["missed_notified"] = True
+    kind = "видеозвонок" if call.get("video") else "голосовой звонок"
+    await send_web_push(
+        call["callee_id"],
+        "Пропущенный звонок",
+        f"{kind.capitalize()} от {call['caller_name']}",
+        "/",
+        f"missed-call-{call['call_id']}",
+        True,
+    )
+
+
+async def expire_call(call_id: str):
+    await asyncio.sleep(45)
+    call = active_calls.get(call_id)
+    if not call or call.get("answered"):
+        return
+    await notify_missed_call(call)
+    await push(
+        call["caller_id"],
+        {
+            "type": "call_end",
+            "from_user_id": call["callee_id"],
+            "from_name": "Система",
+            "call_id": call_id,
+        },
+    )
+    await push(
+        call["callee_id"],
+        {
+            "type": "call_end",
+            "from_user_id": call["caller_id"],
+            "from_name": call["caller_name"],
+            "call_id": call_id,
+        },
+    )
+    active_calls.pop(call_id, None)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -1003,10 +1046,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     if not row:
         await websocket.close(code=4401)
         return
+
     user_id = row["id"]
     display_name = row["display_name"]
     await websocket.accept()
     connections.setdefault(user_id, set()).add(websocket)
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -1016,14 +1061,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 data = json.loads(raw)
             except Exception:
                 continue
+
             signal_type = data.get("type")
             if signal_type not in CALL_SIGNAL_TYPES:
                 continue
+
             try:
                 target_id = int(data.get("to_user_id"))
             except (TypeError, ValueError):
                 continue
             if target_id == user_id:
+                continue
+
+            call_id = str(data.get("call_id", ""))[:80]
+            if not call_id:
                 continue
 
             check = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -1039,8 +1090,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 "type": signal_type,
                 "from_user_id": user_id,
                 "from_name": display_name,
-                "call_id": str(data.get("call_id", ""))[:80],
+                "call_id": call_id,
             }
+
             if signal_type in {"call_offer", "call_answer"}:
                 sdp = data.get("sdp")
                 if not isinstance(sdp, dict):
@@ -1053,21 +1105,68 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     continue
                 payload["candidate"] = candidate
 
-            delivered = await push(target_id, payload)
-            if signal_type == "call_offer" and delivered == 0:
-                await websocket.send_json(
-                    {
-                        "type": "call_unavailable",
-                        "to_user_id": target_id,
-                        "call_id": payload["call_id"],
-                    }
-                )
+            if signal_type == "call_offer":
+                call = {
+                    "call_id": call_id,
+                    "caller_id": user_id,
+                    "caller_name": display_name,
+                    "callee_id": target_id,
+                    "video": bool(data.get("video", False)),
+                    "answered": False,
+                    "missed_notified": False,
+                }
+                active_calls[call_id] = call
+                delivered = await push(target_id, payload)
+                if delivered == 0:
+                    await notify_missed_call(call)
+                    await websocket.send_json(
+                        {
+                            "type": "call_unavailable",
+                            "to_user_id": target_id,
+                            "call_id": call_id,
+                        }
+                    )
+                    active_calls.pop(call_id, None)
+                else:
+                    asyncio.create_task(expire_call(call_id))
+                continue
+
+            call = active_calls.get(call_id)
+
+            if signal_type == "call_answer":
+                if call:
+                    call["answered"] = True
+                await push(target_id, payload)
+                continue
+
+            if signal_type == "call_reject":
+                await push(target_id, payload)
+                active_calls.pop(call_id, None)
+                continue
+
+            if signal_type == "call_end":
+                await push(target_id, payload)
+                if call and not call.get("answered"):
+                    await notify_missed_call(call)
+                active_calls.pop(call_id, None)
+                continue
+
+            await push(target_id, payload)
+
     except WebSocketDisconnect:
         pass
     finally:
         connections.get(user_id, set()).discard(websocket)
         if not connections.get(user_id):
             connections.pop(user_id, None)
+            unfinished = [
+                call
+                for call in list(active_calls.values())
+                if call["caller_id"] == user_id and not call.get("answered")
+            ]
+            for call in unfinished:
+                await notify_missed_call(call)
+                active_calls.pop(call["call_id"], None)
 
 
 @app.get("/manifest.webmanifest")
