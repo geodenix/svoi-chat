@@ -329,6 +329,10 @@ class GroupCreateIn(BaseModel):
     member_ids: list[int] = Field(default_factory=list)
 
 
+class GroupRenameIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
 class GroupMemberAddIn(BaseModel):
     tag: str = Field(min_length=1, max_length=33)
 
@@ -1426,6 +1430,48 @@ async def create_group(data: GroupCreateIn, user=Depends(current_user), conn=Dep
                 },
             )
     return group
+
+
+@app.patch("/api/groups/{group_id}")
+async def rename_group(
+    group_id: int,
+    data: GroupRenameIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+    if not bool(group["is_admin"]):
+        raise HTTPException(403, "Менять название группы может только администратор")
+
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(400, "Название группы не может быть пустым")
+
+    conn.execute(
+        "UPDATE chat_groups SET name=? WHERE id=?",
+        (name, group_id),
+    )
+    conn.commit()
+
+    row = conn.execute(
+        """SELECT g.id,g.name,g.owner_id,g.created_at,
+                  ga.stored_name AS avatar_stored_name,
+                  gm_me.is_admin AS is_admin,
+                  COUNT(gm.user_id) AS member_count
+           FROM chat_groups g
+           JOIN group_members gm_me
+             ON gm_me.group_id=g.id AND gm_me.user_id=?
+           LEFT JOIN uploads ga ON ga.id=g.avatar_id
+           LEFT JOIN group_members gm ON gm.group_id=g.id
+           WHERE g.id=?
+           GROUP BY g.id""",
+        (user["id"], group_id),
+    ).fetchone()
+
+    await _broadcast_group_update(group_id)
+    return group_json(row)
 
 
 @app.get("/api/groups/{group_id}/members")
