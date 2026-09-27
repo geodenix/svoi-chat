@@ -2,11 +2,14 @@ import hashlib
 import os
 import secrets
 import sqlite3
-from datetime import datetime, timezone
+import json
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Set
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -18,6 +21,12 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 INLINE_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+SMSRU_API_ID = os.getenv("SMSRU_API_ID", "").strip()
+SMS_DEV_MODE = os.getenv("SMS_DEV_MODE", "0") == "1"
+OTP_TTL_MINUTES = 5
+OTP_MAX_ATTEMPTS = 5
+OTP_RESEND_SECONDS = 60
+OTP_MAX_PER_HOUR = 5
 
 app = FastAPI(title="Свои", version="0.1.0")
 connections: Dict[int, Set[WebSocket]] = {}
@@ -93,7 +102,27 @@ def init_db():
       size INTEGER NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS phone_auth_codes (
+      phone TEXT PRIMARY KEY,
+      code_hash TEXT NOT NULL,
+      salt TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_sent_at TEXT NOT NULL,
+      window_started_at TEXT NOT NULL,
+      sent_in_window INTEGER NOT NULL DEFAULT 1
+    );
     """)
+    user_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(users)").fetchall()
+    }
+    if "phone" not in user_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone "
+        "ON users(phone) WHERE phone IS NOT NULL"
+    )
     for table in ("messages", "group_messages"):
         columns = {
             row[1]
@@ -147,16 +176,18 @@ def make_session(conn, user_id: int) -> str:
 
 
 def user_json(row):
+    keys = row.keys()
     return {
         "id": row["id"],
         "username": row["username"],
         "display_name": row["display_name"],
+        "phone": row["phone"] if "phone" in keys else None,
     }
 
 
 def get_user_from_token(conn, token: str):
     row = conn.execute(
-        """SELECT u.id,u.username,u.display_name
+        """SELECT u.id,u.username,u.display_name,u.phone
            FROM sessions s JOIN users u ON u.id=s.user_id
            WHERE s.token_hash=?""",
         (token_hash(token),),
@@ -188,6 +219,16 @@ class LoginIn(BaseModel):
     password: str
 
 
+class PhoneRequestIn(BaseModel):
+    phone: str = Field(min_length=7, max_length=30)
+
+
+class PhoneVerifyIn(BaseModel):
+    phone: str = Field(min_length=7, max_length=30)
+    code: str = Field(min_length=4, max_length=8)
+    display_name: str | None = Field(default=None, max_length=60)
+
+
 class MessageIn(BaseModel):
     recipient_id: int
     body: str = Field(default="", max_length=4000)
@@ -207,6 +248,205 @@ class GroupMessageIn(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "svoi-chat"}
+
+
+def normalize_phone(raw: str) -> str:
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 10:
+        digits = "7" + digits
+    elif len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    if not 8 <= len(digits) <= 15:
+        raise HTTPException(400, "Неверный номер телефона")
+    return digits
+
+
+def sms_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:64]
+    return (request.client.host if request.client else "")[:64]
+
+
+def send_sms_code(phone: str, code: str, ip: str) -> None:
+    if SMS_DEV_MODE:
+        return
+    if not SMSRU_API_ID:
+        raise HTTPException(
+            503,
+            "SMS-вход пока не настроен администратором",
+        )
+    payload = urllib.parse.urlencode(
+        {
+            "api_id": SMSRU_API_ID,
+            "to": phone,
+            "msg": f"Код входа в Свои: {code}",
+            "json": 1,
+            "ip": ip,
+        }
+    ).encode()
+    try:
+        request = urllib.request.Request(
+            "https://sms.ru/sms/send",
+            data=payload,
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(502, "Не удалось отправить SMS") from exc
+    sms = (result.get("sms") or {}).get(phone) or {}
+    if result.get("status_code") != 100 or sms.get("status_code") != 100:
+        text = sms.get("status_text") or result.get("status_text")
+        raise HTTPException(502, text or "SMS-сервис отклонил отправку")
+
+
+@app.post("/api/auth/phone/request")
+def request_phone_code(
+    data: PhoneRequestIn,
+    request: Request,
+    conn=Depends(db),
+):
+    phone = normalize_phone(data.phone)
+    now = datetime.now(timezone.utc)
+    row = conn.execute(
+        "SELECT * FROM phone_auth_codes WHERE phone=?",
+        (phone,),
+    ).fetchone()
+    sent_in_window = 1
+    window_started = now
+    if row:
+        last_sent = datetime.fromisoformat(row["last_sent_at"])
+        if (now - last_sent).total_seconds() < OTP_RESEND_SECONDS:
+            wait = OTP_RESEND_SECONDS - int((now - last_sent).total_seconds())
+            raise HTTPException(
+                429,
+                f"Повторить отправку можно через {wait} сек.",
+            )
+        old_window = datetime.fromisoformat(row["window_started_at"])
+        if now - old_window < timedelta(hours=1):
+            if row["sent_in_window"] >= OTP_MAX_PER_HOUR:
+                raise HTTPException(
+                    429,
+                    "Слишком много кодов. Попробуй позже.",
+                )
+            sent_in_window = row["sent_in_window"] + 1
+            window_started = old_window
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    code_hash, salt = hash_password(code)
+    send_sms_code(phone, code, sms_client_ip(request))
+    conn.execute(
+        """INSERT INTO phone_auth_codes(
+             phone,code_hash,salt,expires_at,attempts,last_sent_at,
+             window_started_at,sent_in_window
+           ) VALUES(?,?,?,?,?,?,?,?)
+           ON CONFLICT(phone) DO UPDATE SET
+             code_hash=excluded.code_hash,
+             salt=excluded.salt,
+             expires_at=excluded.expires_at,
+             attempts=0,
+             last_sent_at=excluded.last_sent_at,
+             window_started_at=excluded.window_started_at,
+             sent_in_window=excluded.sent_in_window""",
+        (
+            phone,
+            code_hash,
+            salt,
+            (now + timedelta(minutes=OTP_TTL_MINUTES)).isoformat(),
+            0,
+            now.isoformat(),
+            window_started.isoformat(),
+            sent_in_window,
+        ),
+    )
+    conn.commit()
+    result = {
+        "ok": True,
+        "phone": "+" + phone,
+        "expires_in": OTP_TTL_MINUTES * 60,
+    }
+    if SMS_DEV_MODE:
+        result["dev_code"] = code
+    return result
+
+
+def phone_username(conn, phone: str) -> str:
+    base = "u" + phone[-8:]
+    candidate = base
+    for _ in range(20):
+        if not conn.execute(
+            "SELECT 1 FROM users WHERE username=?",
+            (candidate,),
+        ).fetchone():
+            return candidate
+        candidate = base + secrets.token_hex(2)
+    return "u" + secrets.token_hex(8)
+
+
+@app.post("/api/auth/phone/verify")
+def verify_phone_code(data: PhoneVerifyIn, conn=Depends(db)):
+    phone = normalize_phone(data.phone)
+    row = conn.execute(
+        "SELECT * FROM phone_auth_codes WHERE phone=?",
+        (phone,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(400, "Сначала запроси новый код")
+    now = datetime.now(timezone.utc)
+    if now > datetime.fromisoformat(row["expires_at"]):
+        conn.execute("DELETE FROM phone_auth_codes WHERE phone=?", (phone,))
+        conn.commit()
+        raise HTTPException(400, "Код истёк. Запроси новый.")
+    if row["attempts"] >= OTP_MAX_ATTEMPTS:
+        raise HTTPException(429, "Слишком много попыток. Запроси новый код.")
+    if not verify_password(data.code.strip(), row["code_hash"], row["salt"]):
+        conn.execute(
+            "UPDATE phone_auth_codes SET attempts=attempts+1 WHERE phone=?",
+            (phone,),
+        )
+        conn.commit()
+        raise HTTPException(400, "Неверный код")
+    user = conn.execute(
+        """SELECT id,username,display_name,phone
+           FROM users WHERE phone=?""",
+        (phone,),
+    ).fetchone()
+    if not user:
+        display_name = (data.display_name or "").strip()
+        if not display_name:
+            raise HTTPException(
+                400,
+                "Для первого входа укажи имя",
+            )
+        username = phone_username(conn, phone)
+        password_hash, password_salt = hash_password(
+            secrets.token_urlsafe(32)
+        )
+        cur = conn.execute(
+            """INSERT INTO users(
+                 username,display_name,password_hash,salt,created_at,phone
+               ) VALUES(?,?,?,?,?,?)""",
+            (
+                username,
+                display_name,
+                password_hash,
+                password_salt,
+                now_iso(),
+                phone,
+            ),
+        )
+        conn.commit()
+        user = conn.execute(
+            """SELECT id,username,display_name,phone
+               FROM users WHERE id=?""",
+            (cur.lastrowid,),
+        ).fetchone()
+    conn.execute("DELETE FROM phone_auth_codes WHERE phone=?", (phone,))
+    conn.commit()
+    return {
+        "token": make_session(conn, user["id"]),
+        "user": user_json(user),
+    }
 
 
 @app.post("/api/register")
