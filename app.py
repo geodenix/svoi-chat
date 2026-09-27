@@ -120,7 +120,8 @@ def init_db():
       recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      client_message_id TEXT
+      client_message_id TEXT,
+      reply_to_message_id INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_messages_pair
       ON messages(sender_id, recipient_id, id);
@@ -142,7 +143,8 @@ def init_db():
       sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      client_message_id TEXT
+      client_message_id TEXT,
+      reply_to_message_id INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_group_messages
       ON group_messages(group_id, id);
@@ -208,6 +210,10 @@ def init_db():
         if "client_message_id" not in columns:
             conn.execute(
                 f"ALTER TABLE {table} ADD COLUMN client_message_id TEXT"
+            )
+        if "reply_to_message_id" not in columns:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN reply_to_message_id INTEGER"
             )
         if table == "messages":
             if "delivered_at" not in columns:
@@ -385,6 +391,7 @@ class MessageIn(BaseModel):
     body: str = Field(default="", max_length=4000)
     attachment_id: int | None = None
     client_message_id: str | None = Field(default=None, max_length=80)
+    reply_to_message_id: int | None = None
 
 
 class GroupCreateIn(BaseModel):
@@ -404,6 +411,7 @@ class GroupMessageIn(BaseModel):
     body: str = Field(default="", max_length=4000)
     attachment_id: int | None = None
     client_message_id: str | None = Field(default=None, max_length=80)
+    reply_to_message_id: int | None = None
 
 
 class ForwardMessageIn(BaseModel):
@@ -1627,7 +1635,7 @@ async def history(
         )
     rows = conn.execute(
         """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
-                  m.delivered_at,m.read_at,m.forwarded,
+                  m.delivered_at,m.read_at,m.forwarded,m.reply_to_message_id,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
                   up.original_name AS attachment_name,
@@ -1651,6 +1659,7 @@ async def history(
             "delivered_at": row["delivered_at"],
             "read_at": row["read_at"],
             "forwarded": bool(row["forwarded"]),
+            "reply_to_message_id": row["reply_to_message_id"],
             "attachment": attachment_json(row),
         }
         result.append(item)
@@ -1682,7 +1691,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
     if data.client_message_id:
         existing = conn.execute(
             """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
-                      m.delivered_at,m.read_at,m.forwarded,
+                      m.delivered_at,m.read_at,m.forwarded,m.reply_to_message_id,
                       up.id AS attachment_id,
                       up.stored_name AS attachment_stored_name,
                       up.original_name AS attachment_name,
@@ -1705,8 +1714,28 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
                 "delivered_at": existing["delivered_at"],
                 "read_at": existing["read_at"],
                 "forwarded": bool(existing["forwarded"]),
+                "reply_to_message_id": existing["reply_to_message_id"],
                 "attachment": attachment_json(existing),
             }
+    if data.reply_to_message_id is not None:
+        reply_row = conn.execute(
+            """SELECT id FROM messages
+               WHERE id=?
+                 AND (
+                   (sender_id=? AND recipient_id=?)
+                   OR (sender_id=? AND recipient_id=?)
+                 )""",
+            (
+                data.reply_to_message_id,
+                user["id"],
+                data.recipient_id,
+                data.recipient_id,
+                user["id"],
+            ),
+        ).fetchone()
+        if not reply_row:
+            raise HTTPException(400, "Сообщение для ответа не найдено в этом чате")
+
     body = data.body.strip()
     upload_row = owned_upload(conn, data.attachment_id, user["id"])
     if not body and not upload_row:
@@ -1715,8 +1744,8 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
     cur = conn.execute(
         """INSERT INTO messages(
              sender_id,recipient_id,body,created_at,attachment_id,
-             delivered_at,read_at,client_message_id
-           ) VALUES(?,?,?,?,?,?,?,?)""",
+             delivered_at,read_at,client_message_id,reply_to_message_id
+           ) VALUES(?,?,?,?,?,?,?,?,?)""",
         (
             user["id"],
             data.recipient_id,
@@ -1726,6 +1755,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
             None,
             None,
             data.client_message_id,
+            data.reply_to_message_id,
         ),
     )
     conn.commit()
@@ -1754,6 +1784,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         "delivered_at": None,
         "read_at": None,
         "forwarded": False,
+        "reply_to_message_id": data.reply_to_message_id,
         "attachment": attachment,
     }
     sent = await push(
@@ -2377,7 +2408,7 @@ def get_group_messages(
         raise HTTPException(404, "Группа не найдена")
     rows = conn.execute(
         """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
-                  gm.deleted_at,gm.deleted_by,gm.forwarded,
+                  gm.deleted_at,gm.deleted_by,gm.forwarded,gm.reply_to_message_id,
                   EXISTS(
                     SELECT 1 FROM group_message_mentions gmm
                     WHERE gmm.message_id=gm.id AND gmm.user_id=?
@@ -2413,6 +2444,7 @@ def get_group_messages(
             "deleted": deleted,
             "deleted_at": row["deleted_at"],
             "forwarded": bool(row["forwarded"]),
+            "reply_to_message_id": row["reply_to_message_id"],
             "mentioned_me": bool(row["mentioned_me"]) and not deleted,
             "has_mentions": bool(row["has_mentions"]) and not deleted,
             "can_delete": (
@@ -2438,7 +2470,7 @@ async def send_group_message(
     if data.client_message_id:
         existing = conn.execute(
             """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
-                      gm.deleted_at,gm.forwarded,
+                      gm.deleted_at,gm.forwarded,gm.reply_to_message_id,
                       EXISTS(
                         SELECT 1 FROM group_message_mentions gmm
                         WHERE gmm.message_id=gm.id AND gmm.user_id=?
@@ -2474,11 +2506,20 @@ async def send_group_message(
                 "deleted": deleted,
                 "deleted_at": existing["deleted_at"],
                 "forwarded": bool(existing["forwarded"]),
+                "reply_to_message_id": existing["reply_to_message_id"],
                 "mentioned_me": bool(existing["mentioned_me"]) and not deleted,
                 "has_mentions": bool(existing["has_mentions"]) and not deleted,
                 "can_delete": not deleted,
                 "can_restore": False,
             }
+    if data.reply_to_message_id is not None:
+        reply_row = conn.execute(
+            "SELECT id FROM group_messages WHERE id=? AND group_id=?",
+            (data.reply_to_message_id, group_id),
+        ).fetchone()
+        if not reply_row:
+            raise HTTPException(400, "Сообщение для ответа не найдено в этой группе")
+
     body = data.body.strip()
     upload_row = owned_upload(conn, data.attachment_id, user["id"])
     if not body and not upload_row:
@@ -2486,8 +2527,9 @@ async def send_group_message(
     created = now_iso()
     cur = conn.execute(
         """INSERT INTO group_messages(
-             group_id,sender_id,body,created_at,attachment_id,client_message_id
-           ) VALUES(?,?,?,?,?,?)""",
+             group_id,sender_id,body,created_at,attachment_id,client_message_id,
+             reply_to_message_id
+           ) VALUES(?,?,?,?,?,?,?)""",
         (
             group_id,
             user["id"],
@@ -2495,6 +2537,7 @@ async def send_group_message(
             created,
             data.attachment_id,
             data.client_message_id,
+            data.reply_to_message_id,
         ),
     )
     mention_ids = resolve_group_mentions(conn, group_id, body)
@@ -2527,6 +2570,7 @@ async def send_group_message(
         "deleted": False,
         "deleted_at": None,
         "forwarded": False,
+        "reply_to_message_id": data.reply_to_message_id,
         "mentioned_me": user["id"] in mention_ids,
         "has_mentions": bool(mention_ids),
         "can_delete": True,
