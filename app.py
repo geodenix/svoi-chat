@@ -1398,7 +1398,13 @@ async def create_group(data: GroupCreateIn, user=Depends(current_user), conn=Dep
     }
     for uid in member_ids:
         if uid != user["id"]:
-            await push(uid, {"type": "group_created", "group": group})
+            await push(
+                uid,
+                {
+                    "type": "group_created",
+                    "group": {**group, "is_admin": False},
+                },
+            )
     return group
 
 
@@ -1424,6 +1430,7 @@ def get_group_members(group_id: int, user=Depends(current_user), conn=Depends(db
         "group_id": group_id,
         "owner_id": group["owner_id"],
         "can_manage_admins": group["owner_id"] == user["id"],
+        "can_add_members": bool(group["is_admin"]),
         "members": [
             {
                 **user_json(r),
@@ -1495,6 +1502,89 @@ async def remove_group_admin(
     conn.commit()
     await _broadcast_group_roles(group_id)
     return {"ok": True, "member_id": member_id, "is_admin": False}
+
+
+@app.post("/api/groups/{group_id}/members/{member_id}")
+async def add_group_member(
+    group_id: int,
+    member_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+    if not bool(group["is_admin"]):
+        raise HTTPException(403, "Добавлять участников может только администратор")
+    if member_id == user["id"]:
+        raise HTTPException(400, "Вы уже состоите в этой группе")
+
+    target = conn.execute(
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.id=?""",
+        (member_id,),
+    ).fetchone()
+    if not target:
+        raise HTTPException(404, "Пользователь не найден")
+
+    existing = conn.execute(
+        "SELECT 1 FROM group_members WHERE group_id=? AND user_id=?",
+        (group_id, member_id),
+    ).fetchone()
+    if existing:
+        raise HTTPException(409, "Пользователь уже состоит в группе")
+
+    count = conn.execute(
+        "SELECT COUNT(*) FROM group_members WHERE group_id=?",
+        (group_id,),
+    ).fetchone()[0]
+    if count >= 50:
+        raise HTTPException(400, "В группе может быть не более 50 участников")
+
+    conn.execute(
+        """INSERT INTO group_members(
+             group_id,user_id,joined_at,is_admin
+           ) VALUES(?,?,?,0)""",
+        (group_id, member_id, now_iso()),
+    )
+    conn.commit()
+
+    row = conn.execute(
+        """SELECT g.id,g.name,g.owner_id,g.created_at,
+                  ga.stored_name AS avatar_stored_name,
+                  COUNT(gm.user_id) AS member_count
+           FROM chat_groups g
+           LEFT JOIN uploads ga ON ga.id=g.avatar_id
+           LEFT JOIN group_members gm ON gm.group_id=g.id
+           WHERE g.id=?
+           GROUP BY g.id""",
+        (group_id,),
+    ).fetchone()
+    added_group = {**group_json(row), "is_admin": False}
+
+    await push(
+        member_id,
+        {
+            "type": "group_added",
+            "group": added_group,
+            "added_by": user["id"],
+        },
+    )
+    await _broadcast_group_update(group_id)
+
+    return {
+        "ok": True,
+        "group": added_group,
+        "member": {
+            **user_json(target),
+            "online": bool(connections.get(member_id)),
+            "is_admin": False,
+            "is_owner": False,
+        },
+    }
 
 
 @app.delete("/api/groups/{group_id}/members/{member_id}")
