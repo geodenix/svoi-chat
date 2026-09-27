@@ -59,6 +59,27 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_messages_pair
       ON messages(sender_id, recipient_id, id);
+    CREATE TABLE IF NOT EXISTS chat_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS group_members (
+      group_id INTEGER NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      joined_at TEXT NOT NULL,
+      PRIMARY KEY(group_id, user_id)
+    );
+    CREATE TABLE IF NOT EXISTS group_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
+      sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_messages
+      ON group_messages(group_id, id);
     """)
     conn.close()
 
@@ -137,6 +158,15 @@ class LoginIn(BaseModel):
 
 class MessageIn(BaseModel):
     recipient_id: int
+    body: str = Field(min_length=1, max_length=4000)
+
+
+class GroupCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    member_ids: list[int] = Field(default_factory=list)
+
+
+class GroupMessageIn(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
 
 
@@ -256,6 +286,145 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         "created_at": created,
     }
     await push(data.recipient_id, {"type": "message", "message": msg})
+    return msg
+
+
+def group_for_user(conn, group_id: int, user_id: int):
+    return conn.execute(
+        """SELECT g.id,g.name,g.owner_id,g.created_at
+           FROM chat_groups g
+           JOIN group_members gm ON gm.group_id=g.id
+           WHERE g.id=? AND gm.user_id=?""",
+        (group_id, user_id),
+    ).fetchone()
+
+
+@app.get("/api/groups")
+def get_groups(user=Depends(current_user), conn=Depends(db)):
+    rows = conn.execute(
+        """SELECT g.id,g.name,g.owner_id,g.created_at,
+                  COUNT(gm2.user_id) AS member_count
+           FROM chat_groups g
+           JOIN group_members mine
+             ON mine.group_id=g.id AND mine.user_id=?
+           LEFT JOIN group_members gm2 ON gm2.group_id=g.id
+           GROUP BY g.id
+           ORDER BY g.id DESC""",
+        (user["id"],),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/groups")
+async def create_group(data: GroupCreateIn, user=Depends(current_user), conn=Depends(db)):
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(400, "Название группы не может быть пустым")
+    member_ids = sorted(set(data.member_ids + [user["id"]]))
+    if len(member_ids) > 50:
+        raise HTTPException(400, "В группе может быть не более 50 участников")
+    marks = ",".join("?" for _ in member_ids)
+    found = conn.execute(
+        f"SELECT id FROM users WHERE id IN ({marks})", tuple(member_ids)
+    ).fetchall()
+    if len(found) != len(member_ids):
+        raise HTTPException(400, "Один из пользователей не найден")
+    created = now_iso()
+    cur = conn.execute(
+        "INSERT INTO chat_groups(name,owner_id,created_at) VALUES(?,?,?)",
+        (name, user["id"], created),
+    )
+    group_id = cur.lastrowid
+    conn.executemany(
+        "INSERT INTO group_members(group_id,user_id,joined_at) VALUES(?,?,?)",
+        [(group_id, uid, created) for uid in member_ids],
+    )
+    conn.commit()
+    group = {
+        "id": group_id,
+        "name": name,
+        "owner_id": user["id"],
+        "created_at": created,
+        "member_count": len(member_ids),
+    }
+    for uid in member_ids:
+        if uid != user["id"]:
+            await push(uid, {"type": "group_created", "group": group})
+    return group
+
+
+@app.get("/api/groups/{group_id}/members")
+def get_group_members(group_id: int, user=Depends(current_user), conn=Depends(db)):
+    if not group_for_user(conn, group_id, user["id"]):
+        raise HTTPException(404, "Группа не найдена")
+    rows = conn.execute(
+        """SELECT u.id,u.username,u.display_name
+           FROM group_members gm
+           JOIN users u ON u.id=gm.user_id
+           WHERE gm.group_id=?
+           ORDER BY u.display_name""",
+        (group_id,),
+    ).fetchall()
+    return [
+        {**user_json(r), "online": bool(connections.get(r["id"]))}
+        for r in rows
+    ]
+
+
+@app.get("/api/groups/{group_id}/messages")
+def get_group_messages(
+    group_id: int,
+    limit: int = Query(100, ge=1, le=300),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    if not group_for_user(conn, group_id, user["id"]):
+        raise HTTPException(404, "Группа не найдена")
+    rows = conn.execute(
+        """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
+                  u.display_name AS sender_name
+           FROM group_messages gm
+           JOIN users u ON u.id=gm.sender_id
+           WHERE gm.group_id=?
+           ORDER BY gm.id DESC LIMIT ?""",
+        (group_id, limit),
+    ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+@app.post("/api/groups/{group_id}/messages")
+async def send_group_message(
+    group_id: int,
+    data: GroupMessageIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    if not group_for_user(conn, group_id, user["id"]):
+        raise HTTPException(404, "Группа не найдена")
+    body = data.body.strip()
+    if not body:
+        raise HTTPException(400, "Пустое сообщение")
+    created = now_iso()
+    cur = conn.execute(
+        "INSERT INTO group_messages(group_id,sender_id,body,created_at) VALUES(?,?,?,?)",
+        (group_id, user["id"], body, created),
+    )
+    conn.commit()
+    msg = {
+        "id": cur.lastrowid,
+        "group_id": group_id,
+        "sender_id": user["id"],
+        "sender_name": user["display_name"],
+        "body": body,
+        "created_at": created,
+    }
+    member_rows = conn.execute(
+        "SELECT user_id FROM group_members WHERE group_id=?",
+        (group_id,),
+    ).fetchall()
+    for row in member_rows:
+        if row["user_id"] != user["id"]:
+            await push(row["user_id"], {"type": "group_message", "message": msg})
     return msg
 
 
