@@ -100,9 +100,23 @@ jobs:
         shell: bash
         run: |
           set +x
-          printf '%s' "$SVOI_KEYSTORE_BASE64" | base64 -d > "$SVOI_KEYSTORE_PATH"
 
-          keytool -list             -keystore "$SVOI_KEYSTORE_PATH"             -storepass "$SVOI_KEYSTORE_PASSWORD"             -alias "$SVOI_KEY_ALIAS"             >/dev/null
+          if ! printf '%s' "$SVOI_KEYSTORE_BASE64" | base64 -d > "$SVOI_KEYSTORE_PATH"; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is invalid"
+            exit 1
+          fi
+
+          if ! keytool -list -keystore "$SVOI_KEYSTORE_PATH" -storepass "$SVOI_KEYSTORE_PASSWORD" >/dev/null 2>&1; then
+            echo "::error::ANDROID_KEYSTORE_PASSWORD does not match the keystore, or the keystore data is wrong"
+            exit 1
+          fi
+
+          if ! keytool -list -keystore "$SVOI_KEYSTORE_PATH" -storepass "$SVOI_KEYSTORE_PASSWORD" -alias "$SVOI_KEY_ALIAS" >/dev/null 2>&1; then
+            echo "::error::ANDROID_KEY_ALIAS does not exist in the keystore"
+            exit 1
+          fi
+
+          echo "Signing keystore verified successfully"
 
       - name: Build signed release APK
         run: |
