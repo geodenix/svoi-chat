@@ -26,7 +26,7 @@ dialog{width:min(92vw,460px);border:1px solid #334965;border-radius:20px;backgro
 
 <div id="app" class="app hidden">
   <aside class="sidebar">
-    <div class="side-head"><div class="mark">С</div><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="logout" class="logout">Выйти</button></div>
+    <div class="side-head"><div class="mark">С</div><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="notifyBtn" class="logout" type="button" title="Включить уведомления">🔔</button><button id="logout" class="logout">Выйти</button></div>
     <div class="scroll">
       <div class="section-head"><span>Группы</span><button id="newGroup" class="new-group">+ Новая</button></div>
       <div id="groups" class="list"></div>
@@ -89,7 +89,7 @@ async function enter(){
   try{
     me=await api('/api/me');$('meName').textContent=me.display_name;$('meUser').textContent='@'+me.username;
     $('authError').textContent='';$('auth').classList.add('hidden');$('app').classList.remove('hidden');
-    await Promise.all([loadUsers(),loadGroups()]);connectWs()
+    await Promise.all([loadUsers(),loadGroups()]);connectWs();initPush().catch(()=>{})
   }catch(err){
     if(err?.status===401){
       token='';localStorage.removeItem('svoi_token');showAuth();return
@@ -217,6 +217,67 @@ $('composer').onsubmit=async e=>{
   }catch(err){alert(err.message)}
 };
 
+function urlBase64ToUint8Array(value){
+  const padding='='.repeat((4-value.length%4)%4);
+  const base64=(value+padding).replace(/-/g,'+').replace(/_/g,'/');
+  const raw=atob(base64);
+  return Uint8Array.from([...raw].map(ch=>ch.charCodeAt(0)))
+}
+
+async function ensurePushSubscription(registration){
+  const config=await api('/api/push/public-key');
+  if(!config.configured||!config.public_key)throw new Error('Push-уведомления пока не настроены на сервере');
+  let sub=await registration.pushManager.getSubscription();
+  if(!sub){
+    sub=await registration.pushManager.subscribe({
+      userVisibleOnly:true,
+      applicationServerKey:urlBase64ToUint8Array(config.public_key)
+    })
+  }
+  await api('/api/push/subscribe',{method:'POST',body:sub.toJSON()});
+  $('notifyBtn').textContent='🔔';$('notifyBtn').title='Уведомления включены';
+  return sub
+}
+
+async function initPush(){
+  const btn=$('notifyBtn');
+  if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window)){
+    btn.classList.add('hidden');return
+  }
+  const registration=await navigator.serviceWorker.register('/sw.js');
+  if(Notification.permission==='granted'){
+    await ensurePushSubscription(registration)
+  }else if(Notification.permission==='denied'){
+    btn.textContent='🔕';btn.title='Уведомления запрещены в настройках браузера'
+  }else{
+    btn.textContent='🔔';btn.title='Включить уведомления'
+  }
+}
+
+$('notifyBtn').onclick=async()=>{
+  try{
+    if(!('Notification' in window))throw new Error('Этот браузер не поддерживает уведомления');
+    if(Notification.permission==='denied')throw new Error('Разреши уведомления для этого сайта в настройках браузера');
+    const permission=Notification.permission==='granted'
+      ?'granted'
+      :await Notification.requestPermission();
+    if(permission!=='granted')return;
+    const registration=await navigator.serviceWorker.ready;
+    await ensurePushSubscription(registration)
+  }catch(err){alert(err.message)}
+};
+
+async function removePushSubscription(){
+  if(!('serviceWorker' in navigator))return;
+  try{
+    const registration=await navigator.serviceWorker.ready;
+    const sub=await registration.pushManager.getSubscription();
+    if(!sub)return;
+    try{await api('/api/push/unsubscribe',{method:'POST',body:sub.toJSON()})}catch{}
+    await sub.unsubscribe()
+  }catch{}
+}
+
 function connectWs(){
   if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';
   socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));
@@ -273,7 +334,7 @@ $('createGroup').onclick=async()=>{
   }catch(err){$('groupError').textContent=err.message}
 };
 
-$('logout').onclick=async()=>{try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
+$('logout').onclick=async()=>{await removePushSubscription();try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
 $('back').onclick=()=>{$('app').classList.remove('chat-open')};
 
 if(token)enter();else showAuth();
