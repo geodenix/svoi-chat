@@ -26,22 +26,41 @@ jobs:
 
     env:
       SVOI_KEYSTORE_PATH: ${{ github.workspace }}/android-app/android/app/svoi-release.jks
-      SVOI_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      SVOI_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-      SVOI_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      RAW_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      RAW_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      RAW_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      RAW_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify signing secrets
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      - name: Normalize signing secrets
+        shell: bash
         run: |
+          set +x
+
+          KEYSTORE_B64="${RAW_KEYSTORE_BASE64#ANDROID_KEYSTORE_BASE64=}"
+          KEYSTORE_B64="$(printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]')"
+
+          STORE_PASS="${RAW_KEYSTORE_PASSWORD#ANDROID_KEYSTORE_PASSWORD=}"
+          KEY_ALIAS="${RAW_KEY_ALIAS#ANDROID_KEY_ALIAS=}"
+          KEY_PASS="${RAW_KEY_PASSWORD#ANDROID_KEY_PASSWORD=}"
+
           test -n "$KEYSTORE_B64"
-          test -n "$SVOI_KEYSTORE_PASSWORD"
-          test -n "$SVOI_KEY_ALIAS"
-          test -n "$SVOI_KEY_PASSWORD"
+          test -n "$STORE_PASS"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASS"
+
+          echo "::add-mask::$KEYSTORE_B64"
+          echo "::add-mask::$STORE_PASS"
+          echo "::add-mask::$KEY_ALIAS"
+          echo "::add-mask::$KEY_PASS"
+
+          printf 'SVOI_KEYSTORE_BASE64=%s\n' "$KEYSTORE_B64" >> "$GITHUB_ENV"
+          printf 'SVOI_KEYSTORE_PASSWORD=%s\n' "$STORE_PASS" >> "$GITHUB_ENV"
+          printf 'SVOI_KEY_ALIAS=%s\n' "$KEY_ALIAS" >> "$GITHUB_ENV"
+          printf 'SVOI_KEY_PASSWORD=%s\n' "$KEY_PASS" >> "$GITHUB_ENV"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -78,10 +97,13 @@ jobs:
           python3 patch_android.py
           python3 patch_release.py "${{ inputs.version_code }}" "${{ inputs.version_name }}"
 
-      - name: Restore signing key
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-        run: echo "$KEYSTORE_B64" | base64 -d > "$SVOI_KEYSTORE_PATH"
+      - name: Restore and verify signing key
+        shell: bash
+        run: |
+          set +x
+          printf '%s' "$SVOI_KEYSTORE_BASE64" | base64 -d > "$SVOI_KEYSTORE_PATH"
+
+          keytool -list             -keystore "$SVOI_KEYSTORE_PATH"             -storepass "$SVOI_KEYSTORE_PASSWORD"             -alias "$SVOI_KEY_ALIAS"             >/dev/null
 
       - name: Build signed release APK
         run: |
