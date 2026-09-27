@@ -543,7 +543,7 @@ def search_user(
         raise HTTPException(400, "Укажи тег пользователя")
 
     row = conn.execute(
-        """SELECT u.id,u.username,u.display_name,
+        """SELECT u.id,u.username,u.display_name,u.last_seen_at,
                   a.stored_name AS avatar_stored_name,
                   EXISTS(
                     SELECT 1 FROM contacts c
