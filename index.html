@@ -12,7 +12,7 @@
 <title>Свои</title>
 <style>
 :root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#eef4ff;background:#09111f;--safe-top:env(safe-area-inset-top,0px);--safe-bottom:env(safe-area-inset-bottom,0px)}*{box-sizing:border-box}body{margin:0}button,input,textarea{font:inherit}.hidden{display:none!important}
-.auth{min-height:100dvh;display:grid;place-items:center;padding:20px;background:radial-gradient(circle at top,#18375e,#09111f 65%)}.auth-card{width:min(420px,100%);background:#111f34;border:1px solid #293d58;border-radius:24px;padding:26px}.brand{display:flex;align-items:center;gap:12px;margin-bottom:22px}.mark{width:48px;height:48px;border-radius:16px;display:grid;place-items:center;background:#2b86fa;font-size:25px;font-weight:800}.auth h1{margin:0}.muted{color:#aab9cf}.tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:18px 0}.tabs button,.auth button{border:0;border-radius:12px;padding:12px;background:#203552;color:#eef4ff}.tabs .active,.primary{background:#2b86fa!important}.field{margin:12px 0}.field label{display:block;font-size:13px;color:#b7c5d9;margin-bottom:6px}.field input{width:100%;border:1px solid #354b68;background:#0c1728;color:#fff;border-radius:12px;padding:12px}.error{color:#ffb4b4;min-height:22px}
+.auth{min-height:100dvh;display:grid;place-items:center;padding:20px;background:radial-gradient(circle at top,#18375e,#09111f 65%)}.auth-card{width:min(420px,100%);background:#111f34;border:1px solid #293d58;border-radius:24px;padding:26px}.brand{display:flex;align-items:center;gap:12px;margin-bottom:22px}.mark{width:48px;height:48px;border-radius:16px;display:grid;place-items:center;background:#2b86fa;font-size:25px;font-weight:800}.profile-avatar{width:48px;height:48px;border:0;padding:0;border-radius:16px;display:grid;place-items:center;background:#2b86fa;color:#fff;font-size:20px;font-weight:800;overflow:hidden;flex-shrink:0;cursor:pointer}.profile-avatar img,.avatar img{width:100%;height:100%;object-fit:cover;display:block}.avatar.has-photo,.profile-avatar.has-photo{background:#132238}.auth h1{margin:0}.muted{color:#aab9cf}.tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:18px 0}.tabs button,.auth button{border:0;border-radius:12px;padding:12px;background:#203552;color:#eef4ff}.tabs .active,.primary{background:#2b86fa!important}.field{margin:12px 0}.field label{display:block;font-size:13px;color:#b7c5d9;margin-bottom:6px}.field input{width:100%;border:1px solid #354b68;background:#0c1728;color:#fff;border-radius:12px;padding:12px}.error{color:#ffb4b4;min-height:22px}
 .app{height:100dvh;display:grid;grid-template-columns:330px 1fr;background:#0d1829}.sidebar{border-right:1px solid #26364d;display:flex;flex-direction:column;min-width:0}.side-head{padding:18px;border-bottom:1px solid #26364d;display:flex;align-items:center;gap:10px}.side-head .me{min-width:0;flex:1}.side-head strong,.side-head small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.logout{border:1px solid #334965;background:#17283f;color:#fff;border-radius:10px;padding:8px 10px}.scroll{overflow:auto;flex:1}.install-box{padding:12px 14px 2px}.install-app{width:100%;border:1px solid #31527a;background:#173153;color:#fff;border-radius:13px;padding:11px 12px;font-weight:650}.section-head{padding:14px 14px 8px;display:flex;align-items:center;justify-content:space-between}.section-head span{font-size:12px;color:#8fa3be;text-transform:uppercase;letter-spacing:.08em}.new-group{border:0;background:#244f7e;color:#fff;border-radius:10px;padding:7px 10px}.list{padding:0 8px 8px}.call-list{padding:0 8px 4px}.call-log{display:flex;align-items:center;gap:8px;padding:7px 6px;border-radius:14px}.call-log:hover{background:#152a44}.call-log-main{min-width:0;flex:1;border:0;background:transparent;color:#fff;text-align:left;display:flex;align-items:center;gap:10px;padding:5px}.call-log-icon{width:40px;height:40px;border-radius:13px;background:#1b3658;display:grid;place-items:center;flex-shrink:0;font-size:18px}.call-log-icon.missed{background:#522934}.call-log-txt{min-width:0;flex:1}.call-log-txt strong,.call-log-txt small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.call-log-txt small{color:#8fa3be;margin-top:2px}.call-log-txt small.missed{color:#ff9999}.call-again{width:38px;height:38px;border:0;border-radius:12px;background:#203b5c;color:#fff;font-size:17px;flex-shrink:0}.item{width:100%;border:0;background:transparent;color:#fff;text-align:left;display:flex;gap:12px;align-items:center;padding:12px;border-radius:14px}.item:hover,.item.active{background:#1a304d}.avatar{width:44px;height:44px;border-radius:15px;background:#244f7e;display:grid;place-items:center;font-weight:700;flex-shrink:0}.group-avatar{background:#5a3d85}.item .txt{min-width:0;flex:1}.item strong,.item small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dot{width:9px;height:9px;border-radius:50%;background:#54647b}.dot.on{background:#45d78e}
 .chat{display:flex;flex-direction:column;min-width:0;min-height:0}.chat-head{height:74px;padding:14px 20px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #26364d}.back{display:none;border:0;background:#1b2e49;color:white;border-radius:11px;width:42px;height:42px}.chat-title{min-width:0;flex:1}.chat-title strong,.chat-title small{display:block}.call-actions{display:flex;gap:8px}.call-btn{width:42px;height:42px;border:0;border-radius:13px;background:#1b3658;color:#fff;font-size:20px}.call-btn:disabled{opacity:.4}.messages{flex:1;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:10px;background:radial-gradient(ellipse at top,#132944,transparent 72%)}.empty{margin:auto;text-align:center;color:#9fb0c8;max-width:320px}.bubble{max-width:min(78%,560px);padding:10px 13px;border-radius:17px 17px 17px 5px;background:#1c2d45;align-self:flex-start;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.mine{align-self:flex-end;background:#2565b5;border-radius:17px 17px 5px 17px}.sender{font-size:12px;font-weight:700;color:#8ec4ff;margin-bottom:4px}.meta{display:flex;justify-content:flex-end;align-items:center;gap:5px;margin-top:4px;font-size:11px;color:#c1d1e7}.receipt.read{color:#8ec4ff;font-weight:700}.bubble time{font-size:11px;color:inherit}.pending-file{display:flex;align-items:center;gap:10px;padding:8px 18px;background:#101e31;border-top:1px solid #26364d;color:#cbd8ea}.pending-file span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pending-file button{border:0;background:#263a56;color:#fff;border-radius:10px;width:32px;height:32px}.composer{display:flex;gap:10px;align-items:flex-end;padding:12px 18px calc(12px + var(--safe-bottom));border-top:1px solid #26364d}.composer textarea{flex:1;resize:none;max-height:120px;min-height:48px;border:1px solid #354b68;background:#15263d;color:#fff;border-radius:16px;padding:12px 14px}.attach,.send{width:48px;height:48px;border:0;border-radius:15px;color:white;font-size:22px;flex-shrink:0}.attach{background:#203552}.send{background:#2b86fa}.send:disabled,.attach:disabled{opacity:.4}.attachment-img{display:block;max-width:min(100%,360px);max-height:360px;border-radius:12px;margin-top:6px;object-fit:cover}.attachment-file{display:flex;gap:8px;align-items:center;margin-top:6px;padding:10px 12px;border-radius:12px;background:#101d2f;color:#dcecff;text-decoration:none}.attachment-file small{opacity:.75}.welcome{margin:auto;text-align:center;color:#9fb0c8}.welcome .mark{margin:0 auto 16px}.call-overlay{position:fixed;inset:0;z-index:1000;background:#07101eeF;display:flex;align-items:center;justify-content:center;padding:18px}.call-shell{position:relative;width:min(100%,760px);height:min(88dvh,760px);border:1px solid #2b405c;border-radius:26px;background:#0b1728;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 70px #0008}.call-stage{position:relative;flex:1;min-height:0;background:#050b14;display:grid;place-items:center}.remote-video{width:100%;height:100%;object-fit:cover;background:#050b14}.local-video{position:absolute;right:14px;top:14px;width:min(30%,180px);aspect-ratio:3/4;object-fit:cover;border-radius:16px;border:2px solid #ffffff55;background:#101a29;box-shadow:0 8px 25px #0008}.call-avatar{position:absolute;width:112px;height:112px;border-radius:36px;background:#244f7e;display:grid;place-items:center;font-size:40px;font-weight:700}.call-info{position:absolute;left:0;right:0;bottom:24px;text-align:center;text-shadow:0 2px 8px #000}.call-info strong{display:block;font-size:24px}.call-info span{display:block;margin-top:5px;color:#c8d6e8}.call-controls{display:flex;justify-content:center;gap:12px;padding:16px;background:#0e1b2d;flex-wrap:wrap}.round-call{width:56px;height:56px;border:0;border-radius:50%;background:#223955;color:#fff;font-size:23px}.round-call.off{background:#844047}.round-call.end{background:#d7424b}.incoming-actions{display:flex;justify-content:center;gap:28px;padding:18px;background:#0e1b2d}.incoming-actions button{width:68px;height:68px;border:0;border-radius:50%;color:#fff;font-size:27px}.accept-call{background:#2da96a}.reject-call{background:#d7424b}.media-permission{padding:12px 16px 16px;background:#0e1b2d;text-align:center}.media-permission button{border:0;border-radius:12px;padding:12px 16px;background:#244f7e;color:#fff}.media-permission small{display:block;margin-top:8px;color:#9fb0c8}
 .group-call-overlay{position:fixed;inset:0;z-index:1100;background:#07101e;display:flex;flex-direction:column}.group-call-head{display:flex;align-items:center;gap:12px;padding:calc(14px + var(--safe-top)) 18px 14px;border-bottom:1px solid #26364d;background:#0d1a2c}.group-call-head div{min-width:0;flex:1}.group-call-head strong,.group-call-head small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.group-call-grid{flex:1;min-height:0;overflow:auto;padding:12px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:minmax(180px,1fr);gap:10px}.group-tile{position:relative;min-height:180px;border-radius:18px;overflow:hidden;background:#13243a;border:1px solid #2a3e59;display:grid;place-items:center;transition:border-color .15s ease,box-shadow .15s ease,transform .15s ease}.group-tile.speaking{border-color:#49d98b;box-shadow:0 0 0 3px #49d98b55,0 0 26px #49d98b33;transform:scale(1.01)}.group-tile video{width:100%;height:100%;object-fit:cover;background:#050b14}.group-tile .tile-avatar{width:76px;height:76px;border-radius:25px;background:#244f7e;display:grid;place-items:center;font-size:26px;font-weight:700}.group-tile .tile-name{position:absolute;left:10px;right:10px;bottom:8px;padding:5px 8px;border-radius:9px;background:#0008;color:#fff;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.group-tile .tile-muted{position:absolute;right:9px;top:9px;border-radius:50%;background:#0009;padding:6px;font-size:13px}.group-call-controls{display:flex;justify-content:center;gap:14px;padding:14px 16px calc(14px + var(--safe-bottom));border-top:1px solid #26364d;background:#0d1a2c}.group-call-controls button{width:56px;height:56px;border:0;border-radius:50%;background:#223955;color:#fff;font-size:23px}.group-call-controls button.off{background:#844047}.group-call-controls button.end{background:#d7424b}@media(min-width:800px){.group-call-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}dialog{width:min(92vw,460px);border:1px solid #334965;border-radius:20px;background:#111f34;color:#fff;padding:20px}dialog::backdrop{background:#000a}.member-list{max-height:300px;overflow:auto;margin:14px 0}.member-row{display:flex;align-items:center;gap:10px;padding:10px;border-radius:10px;background:#17283f;margin-bottom:8px}.member-row input{width:20px;height:20px}.dialog-actions{display:flex;gap:10px}.dialog-actions button{flex:1;border:0;border-radius:12px;padding:12px;color:#fff;background:#203552}.dialog-actions .primary{background:#2b86fa}.dialog-title{margin:0 0 8px}.group-name{width:100%;border:1px solid #354b68;background:#0c1728;color:#fff;border-radius:12px;padding:12px}
@@ -33,7 +33,7 @@
 
 <div id="app" class="app hidden">
   <aside class="sidebar">
-    <div class="side-head"><div class="mark">С</div><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="notifyBtn" class="logout" type="button" title="Включить уведомления">🔔</button><button id="logout" class="logout">Выйти</button></div>
+    <div class="side-head"><button id="meAvatar" class="profile-avatar" type="button" title="Изменить аватар">С</button><input id="avatarInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="notifyBtn" class="logout" type="button" title="Включить уведомления">🔔</button><button id="logout" class="logout">Выйти</button></div>
     <div class="scroll">
       <div id="installBox" class="install-box"><button id="installBtn" class="install-app" type="button">📲 Установить «Свои»</button></div>
       <div class="section-head"><span>Звонки</span></div>
@@ -179,11 +179,26 @@ $('authForm').onsubmit=async e=>{
 };
 
 function initials(name){return(name||'?').trim().split(/\s+/).slice(0,2).map(x=>x[0]).join('').toUpperCase()}
+function setAvatar(el,user){
+  if(!el)return;
+  el.replaceChildren();
+  const url=user?.avatar_url;
+  el.classList.toggle('has-photo',!!url);
+  if(url){
+    const img=document.createElement('img');
+    img.src=url;
+    img.alt=user?.display_name||'Аватар';
+    img.loading='lazy';
+    el.append(img)
+  }else{
+    el.textContent=initials(user?.display_name||'?')
+  }
+}
 function showAuth(){me=null;active=null;if(socket)socket.close();$('auth').classList.remove('hidden');$('app').classList.add('hidden')}
 
 async function enter(){
   try{
-    me=await api('/api/me');$('meName').textContent=me.display_name;$('meUser').textContent='@'+me.username;
+    me=await api('/api/me');$('meName').textContent=me.display_name;$('meUser').textContent='@'+me.username;setAvatar($('meAvatar'),me);
     $('authError').textContent='';$('auth').classList.add('hidden');$('app').classList.remove('hidden');
     await Promise.all([loadUsers(),loadGroups(),loadCallHistory()]);
     connectWs();
@@ -282,8 +297,8 @@ function renderUsers(){
   if(!users.length){box.innerHTML='<div class="muted" style="padding:12px">Других пользователей пока нет.</div>';return}
   for(const u of users){
     const b=document.createElement('button');b.className='item'+(active?.type==='user'&&active.data.id===u.id?' active':'');
-    b.innerHTML='<span class="avatar">'+initials(u.display_name)+'</span><span class="txt"><strong></strong><small class="muted">@'+u.username+'</small></span><span class="dot '+(u.online?'on':'')+'"></span>';
-    b.querySelector('strong').textContent=u.display_name;b.onclick=()=>openUser(u);box.append(b)
+    b.innerHTML='<span class="avatar"></span><span class="txt"><strong></strong><small class="muted">@'+u.username+'</small></span><span class="dot '+(u.online?'on':'')+'"></span>';
+    setAvatar(b.querySelector('.avatar'),u);b.querySelector('strong').textContent=u.display_name;b.onclick=()=>openUser(u);box.append(b)
   }
 }
 
@@ -310,10 +325,10 @@ async function openGroup(g){
 function updateHead(){
   if(!active)return;
   if(active.type==='user'){
-    const u=active.data;$('chatName').textContent=u.display_name;$('chatAvatar').textContent=initials(u.display_name);$('chatAvatar').classList.remove('group-avatar');$('chatStatus').textContent=u.online?'в сети':'не в сети';
+    const u=active.data;$('chatName').textContent=u.display_name;$('chatAvatar').classList.remove('group-avatar');setAvatar($('chatAvatar'),u);$('chatStatus').textContent=u.online?'в сети':'не в сети';
     $('callActions').classList.remove('hidden');$('audioCallBtn').disabled=false;$('videoCallBtn').disabled=false
   }else{
-    const g=active.data;$('chatName').textContent=g.name;$('chatAvatar').textContent='#';$('chatAvatar').classList.add('group-avatar');$('chatStatus').textContent=g.member_count+' участников';
+    const g=active.data;$('chatName').textContent=g.name;$('chatAvatar').replaceChildren();$('chatAvatar').textContent='#';$('chatAvatar').classList.remove('has-photo');$('chatAvatar').classList.add('group-avatar');$('chatStatus').textContent=g.member_count+' участников';
     $('callActions').classList.remove('hidden');$('audioCallBtn').disabled=false;$('videoCallBtn').disabled=false
   }
 }
@@ -1225,6 +1240,13 @@ function connectWs(){
       }
       return
     }
+    if(data.type==='profile_updated'){
+      if(data.user?.id===me?.id){
+        me=data.user;$('meName').textContent=me.display_name;$('meUser').textContent='@'+me.username;setAvatar($('meAvatar'),me)
+      }
+      loadUsers().catch(()=>{});
+      return
+    }
     if(data.type==='message'){
       const m=data.message;
       if(active?.type==='user'&&(m.sender_id===active.data.id||m.recipient_id===active.data.id)){
@@ -1274,6 +1296,29 @@ $('createGroup').onclick=async()=>{
     const g=await api('/api/groups',{method:'POST',body:{name,member_ids}});
     $('groupDialog').close();await loadGroups();await openGroup(g)
   }catch(err){$('groupError').textContent=err.message}
+};
+
+$('meAvatar').onclick=()=>{$('avatarInput').click()};
+$('avatarInput').onchange=async()=>{
+  const file=$('avatarInput').files?.[0];
+  $('avatarInput').value='';
+  if(!file)return;
+  if(file.size>5*1024*1024){alert('Аватар должен быть не больше 5 МБ');return}
+  if(!['image/jpeg','image/png','image/webp'].includes(file.type)){alert('Выбери JPEG, PNG или WebP');return}
+  const form=new FormData();form.append('file',file);
+  $('meAvatar').disabled=true;
+  try{
+    const r=await fetch('/api/me/avatar',{
+      method:'POST',
+      headers:{Authorization:'Bearer '+token},
+      body:form
+    });
+    let data=null;try{data=await r.json()}catch{}
+    if(!r.ok)throw new Error(data?.detail||'Не удалось загрузить аватар');
+    me=data;setAvatar($('meAvatar'),me);
+    await loadUsers()
+  }catch(err){alert(err.message||'Не удалось загрузить аватар')}
+  finally{$('meAvatar').disabled=false}
 };
 
 $('logout').onclick=async()=>{if(groupCallState)leaveGroupCall(true);if(currentCall||pendingCall)finishCall(true);await removePushSubscription();try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
