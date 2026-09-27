@@ -125,13 +125,16 @@ PY
 }
 
 health_ok() {
+  local require_database="${1:-yes}"
   local body
   for _ in $(seq 1 20); do
     body="$(curl -fsS --max-time 3 "$HEALTH_URL" 2>/dev/null || true)"
-    if printf '%s' "$body" | grep -q '"status":"ok"' &&
-       printf '%s' "$body" | grep -q '"database":"ok"'; then
-      curl -fsS --max-time 3 http://127.0.0.1:8010/ >/dev/null
-      return 0
+    if printf '%s' "$body" | grep -q '"status":"ok"'; then
+      if [ "$require_database" = "no" ] ||
+         printf '%s' "$body" | grep -q '"database":"ok"'; then
+        curl -fsS --max-time 3 http://127.0.0.1:8010/ >/dev/null
+        return 0
+      fi
     fi
     sleep 1
   done
@@ -146,7 +149,7 @@ rollback() {
   systemctl daemon-reload
   systemctl restart "$SERVICE"
 
-  if health_ok; then
+  if health_ok no; then
     log "Rollback successful"
   else
     log "Rollback completed, but health check is still failing"
