@@ -329,6 +329,10 @@ class GroupCreateIn(BaseModel):
     member_ids: list[int] = Field(default_factory=list)
 
 
+class GroupMemberAddIn(BaseModel):
+    tag: str = Field(min_length=1, max_length=33)
+
+
 class GroupMessageIn(BaseModel):
     body: str = Field(default="", max_length=4000)
     attachment_id: int | None = None
@@ -1581,6 +1585,94 @@ async def add_group_member(
         "member": {
             **user_json(target),
             "online": bool(connections.get(member_id)),
+            "is_admin": False,
+            "is_owner": False,
+        },
+    }
+
+
+@app.post("/api/groups/{group_id}/members")
+async def add_group_member(
+    group_id: int,
+    data: GroupMemberAddIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+    if not bool(group["is_admin"]):
+        raise HTTPException(403, "Добавлять участников может только администратор")
+
+    username = data.tag.strip().lower()
+    if username.startswith("@"):
+        username = username[1:]
+    if not username:
+        raise HTTPException(400, "Укажи @тег пользователя")
+
+    target = conn.execute(
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.username=?""",
+        (username,),
+    ).fetchone()
+    if not target:
+        raise HTTPException(404, "Пользователь не найден")
+
+    exists = conn.execute(
+        "SELECT 1 FROM group_members WHERE group_id=? AND user_id=?",
+        (group_id, target["id"]),
+    ).fetchone()
+    if exists:
+        raise HTTPException(409, "Пользователь уже состоит в группе")
+
+    count = conn.execute(
+        "SELECT COUNT(*) AS c FROM group_members WHERE group_id=?",
+        (group_id,),
+    ).fetchone()["c"]
+    if count >= 50:
+        raise HTTPException(400, "В группе может быть не более 50 участников")
+
+    conn.execute(
+        """INSERT INTO group_members(
+             group_id,user_id,joined_at,is_admin
+           ) VALUES(?,?,?,0)""",
+        (group_id, target["id"], now_iso()),
+    )
+    conn.commit()
+
+    row = conn.execute(
+        """SELECT g.id,g.name,g.owner_id,g.created_at,
+                  ga.stored_name AS avatar_stored_name,
+                  0 AS is_admin,
+                  COUNT(gm.user_id) AS member_count
+           FROM chat_groups g
+           LEFT JOIN uploads ga ON ga.id=g.avatar_id
+           LEFT JOIN group_members gm ON gm.group_id=g.id
+           WHERE g.id=?
+           GROUP BY g.id""",
+        (group_id,),
+    ).fetchone()
+    group_data = group_json(row)
+
+    await push(
+        target["id"],
+        {
+            "type": "group_added",
+            "group": group_data,
+            "added_by": user["id"],
+        },
+    )
+    await _broadcast_group_update(group_id)
+
+    return {
+        "ok": True,
+        "group": group_data,
+        "member": {
+            **user_json(target),
+            "online": bool(connections.get(target["id"])),
             "is_admin": False,
             "is_owner": False,
         },
