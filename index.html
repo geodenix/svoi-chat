@@ -258,6 +258,7 @@ let soundsEnabled=localStorage.getItem('svoi_sounds')!=='0',vibrationEnabled=loc
 let deferredInstallPrompt=null;
 let groupCallState=null;
 let groupMembersData=null;
+const outboxDeliveries=new Map();
 let privateParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_private_video_size')||1)));
 let groupParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_group_video_size')||1)));
 
@@ -484,6 +485,92 @@ const api=async(path,opt={})=>{
   if(!r.ok){const err=new Error(data?.detail||'Ошибка сервера');err.status=r.status;throw err}
   return data
 };
+
+function makeClientMessageId(){
+  if(globalThis.crypto?.randomUUID)return crypto.randomUUID();
+  return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2)+'-'+Math.random().toString(36).slice(2)
+}
+
+function outboxKey(){
+  return me?'svoi_outbox_'+me.id:''
+}
+
+function readOutbox(){
+  const key=outboxKey();if(!key)return [];
+  try{
+    const value=JSON.parse(localStorage.getItem(key)||'[]');
+    return Array.isArray(value)?value:[]
+  }catch{return []}
+}
+
+function writeOutbox(items){
+  const key=outboxKey();if(!key)return;
+  if(items.length)localStorage.setItem(key,JSON.stringify(items));
+  else localStorage.removeItem(key)
+}
+
+function queueOutbox(entry){
+  const items=readOutbox();
+  if(!items.some(item=>item.id===entry.id)){
+    items.push(entry);
+    writeOutbox(items)
+  }
+}
+
+function removeOutbox(id){
+  writeOutbox(readOutbox().filter(item=>item.id!==id))
+}
+
+function retryableDeliveryError(err){
+  return !err?.status||err.status===408||err.status===425||err.status===429||err.status>=500
+}
+
+const deliveryDelay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+
+async function deliverOutboxEntry(entry){
+  if(outboxDeliveries.has(entry.id))return outboxDeliveries.get(entry.id);
+  const promise=(async()=>{
+    let lastError=new Error('Нет соединения с сервером');
+    for(let attempt=0;attempt<3;attempt++){
+      if(attempt)await deliveryDelay(attempt===1?700:1800);
+      try{
+        const message=await api(entry.path,{method:'POST',body:entry.payload});
+        removeOutbox(entry.id);
+        return message
+      }catch(err){
+        lastError=err;
+        if(!retryableDeliveryError(err)){
+          removeOutbox(entry.id);
+          throw err
+        }
+      }
+    }
+    lastError.queued=true;
+    throw lastError
+  })().finally(()=>outboxDeliveries.delete(entry.id));
+  outboxDeliveries.set(entry.id,promise);
+  return promise
+}
+
+async function flushOutbox(){
+  if(!me||!token||!navigator.onLine)return;
+  for(const entry of readOutbox()){
+    try{
+      const message=await deliverOutboxEntry(entry);
+      if(
+        active
+        && active.type===entry.chat_type
+        && Number(active.data.id)===Number(entry.chat_id)
+      )appendMessage(message);
+      if(entry.chat_type==='user')loadUsers().catch(()=>{});
+      else loadGroups().catch(()=>{})
+    }catch(err){
+      if(err?.queued)break
+    }
+  }
+}
+
+window.addEventListener('online',()=>flushOutbox().catch(()=>{}));
 
 function setMode(next){
   mode=next;const reg=next==='register';
