@@ -439,6 +439,7 @@ function incomingCall(data){
   $('mediaPermission').classList.toggle('hidden',!data.video);
   if(data.video){
     $('mediaPermissionText').textContent='Нужен доступ к камере и микрофону';
+    $('mediaPermissionBtn').textContent='Разрешить камеру и микрофон';
     $('mediaPermissionBtn').disabled=false
   }
 }
