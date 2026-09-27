@@ -85,6 +85,15 @@ def init_db():
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS contacts (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      contact_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(user_id, contact_user_id),
+      CHECK(user_id <> contact_user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_contacts_contact
+      ON contacts(contact_user_id);
     CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -392,19 +401,125 @@ def turn_credentials(user=Depends(current_user)):
 def users(user=Depends(current_user), conn=Depends(db)):
     rows = conn.execute(
         """SELECT u.id,u.username,u.display_name,
-                  a.stored_name AS avatar_stored_name
+                  a.stored_name AS avatar_stored_name,
+                  EXISTS(
+                    SELECT 1 FROM contacts c
+                    WHERE c.user_id=? AND c.contact_user_id=u.id
+                  ) AS in_contacts
            FROM users u
            LEFT JOIN uploads a ON a.id=u.avatar_id
            WHERE u.id<>?
+             AND (
+               EXISTS(
+                 SELECT 1 FROM contacts c
+                 WHERE c.user_id=? AND c.contact_user_id=u.id
+               )
+               OR EXISTS(
+                 SELECT 1 FROM messages m
+                 WHERE (m.sender_id=? AND m.recipient_id=u.id)
+                    OR (m.sender_id=u.id AND m.recipient_id=?)
+               )
+             )
            ORDER BY u.display_name""",
-        (user["id"],),
+        (
+            user["id"],
+            user["id"],
+            user["id"],
+            user["id"],
+            user["id"],
+        ),
     ).fetchall()
     return [
-        {**user_json(r), "online": bool(connections.get(r["id"]))}
+        {
+            **user_json(r),
+            "online": bool(connections.get(r["id"])),
+            "in_contacts": bool(r["in_contacts"]),
+        }
         for r in rows
     ]
 
 
+@app.get("/api/users/search")
+def search_user(
+    tag: str = Query(..., min_length=1, max_length=33),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    username = tag.strip().lower()
+    if username.startswith("@"):
+        username = username[1:]
+    if not username:
+        raise HTTPException(400, "Укажи тег пользователя")
+
+    row = conn.execute(
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name,
+                  EXISTS(
+                    SELECT 1 FROM contacts c
+                    WHERE c.user_id=? AND c.contact_user_id=u.id
+                  ) AS in_contacts
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.username=? AND u.id<>?""",
+        (user["id"], username, user["id"]),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Пользователь с таким тегом не найден")
+
+    return {
+        **user_json(row),
+        "online": bool(connections.get(row["id"])),
+        "in_contacts": bool(row["in_contacts"]),
+    }
+
+
+@app.post("/api/contacts/{other_id}")
+async def add_contact(
+    other_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    if other_id == user["id"]:
+        raise HTTPException(400, "Нельзя добавить себя")
+    if not conn.execute("SELECT 1 FROM users WHERE id=?", (other_id,)).fetchone():
+        raise HTTPException(404, "Пользователь не найден")
+
+    conn.execute(
+        """INSERT OR IGNORE INTO contacts(user_id,contact_user_id,created_at)
+           VALUES(?,?,?)""",
+        (user["id"], other_id, now_iso()),
+    )
+    conn.commit()
+
+    row = conn.execute(
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.id=?""",
+        (other_id,),
+    ).fetchone()
+    await push(user["id"], {"type": "contacts_updated"})
+    return {
+        **user_json(row),
+        "online": bool(connections.get(other_id)),
+        "in_contacts": True,
+    }
+
+
+@app.delete("/api/contacts/{other_id}")
+async def remove_contact(
+    other_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    conn.execute(
+        "DELETE FROM contacts WHERE user_id=? AND contact_user_id=?",
+        (user["id"], other_id),
+    )
+    conn.commit()
+    await push(user["id"], {"type": "contacts_updated"})
+    return {"ok": True}
 
 
 def _avatar_suffix(content: bytes, mime: str) -> str:
@@ -423,7 +538,29 @@ def _avatar_suffix(content: bytes, mime: str) -> str:
 
 
 async def _broadcast_profile(user_data: dict):
-    for user_id in list(connections.keys()):
+    profile_id = int(user_data["id"])
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT DISTINCT peer_id FROM (
+             SELECT contact_user_id AS peer_id
+             FROM contacts WHERE user_id=?
+             UNION
+             SELECT user_id AS peer_id
+             FROM contacts WHERE contact_user_id=?
+             UNION
+             SELECT recipient_id AS peer_id
+             FROM messages WHERE sender_id=?
+             UNION
+             SELECT sender_id AS peer_id
+             FROM messages WHERE recipient_id=?
+           )""",
+        (profile_id, profile_id, profile_id, profile_id),
+    ).fetchall()
+    conn.close()
+
+    recipients = {profile_id, *(int(row["peer_id"]) for row in rows)}
+    for user_id in recipients:
         await push(
             user_id,
             {
