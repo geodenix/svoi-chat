@@ -167,7 +167,10 @@ async function enter(){
   try{
     me=await api('/api/me');$('meName').textContent=me.display_name;$('meUser').textContent='@'+me.username;
     $('authError').textContent='';$('auth').classList.add('hidden');$('app').classList.remove('hidden');
-    await Promise.all([loadUsers(),loadGroups()]);connectWs();initPush().catch(err=>{$('notifyBtn').textContent='⚠️';$('notifyBtn').title=err.message||'Ошибка push'})
+    await Promise.all([loadUsers(),loadGroups()]);
+    connectWs();
+    initPush().catch(err=>{$('notifyBtn').textContent='⚠️';$('notifyBtn').title=err.message||'Ошибка push'});
+    resumeIncomingCallFromUrl().catch(()=>{})
   }catch(err){
     if(err?.status===401){
       token='';localStorage.removeItem('svoi_token');showAuth();return
@@ -486,7 +489,10 @@ function incomingCall(data){
     try{wsSend({type:'call_reject',to_user_id:data.from_user_id,call_id:data.call_id})}catch{}
     return
   }
-  pendingIce=[];pendingCall=data;preparedMediaStream=null;
+  pendingIce=Array.isArray(data.ice_candidates)
+    ?data.ice_candidates.slice()
+    :[];
+  pendingCall=data;preparedMediaStream=null;
   showCallUi(data.from_name,data.video?'Входящий видеозвонок':'Входящий голосовой звонок',data.video,true);
   $('mediaPermission').classList.toggle('hidden',!data.video);
   if(data.video){
@@ -555,6 +561,7 @@ async function acceptIncomingCall(){
     await flushPendingIce();
     const answer=await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    await waitForSocketOpen();
     wsSend({
       type:'call_answer',
       to_user_id:data.from_user_id,
@@ -575,9 +582,13 @@ async function acceptIncomingCall(){
   }
 }
 
-function rejectIncomingCall(){
+async function rejectIncomingCall(){
   if(!pendingCall||acceptingCall)return;
-  try{wsSend({type:'call_reject',to_user_id:pendingCall.from_user_id,call_id:pendingCall.call_id})}catch{}
+  const data=pendingCall;
+  try{
+    await waitForSocketOpen();
+    wsSend({type:'call_reject',to_user_id:data.from_user_id,call_id:data.call_id})
+  }catch{}
   pendingCall=null;pendingIce=[];resetCallUi()
 }
 
@@ -738,6 +749,41 @@ $('switchCamera').onclick=async()=>{
     button.disabled=false
   }
 };
+
+function waitForSocketOpen(timeoutMs=6000){
+  if(socket?.readyState===WebSocket.OPEN)return Promise.resolve();
+  return new Promise((resolve,reject)=>{
+    const started=Date.now();
+    const timer=setInterval(()=>{
+      if(socket?.readyState===WebSocket.OPEN){
+        clearInterval(timer);resolve();return
+      }
+      if(Date.now()-started>=timeoutMs){
+        clearInterval(timer);reject(new Error('Нет соединения с сервером'))
+      }
+    },80)
+  })
+}
+
+async function resumeIncomingCallFromUrl(){
+  const params=new URLSearchParams(location.search);
+  const callId=params.get('incoming_call');
+  if(!callId)return;
+
+  history.replaceState({},'',location.pathname);
+
+  try{
+    const data=await api('/api/calls/pending/'+encodeURIComponent(callId));
+    await waitForSocketOpen();
+    incomingCall(data)
+  }catch(err){
+    if(err?.status===404){
+      alert('Этот звонок уже завершён')
+    }else{
+      alert(err.message||'Не удалось восстановить входящий звонок')
+    }
+  }
+}
 
 function connectWs(){
   if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';
