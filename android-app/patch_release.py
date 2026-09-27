@@ -24,13 +24,12 @@ text = re.sub(
     count=1,
 )
 
-if "SVOI_KEYSTORE_PATH" not in text:
-    android_pos = text.find("android {")
-    if android_pos == -1:
-        raise SystemExit("android block not found")
+marker = "// SVOI_RELEASE_SIGNING"
+if marker not in text:
+    text += r'''
 
-    insert_pos = text.find("\n", android_pos) + 1
-    signing = r'''
+// SVOI_RELEASE_SIGNING
+android {
     signingConfigs {
         release {
             storeFile file(System.getenv("SVOI_KEYSTORE_PATH"))
@@ -39,19 +38,14 @@ if "SVOI_KEYSTORE_PATH" not in text:
             keyPassword System.getenv("SVOI_KEY_PASSWORD")
         }
     }
-'''
-    text = text[:insert_pos] + signing + text[insert_pos:]
 
-    release_marker = "release {"
-    release_pos = text.find(release_marker)
-    if release_pos == -1:
-        raise SystemExit("release build type not found")
-    brace_end = text.find("\n", release_pos) + 1
-    text = (
-        text[:brace_end]
-        + "            signingConfig signingConfigs.release\n"
-        + text[brace_end:]
-    )
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+        }
+    }
+}
+'''
 
 gradle.write_text(text)
 print(f"Release configured: {version_name} ({version_code})")
