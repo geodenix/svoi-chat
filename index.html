@@ -2241,6 +2241,10 @@ function connectWs(){
       alert('Вас исключили из группы «'+(data.group_name||'Группа')+'»');
       return
     }
+    if(data.type==='group_added'){
+      loadGroups().catch(()=>{});
+      return
+    }
     if(data.type==='group_roles_updated'){
       groups=groups.map(g=>g.id===data.group_id?{...g,is_admin:!!data.is_admin}:g);
       if(active?.type==='group'&&active.data.id===data.group_id){
@@ -2255,10 +2259,16 @@ function connectWs(){
     }
     if(data.type==='group_updated'){
       const updated=data.group;
-      groups=groups.map(g=>g.id===updated.id?updated:g);
+      const exists=groups.some(g=>g.id===updated.id);
+      groups=exists
+        ?groups.map(g=>g.id===updated.id?updated:g)
+        :[updated,...groups];
       if(active?.type==='group'&&active.data.id===updated.id){
         active.data=updated;
-        updateHead()
+        updateHead();
+        if($('groupMembersDialog').open){
+          loadGroupMembers(updated.id).catch(()=>{})
+        }
       }
       renderGroups();
       return
