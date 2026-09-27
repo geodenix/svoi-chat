@@ -1097,10 +1097,30 @@ async def test_push(user=Depends(current_user)):
     return stats
 
 
+def effective_media_mime(mime: str | None, name: str | None) -> str:
+    value = (mime or "application/octet-stream").lower().split(";", 1)[0].strip()
+    filename = (name or "").lower()
+
+    if filename.startswith("voice-"):
+        if filename.endswith(".m4a") or filename.endswith(".mp4"):
+            return "audio/mp4"
+        return "audio/webm"
+
+    if filename.startswith("video-circle-"):
+        if filename.endswith(".mp4"):
+            return "video/mp4"
+        return "video/webm"
+
+    return value
+
+
 def attachment_json(row):
     if not row or row["attachment_id"] is None:
         return None
-    mime = row["attachment_mime"] or "application/octet-stream"
+    mime = effective_media_mime(
+        row["attachment_mime"],
+        row["attachment_name"],
+    )
     return {
         "id": row["attachment_id"],
         "url": f"/uploads/{row['attachment_stored_name']}",
@@ -1141,7 +1161,10 @@ async def upload(
     if len(suffix) > 12 or not all(ch.isalnum() or ch == "." for ch in suffix):
         suffix = ""
     stored = secrets.token_hex(24) + suffix
-    mime = (file.content_type or "application/octet-stream")[:120]
+    mime = effective_media_mime(
+        (file.content_type or "application/octet-stream")[:120],
+        original,
+    )
     (UPLOAD_DIR / stored).write_bytes(content)
     cur = conn.execute(
         """INSERT INTO uploads(
@@ -1176,7 +1199,10 @@ def get_upload(stored_name: str, conn=Depends(db)):
     path = UPLOAD_DIR / row["stored_name"]
     if not path.is_file():
         raise HTTPException(404, "Файл не найден")
-    mime = row["mime_type"] or "application/octet-stream"
+    mime = effective_media_mime(
+        row["mime_type"],
+        row["original_name"],
+    )
     if (
         mime in INLINE_IMAGE_TYPES
         or mime.startswith("audio/")
@@ -1297,15 +1323,19 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
     conn.commit()
     attachment = None
     if upload_row:
+        attachment_mime = effective_media_mime(
+            upload_row["mime_type"],
+            upload_row["original_name"],
+        )
         attachment = {
             "id": upload_row["id"],
             "url": f"/uploads/{upload_row['stored_name']}",
             "name": upload_row["original_name"],
-            "mime_type": upload_row["mime_type"],
+            "mime_type": attachment_mime,
             "size": upload_row["size"],
-            "is_image": upload_row["mime_type"] in INLINE_IMAGE_TYPES,
-            "is_audio": upload_row["mime_type"].startswith("audio/"),
-            "is_video": upload_row["mime_type"].startswith("video/"),
+            "is_image": attachment_mime in INLINE_IMAGE_TYPES,
+            "is_audio": attachment_mime.startswith("audio/"),
+            "is_video": attachment_mime.startswith("video/"),
         }
     msg = {
         "id": cur.lastrowid,
@@ -1787,15 +1817,19 @@ async def send_group_message(
     conn.commit()
     attachment = None
     if upload_row:
+        attachment_mime = effective_media_mime(
+            upload_row["mime_type"],
+            upload_row["original_name"],
+        )
         attachment = {
             "id": upload_row["id"],
             "url": f"/uploads/{upload_row['stored_name']}",
             "name": upload_row["original_name"],
-            "mime_type": upload_row["mime_type"],
+            "mime_type": attachment_mime,
             "size": upload_row["size"],
-            "is_image": upload_row["mime_type"] in INLINE_IMAGE_TYPES,
-            "is_audio": upload_row["mime_type"].startswith("audio/"),
-            "is_video": upload_row["mime_type"].startswith("video/"),
+            "is_image": attachment_mime in INLINE_IMAGE_TYPES,
+            "is_audio": attachment_mime.startswith("audio/"),
+            "is_video": attachment_mime.startswith("video/"),
         }
     msg = {
         "id": cur.lastrowid,
