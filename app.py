@@ -195,6 +195,10 @@ def init_db():
                 conn.execute(
                     "ALTER TABLE messages ADD COLUMN read_at TEXT"
                 )
+            if "forwarded" not in columns:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN forwarded INTEGER NOT NULL DEFAULT 0"
+                )
         if table == "group_messages":
             if "deleted_at" not in columns:
                 conn.execute(
@@ -203,6 +207,10 @@ def init_db():
             if "deleted_by" not in columns:
                 conn.execute(
                     "ALTER TABLE group_messages ADD COLUMN deleted_by INTEGER"
+                )
+            if "forwarded" not in columns:
+                conn.execute(
+                    "ALTER TABLE group_messages ADD COLUMN forwarded INTEGER NOT NULL DEFAULT 0"
                 )
 
     user_columns = {
@@ -360,6 +368,13 @@ class GroupMemberAddIn(BaseModel):
 class GroupMessageIn(BaseModel):
     body: str = Field(default="", max_length=4000)
     attachment_id: int | None = None
+
+
+class ForwardMessageIn(BaseModel):
+    source_type: str = Field(pattern=r"^(user|group)$")
+    source_message_id: int
+    target_type: str = Field(pattern=r"^(user|group)$")
+    target_chat_id: int
 
 
 class PushKeysIn(BaseModel):
@@ -1430,7 +1445,7 @@ async def history(
         )
     rows = conn.execute(
         """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
-                  m.delivered_at,m.read_at,
+                  m.delivered_at,m.read_at,m.forwarded,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
                   up.original_name AS attachment_name,
@@ -1453,6 +1468,7 @@ async def history(
             "created_at": row["created_at"],
             "delivered_at": row["delivered_at"],
             "read_at": row["read_at"],
+            "forwarded": bool(row["forwarded"]),
             "attachment": attachment_json(row),
         }
         result.append(item)
@@ -1524,6 +1540,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         "created_at": created,
         "delivered_at": None,
         "read_at": None,
+        "forwarded": False,
         "attachment": attachment,
     }
     sent = await push(
@@ -1555,6 +1572,192 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         "/",
         f"user-{user['id']}",
     )
+    return msg
+
+
+@app.post("/api/messages/forward")
+async def forward_message(
+    data: ForwardMessageIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    source = None
+    if data.source_type == "user":
+        source = conn.execute(
+            """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.attachment_id,
+                      up.id AS attachment_id,
+                      up.stored_name AS attachment_stored_name,
+                      up.original_name AS attachment_name,
+                      up.mime_type AS attachment_mime,
+                      up.size AS attachment_size
+               FROM messages m
+               LEFT JOIN uploads up ON up.id=m.attachment_id
+               WHERE m.id=?
+                 AND (m.sender_id=? OR m.recipient_id=?)""",
+            (data.source_message_id, user["id"], user["id"]),
+        ).fetchone()
+    else:
+        source = conn.execute(
+            """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.attachment_id,
+                      gm.deleted_at,
+                      up.id AS attachment_id,
+                      up.stored_name AS attachment_stored_name,
+                      up.original_name AS attachment_name,
+                      up.mime_type AS attachment_mime,
+                      up.size AS attachment_size
+               FROM group_messages gm
+               LEFT JOIN uploads up ON up.id=gm.attachment_id
+               WHERE gm.id=?""",
+            (data.source_message_id,),
+        ).fetchone()
+        if (
+            not source
+            or source["deleted_at"]
+            or not group_for_user(conn, source["group_id"], user["id"])
+        ):
+            source = None
+
+    if not source:
+        raise HTTPException(404, "Исходное сообщение недоступно")
+
+    body = source["body"] or ""
+    attachment_id = source["attachment_id"]
+    if not body and not attachment_id:
+        raise HTTPException(400, "Нечего пересылать")
+
+    created = now_iso()
+    attachment = attachment_json(source)
+
+    if data.target_type == "user":
+        if data.target_chat_id == user["id"]:
+            raise HTTPException(400, "Нельзя переслать сообщение самому себе")
+        target = conn.execute(
+            "SELECT id FROM users WHERE id=?",
+            (data.target_chat_id,),
+        ).fetchone()
+        if not target:
+            raise HTTPException(404, "Получатель не найден")
+
+        cur = conn.execute(
+            """INSERT INTO messages(
+                 sender_id,recipient_id,body,created_at,attachment_id,
+                 delivered_at,read_at,forwarded
+               ) VALUES(?,?,?,?,?,?,?,1)""",
+            (
+                user["id"],
+                data.target_chat_id,
+                body,
+                created,
+                attachment_id,
+                None,
+                None,
+            ),
+        )
+        conn.commit()
+
+        msg = {
+            "id": cur.lastrowid,
+            "sender_id": user["id"],
+            "recipient_id": data.target_chat_id,
+            "body": body,
+            "created_at": created,
+            "delivered_at": None,
+            "read_at": None,
+            "forwarded": True,
+            "attachment": attachment,
+        }
+
+        sent = await push(
+            data.target_chat_id,
+            {"type": "message", "message": msg},
+        )
+        if sent:
+            delivered_at = now_iso()
+            conn.execute(
+                "UPDATE messages SET delivered_at=? WHERE id=?",
+                (delivered_at, cur.lastrowid),
+            )
+            conn.commit()
+            msg["delivered_at"] = delivered_at
+
+        preview = body or (
+            "🎙 Голосовое сообщение" if attachment and attachment.get("is_audio")
+            else "◉ Видеокружок" if attachment and attachment.get("is_video")
+            else "📎 " + attachment["name"] if attachment
+            else "Пересланное сообщение"
+        )
+        await send_web_push(
+            data.target_chat_id,
+            user["display_name"],
+            "↪ " + preview,
+            "/",
+            f"user-{user['id']}",
+        )
+        return msg
+
+    group = group_for_user(conn, data.target_chat_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа назначения недоступна")
+
+    cur = conn.execute(
+        """INSERT INTO group_messages(
+             group_id,sender_id,body,created_at,attachment_id,forwarded
+           ) VALUES(?,?,?,?,?,1)""",
+        (
+            data.target_chat_id,
+            user["id"],
+            body,
+            created,
+            attachment_id,
+        ),
+    )
+    conn.commit()
+
+    msg = {
+        "id": cur.lastrowid,
+        "group_id": data.target_chat_id,
+        "sender_id": user["id"],
+        "sender_name": user["display_name"],
+        "body": body,
+        "created_at": created,
+        "attachment": attachment,
+        "deleted": False,
+        "deleted_at": None,
+        "forwarded": True,
+        "can_delete": True,
+        "can_restore": False,
+    }
+    members = conn.execute(
+        "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
+        (data.target_chat_id,),
+    ).fetchall()
+
+    preview = body or (
+        "🎙 Голосовое сообщение" if attachment and attachment.get("is_audio")
+        else "◉ Видеокружок" if attachment and attachment.get("is_video")
+        else "📎 " + attachment["name"] if attachment
+        else "Пересланное сообщение"
+    )
+
+    for member in members:
+        if member["user_id"] == user["id"]:
+            continue
+        live_msg = {
+            **msg,
+            "can_delete": bool(member["is_admin"]),
+        }
+        await push(
+            member["user_id"],
+            {"type": "group_message", "message": live_msg},
+        )
+        await send_web_push(
+            member["user_id"],
+            f"{group['name']} · {user['display_name']}",
+            "↪ " + preview,
+            "/",
+            f"group-{data.target_chat_id}",
+        )
+
     return msg
 
 
@@ -1939,7 +2142,7 @@ def get_group_messages(
         raise HTTPException(404, "Группа не найдена")
     rows = conn.execute(
         """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
-                  gm.deleted_at,gm.deleted_by,
+                  gm.deleted_at,gm.deleted_by,gm.forwarded,gm.forwarded,
                   u.display_name AS sender_name,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
@@ -1966,6 +2169,7 @@ def get_group_messages(
             "created_at": row["created_at"],
             "deleted": deleted,
             "deleted_at": row["deleted_at"],
+            "forwarded": bool(row["forwarded"]),
             "can_delete": (
                 not deleted
                 and (is_admin or row["sender_id"] == user["id"])
@@ -2030,6 +2234,7 @@ async def send_group_message(
         "attachment": attachment,
         "deleted": False,
         "deleted_at": None,
+        "forwarded": False,
         "can_delete": True,
         "can_restore": False,
     }
@@ -2173,6 +2378,7 @@ async def restore_group_message(
         "attachment": attachment_json(row),
         "deleted": False,
         "deleted_at": None,
+        "forwarded": bool(row["forwarded"]),
         "can_delete": True,
         "can_restore": False,
     }
