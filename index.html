@@ -33,7 +33,7 @@
 
 <div id="app" class="app hidden">
   <aside class="sidebar">
-    <div class="side-head"><button id="meAvatar" class="profile-avatar" type="button" title="Изменить аватар">С</button><input id="avatarInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="soundBtn" class="logout" type="button" title="Звуки включены">🔊</button><button id="notifyBtn" class="logout" type="button" title="Включить уведомления">🔔</button><button id="logout" class="logout">Выйти</button></div>
+    <div class="side-head"><button id="meAvatar" class="profile-avatar" type="button" title="Изменить аватар">С</button><input id="avatarInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="soundBtn" class="logout" type="button" title="Звуки включены">🔊</button><button id="vibrationBtn" class="logout" type="button" title="Вибрация включена">📳</button><button id="notifyBtn" class="logout" type="button" title="Включить уведомления">🔔</button><button id="logout" class="logout">Выйти</button></div>
     <div class="scroll">
       <div id="installBox" class="install-box"><button id="installBtn" class="install-app" type="button">📲 Установить «Свои»</button></div>
       <div class="section-head"><span>Звонки</span></div>
@@ -116,7 +116,7 @@ const $=id=>document.getElementById(id);
 let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],callHistory=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false,foundUser=null;
 let currentCall=null,pendingCall=null,pendingIce=[],cameraFacing='user',acceptingCall=false,preparedMediaStream=null;
 let callAudioSinkId='',callSpeakerMode=false;
-let soundsEnabled=localStorage.getItem('svoi_sounds')!=='0',audioContext=null,ringtoneTimer=null,outgoingToneTimer=null;
+let soundsEnabled=localStorage.getItem('svoi_sounds')!=='0',vibrationEnabled=localStorage.getItem('svoi_vibration')!=='0',audioContext=null,ringtoneTimer=null,outgoingToneTimer=null;
 let deferredInstallPrompt=null;
 let groupCallState=null;
 
@@ -125,6 +125,17 @@ function updateSoundButton(){
   if(!button)return;
   button.textContent=soundsEnabled?'🔊':'🔇';
   button.title=soundsEnabled?'Звуки включены':'Звуки выключены'
+}
+
+function updateVibrationButton(){
+  const button=$('vibrationBtn');
+  if(!button)return;
+  const supported=typeof navigator.vibrate==='function';
+  button.textContent=!supported?'—':(vibrationEnabled?'📳':'📴');
+  button.title=!supported
+    ?'Вибрация не поддерживается браузером'
+    :(vibrationEnabled?'Вибрация включена':'Вибрация выключена');
+  button.disabled=!supported
 }
 
 async function unlockAudio(){
@@ -215,22 +226,27 @@ function stopOutgoingTone(){
   }
 }
 
+function vibrateMessage(){
+  if(!vibrationEnabled||!navigator.vibrate)return;
+  try{navigator.vibrate(90)}catch{}
+}
+
 function vibrateIncomingCall(){
-  if(!soundsEnabled||!navigator.vibrate)return;
+  if(!vibrationEnabled||!navigator.vibrate)return;
   try{navigator.vibrate([650,220,650,900])}catch{}
 }
 
 function vibrateGroupInvite(){
-  if(!soundsEnabled||!navigator.vibrate)return;
+  if(!vibrationEnabled||!navigator.vibrate)return;
   try{navigator.vibrate([180,120,260])}catch{}
 }
 
 async function startRingtone(){
-  if(!soundsEnabled||ringtoneTimer)return;
-  await playRingPulse();
+  if((!soundsEnabled&&!vibrationEnabled)||ringtoneTimer)return;
+  if(soundsEnabled)await playRingPulse();
   vibrateIncomingCall();
   ringtoneTimer=setInterval(()=>{
-    playRingPulse().catch(()=>{});
+    if(soundsEnabled)playRingPulse().catch(()=>{});
     vibrateIncomingCall()
   },3000)
 }
@@ -285,18 +301,31 @@ $('installBtn').onclick=async()=>{
 
 updateInstallUi();
 updateSoundButton();
+updateVibrationButton();
 
 $('soundBtn').onclick=async()=>{
   soundsEnabled=!soundsEnabled;
   localStorage.setItem('svoi_sounds',soundsEnabled?'1':'0');
   if(!soundsEnabled){
-    stopRingtone();
-    stopOutgoingTone()
+    stopOutgoingTone();
+    if(!vibrationEnabled)stopRingtone()
   }else{
     await unlockAudio();
     playMessageSound().catch(()=>{})
   }
   updateSoundButton()
+};
+
+$('vibrationBtn').onclick=()=>{
+  if(typeof navigator.vibrate!=='function')return;
+  vibrationEnabled=!vibrationEnabled;
+  localStorage.setItem('svoi_vibration',vibrationEnabled?'1':'0');
+  if(vibrationEnabled){
+    try{navigator.vibrate([90,70,140])}catch{}
+  }else{
+    try{navigator.vibrate(0)}catch{}
+  }
+  updateVibrationButton()
 };
 
 if('serviceWorker' in navigator){
@@ -1561,7 +1590,10 @@ function connectWs(){
     }
     if(data.type==='message'){
       const m=data.message;
-      if(m.sender_id!==me?.id)playMessageSound().catch(()=>{});
+      if(m.sender_id!==me?.id){
+        playMessageSound().catch(()=>{});
+        vibrateMessage()
+      }
       if(active?.type==='user'&&(m.sender_id===active.data.id||m.recipient_id===active.data.id)){
         appendMessage(m);
         if(m.sender_id===active.data.id){
@@ -1581,7 +1613,10 @@ function connectWs(){
     }
     if(data.type==='group_message'){
       const m=data.message;
-      if(m.sender_id!==me?.id)playMessageSound().catch(()=>{});
+      if(m.sender_id!==me?.id){
+        playMessageSound().catch(()=>{});
+        vibrateMessage()
+      }
       if(active?.type==='group'&&m.group_id===active.data.id)appendMessage(m);
       loadGroups().catch(()=>{})
     }
