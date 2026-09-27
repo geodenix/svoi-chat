@@ -76,7 +76,7 @@ dialog{width:min(92vw,460px);border:1px solid #334965;border-radius:20px;backgro
 <script>
 const $=id=>document.getElementById(id);
 let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false;
-let currentCall=null,pendingCall=null,pendingIce=[],cameraFacing='user';
+let currentCall=null,pendingCall=null,pendingIce=[],cameraFacing='user',acceptingCall=false;
 
 const api=async(path,opt={})=>{
   opt.headers={...(opt.headers||{}),...(token?{Authorization:'Bearer '+token}:{})};
@@ -357,10 +357,15 @@ function resetCallUi(){
 }
 
 async function getCallMedia(video){
-  return navigator.mediaDevices.getUserMedia({
+  const request=navigator.mediaDevices.getUserMedia({
     audio:true,
     video:video?{facingMode:{ideal:cameraFacing}}:false
-  })
+  });
+  const timeout=new Promise((_,reject)=>setTimeout(()=>{
+    const err=new Error(video?'Камера не ответила. Проверь разрешение камеры.':'Микрофон не ответил. Проверь разрешение.');
+    err.name='MediaTimeoutError';reject(err)
+  },12000));
+  return Promise.race([request,timeout])
 }
 
 async function createPeer(peerId,peerName,id,video,stream){
@@ -371,7 +376,10 @@ async function createPeer(peerId,peerName,id,video,stream){
   $('localVideo').srcObject=stream;
   pc.ontrack=e=>{
     const stream=e.streams?.[0];
-    if(stream)$('remoteVideo').srcObject=stream;
+    if(stream){
+      $('remoteVideo').srcObject=stream;
+      $('remoteVideo').play().catch(()=>{})
+    }
     $('callStatus').textContent='Соединено'
   };
   pc.onicecandidate=e=>{
@@ -426,26 +434,57 @@ function incomingCall(data){
 }
 
 async function acceptIncomingCall(){
-  if(!pendingCall)return;
-  const data=pendingCall;pendingCall=null;
+  if(!pendingCall||acceptingCall)return;
+  acceptingCall=true;
+  const data=pendingCall;
+  $('acceptCall').disabled=true;$('rejectCall').disabled=true;
+  showCallUi(
+    data.from_name,
+    data.video?'Подключаем камеру…':'Подключаем микрофон…',
+    !!data.video,
+    false
+  );
   try{
     const stream=await getCallMedia(!!data.video);
-    const pc=await createPeer(data.from_user_id,data.from_name,data.call_id,!!data.video,stream);
-    showCallUi(data.from_name,'Соединение…',!!data.video,false);
+    if(!pendingCall||pendingCall.call_id!==data.call_id){
+      stream.getTracks().forEach(t=>t.stop());
+      return
+    }
+    const pc=await createPeer(
+      data.from_user_id,
+      data.from_name,
+      data.call_id,
+      !!data.video,
+      stream
+    );
+    pendingCall=null;
+    $('callStatus').textContent='Соединение…';
     await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
     await flushPendingIce();
     const answer=await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    wsSend({type:'call_answer',to_user_id:data.from_user_id,call_id:data.call_id,video:!!data.video,sdp:pc.localDescription.toJSON?pc.localDescription.toJSON():pc.localDescription})
+    wsSend({
+      type:'call_answer',
+      to_user_id:data.from_user_id,
+      call_id:data.call_id,
+      video:!!data.video,
+      sdp:pc.localDescription.toJSON?pc.localDescription.toJSON():pc.localDescription
+    })
   }catch(err){
     try{wsSend({type:'call_reject',to_user_id:data.from_user_id,call_id:data.call_id})}catch{}
     finishCall(false);
-    alert(err.name==='NotAllowedError'?'Нужен доступ к микрофону/камере':(err.message||'Не удалось принять звонок'))
+    const message=err.name==='NotAllowedError'
+      ?'Нужен доступ к микрофону и камере'
+      :(err.message||'Не удалось принять звонок');
+    alert(message)
+  }finally{
+    acceptingCall=false;
+    $('acceptCall').disabled=false;$('rejectCall').disabled=false
   }
 }
 
 function rejectIncomingCall(){
-  if(!pendingCall)return;
+  if(!pendingCall||acceptingCall)return;
   try{wsSend({type:'call_reject',to_user_id:pendingCall.from_user_id,call_id:pendingCall.call_id})}catch{}
   pendingCall=null;pendingIce=[];resetCallUi()
 }
@@ -453,12 +492,14 @@ function rejectIncomingCall(){
 function finishCall(notify=true){
   if(notify&&currentCall){
     try{wsSend({type:'call_end',to_user_id:currentCall.peerId,call_id:currentCall.callId})}catch{}
+  }else if(notify&&pendingCall){
+    try{wsSend({type:'call_reject',to_user_id:pendingCall.from_user_id,call_id:pendingCall.call_id})}catch{}
   }
   if(currentCall){
     try{currentCall.pc.onicecandidate=null;currentCall.pc.ontrack=null;currentCall.pc.close()}catch{}
     try{currentCall.localStream?.getTracks().forEach(t=>t.stop())}catch{}
   }
-  currentCall=null;pendingCall=null;pendingIce=[];resetCallUi()
+  acceptingCall=false;currentCall=null;pendingCall=null;pendingIce=[];resetCallUi()
 }
 
 async function handleCallSignal(data){
