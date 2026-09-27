@@ -194,6 +194,13 @@ def init_db():
     if "avatar_id" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN avatar_id INTEGER")
 
+    group_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(chat_groups)").fetchall()
+    }
+    if "avatar_id" not in group_columns:
+        conn.execute("ALTER TABLE chat_groups ADD COLUMN avatar_id INTEGER")
+
     conn.commit()
     conn.close()
 
@@ -237,6 +244,21 @@ def user_json(row):
         "display_name": row["display_name"],
         "avatar_url": f"/uploads/{stored}" if stored else None,
     }
+
+
+def group_json(row):
+    keys = set(row.keys())
+    stored = row["avatar_stored_name"] if "avatar_stored_name" in keys else None
+    data = {
+        "id": row["id"],
+        "name": row["name"],
+        "owner_id": row["owner_id"],
+        "created_at": row["created_at"],
+        "avatar_url": f"/uploads/{stored}" if stored else None,
+    }
+    if "member_count" in keys:
+        data["member_count"] = row["member_count"]
+    return data
 
 
 def get_user_from_token(conn, token: str):
@@ -703,6 +725,122 @@ async def delete_avatar(
     await _broadcast_profile(data)
     return data
 
+async def _broadcast_group_update(group_id: int):
+    conn = connect_db()
+    row = conn.execute(
+        """SELECT g.id,g.name,g.owner_id,g.created_at,
+                  ga.stored_name AS avatar_stored_name,
+                  COUNT(gm.user_id) AS member_count
+           FROM chat_groups g
+           LEFT JOIN uploads ga ON ga.id=g.avatar_id
+           LEFT JOIN group_members gm ON gm.group_id=g.id
+           WHERE g.id=?
+           GROUP BY g.id""",
+        (group_id,),
+    ).fetchone()
+    members = conn.execute(
+        "SELECT user_id FROM group_members WHERE group_id=?",
+        (group_id,),
+    ).fetchall()
+    conn.close()
+    if not row:
+        return
+    data = group_json(row)
+    for member in members:
+        await push(
+            int(member["user_id"]),
+            {"type": "group_updated", "group": data},
+        )
+
+
+@app.post("/api/groups/{group_id}/avatar")
+async def set_group_avatar(
+    group_id: int,
+    file: UploadFile = File(...),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        await file.close()
+        raise HTTPException(404, "Группа не найдена")
+    if group["owner_id"] != user["id"]:
+        await file.close()
+        raise HTTPException(403, "Менять аватар группы может только владелец")
+
+    mime = (file.content_type or "").lower().split(";", 1)[0].strip()
+    if mime not in AVATAR_IMAGE_TYPES:
+        await file.close()
+        raise HTTPException(400, "Для аватара выбери JPEG, PNG или WebP")
+
+    content = await file.read(AVATAR_MAX_BYTES + 1)
+    await file.close()
+    if not content:
+        raise HTTPException(400, "Файл пустой")
+    if len(content) > AVATAR_MAX_BYTES:
+        raise HTTPException(413, "Аватар больше 5 МБ")
+
+    suffix = _avatar_suffix(content, mime)
+    stored = "group-avatar-" + secrets.token_hex(24) + suffix
+    path = UPLOAD_DIR / stored
+    path.write_bytes(content)
+
+    old = conn.execute(
+        """SELECT g.avatar_id, a.stored_name
+           FROM chat_groups g
+           LEFT JOIN uploads a ON a.id=g.avatar_id
+           WHERE g.id=?""",
+        (group_id,),
+    ).fetchone()
+
+    try:
+        cur = conn.execute(
+            """INSERT INTO uploads(
+                 owner_id,stored_name,original_name,mime_type,size,created_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (
+                user["id"],
+                stored,
+                f"group-avatar{suffix}",
+                mime,
+                len(content),
+                now_iso(),
+            ),
+        )
+        conn.execute(
+            "UPDATE chat_groups SET avatar_id=? WHERE id=?",
+            (cur.lastrowid, group_id),
+        )
+        conn.commit()
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+    if old and old["avatar_id"]:
+        conn.execute(
+            "DELETE FROM uploads WHERE id=? AND owner_id=?",
+            (old["avatar_id"], user["id"]),
+        )
+        conn.commit()
+        if old["stored_name"]:
+            (UPLOAD_DIR / old["stored_name"]).unlink(missing_ok=True)
+
+    row = conn.execute(
+        """SELECT g.id,g.name,g.owner_id,g.created_at,
+                  ga.stored_name AS avatar_stored_name,
+                  COUNT(gm.user_id) AS member_count
+           FROM chat_groups g
+           LEFT JOIN uploads ga ON ga.id=g.avatar_id
+           LEFT JOIN group_members gm ON gm.group_id=g.id
+           WHERE g.id=?
+           GROUP BY g.id""",
+        (group_id,),
+    ).fetchone()
+    data = group_json(row)
+    await _broadcast_group_update(group_id)
+    return data
+
+
 def push_configured() -> bool:
     return bool(
         VAPID_PUBLIC_KEY
@@ -1150,9 +1288,11 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
 
 def group_for_user(conn, group_id: int, user_id: int):
     return conn.execute(
-        """SELECT g.id,g.name,g.owner_id,g.created_at
+        """SELECT g.id,g.name,g.owner_id,g.created_at,g.avatar_id,
+                  ga.stored_name AS avatar_stored_name
            FROM chat_groups g
            JOIN group_members gm ON gm.group_id=g.id
+           LEFT JOIN uploads ga ON ga.id=g.avatar_id
            WHERE g.id=? AND gm.user_id=?""",
         (group_id, user_id),
     ).fetchone()
@@ -1162,16 +1302,18 @@ def group_for_user(conn, group_id: int, user_id: int):
 def get_groups(user=Depends(current_user), conn=Depends(db)):
     rows = conn.execute(
         """SELECT g.id,g.name,g.owner_id,g.created_at,
+                  ga.stored_name AS avatar_stored_name,
                   COUNT(gm2.user_id) AS member_count
            FROM chat_groups g
            JOIN group_members mine
              ON mine.group_id=g.id AND mine.user_id=?
            LEFT JOIN group_members gm2 ON gm2.group_id=g.id
+           LEFT JOIN uploads ga ON ga.id=g.avatar_id
            GROUP BY g.id
            ORDER BY g.id DESC""",
         (user["id"],),
     ).fetchall()
-    return [dict(r) for r in rows]
+    return [group_json(r) for r in rows]
 
 
 @app.post("/api/groups")
@@ -1205,6 +1347,7 @@ async def create_group(data: GroupCreateIn, user=Depends(current_user), conn=Dep
         "owner_id": user["id"],
         "created_at": created,
         "member_count": len(member_ids),
+        "avatar_url": None,
     }
     for uid in member_ids:
         if uid != user["id"]:
