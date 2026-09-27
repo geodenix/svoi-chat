@@ -1863,7 +1863,7 @@ async def send_group_message(
         "can_restore": False,
     }
     member_rows = conn.execute(
-        "SELECT user_id FROM group_members WHERE group_id=?",
+        "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
         (group_id,),
     ).fetchall()
     if body:
@@ -1878,9 +1878,13 @@ async def send_group_message(
         preview = "Новое сообщение"
     for row in member_rows:
         if row["user_id"] != user["id"]:
+            live_msg = {
+                **msg,
+                "can_delete": bool(row["is_admin"]),
+            }
             await push(
                 row["user_id"],
-                {"type": "group_message", "message": msg},
+                {"type": "group_message", "message": live_msg},
             )
             await send_web_push(
                 row["user_id"],
