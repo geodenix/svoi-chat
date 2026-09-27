@@ -186,6 +186,15 @@ def init_db():
                 conn.execute(
                     "ALTER TABLE messages ADD COLUMN read_at TEXT"
                 )
+        if table == "group_messages":
+            if "deleted_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE group_messages ADD COLUMN deleted_at TEXT"
+                )
+            if "deleted_by" not in columns:
+                conn.execute(
+                    "ALTER TABLE group_messages ADD COLUMN deleted_by INTEGER"
+                )
 
     user_columns = {
         row[1]
@@ -1754,10 +1763,12 @@ def get_group_messages(
     user=Depends(current_user),
     conn=Depends(db),
 ):
-    if not group_for_user(conn, group_id, user["id"]):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
         raise HTTPException(404, "Группа не найдена")
     rows = conn.execute(
         """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
+                  gm.deleted_at,gm.deleted_by,
                   u.display_name AS sender_name,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
@@ -1772,20 +1783,27 @@ def get_group_messages(
         (group_id, limit),
     ).fetchall()
     result = []
+    is_admin = bool(group["is_admin"])
     for row in reversed(rows):
-        item = dict(row)
-        item["attachment"] = attachment_json(row)
-        for key in (
-            "attachment_id",
-            "attachment_stored_name",
-            "attachment_name",
-            "attachment_mime",
-            "attachment_size",
-        ):
-            item.pop(key, None)
+        deleted = bool(row["deleted_at"])
+        item = {
+            "id": row["id"],
+            "group_id": row["group_id"],
+            "sender_id": row["sender_id"],
+            "sender_name": row["sender_name"],
+            "body": "" if deleted else row["body"],
+            "created_at": row["created_at"],
+            "deleted": deleted,
+            "deleted_at": row["deleted_at"],
+            "can_delete": (
+                not deleted
+                and (is_admin or row["sender_id"] == user["id"])
+            ),
+            "can_restore": deleted and is_admin,
+            "attachment": None if deleted else attachment_json(row),
+        }
         result.append(item)
     return result
-
 
 @app.post("/api/groups/{group_id}/messages")
 async def send_group_message(
@@ -1839,6 +1857,10 @@ async def send_group_message(
         "body": body,
         "created_at": created,
         "attachment": attachment,
+        "deleted": False,
+        "deleted_at": None,
+        "can_delete": True,
+        "can_restore": False,
     }
     member_rows = conn.execute(
         "SELECT user_id FROM group_members WHERE group_id=?",
@@ -1868,6 +1890,140 @@ async def send_group_message(
                 f"group-{group_id}",
             )
     return msg
+
+
+@app.delete("/api/groups/{group_id}/messages/{message_id}")
+async def delete_group_message(
+    group_id: int,
+    message_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+
+    row = conn.execute(
+        """SELECT id,sender_id,deleted_at
+           FROM group_messages
+           WHERE id=? AND group_id=?""",
+        (message_id, group_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Сообщение не найдено")
+    if row["deleted_at"]:
+        raise HTTPException(409, "Сообщение уже удалено")
+
+    if row["sender_id"] != user["id"] and not bool(group["is_admin"]):
+        raise HTTPException(403, "Удалить это сообщение может только автор или администратор")
+
+    deleted_at = now_iso()
+    conn.execute(
+        """UPDATE group_messages
+           SET deleted_at=?, deleted_by=?
+           WHERE id=? AND group_id=?""",
+        (deleted_at, user["id"], message_id, group_id),
+    )
+    conn.commit()
+
+    members = conn.execute(
+        "SELECT user_id FROM group_members WHERE group_id=?",
+        (group_id,),
+    ).fetchall()
+    event = {
+        "type": "group_message_deleted",
+        "group_id": group_id,
+        "message_id": message_id,
+        "deleted_at": deleted_at,
+    }
+    for member in members:
+        await push(int(member["user_id"]), event)
+
+    return {
+        "ok": True,
+        "group_id": group_id,
+        "message_id": message_id,
+        "deleted_at": deleted_at,
+    }
+
+
+@app.post("/api/groups/{group_id}/messages/{message_id}/restore")
+async def restore_group_message(
+    group_id: int,
+    message_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+    if not bool(group["is_admin"]):
+        raise HTTPException(403, "Восстанавливать сообщения может только администратор")
+
+    row = conn.execute(
+        """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
+                  gm.deleted_at,gm.deleted_by,
+                  u.display_name AS sender_name,
+                  up.id AS attachment_id,
+                  up.stored_name AS attachment_stored_name,
+                  up.original_name AS attachment_name,
+                  up.mime_type AS attachment_mime,
+                  up.size AS attachment_size
+           FROM group_messages gm
+           JOIN users u ON u.id=gm.sender_id
+           LEFT JOIN uploads up ON up.id=gm.attachment_id
+           WHERE gm.id=? AND gm.group_id=?""",
+        (message_id, group_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Сообщение не найдено")
+    if not row["deleted_at"]:
+        raise HTTPException(409, "Сообщение не удалено")
+
+    conn.execute(
+        """UPDATE group_messages
+           SET deleted_at=NULL, deleted_by=NULL
+           WHERE id=? AND group_id=?""",
+        (message_id, group_id),
+    )
+    conn.commit()
+
+    restored = {
+        "id": row["id"],
+        "group_id": row["group_id"],
+        "sender_id": row["sender_id"],
+        "sender_name": row["sender_name"],
+        "body": row["body"],
+        "created_at": row["created_at"],
+        "attachment": attachment_json(row),
+        "deleted": False,
+        "deleted_at": None,
+        "can_delete": True,
+        "can_restore": False,
+    }
+
+    members = conn.execute(
+        "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
+        (group_id,),
+    ).fetchall()
+    for member in members:
+        payload = {
+            **restored,
+            "can_delete": (
+                bool(member["is_admin"])
+                or int(member["user_id"]) == int(row["sender_id"])
+            ),
+        }
+        await push(
+            int(member["user_id"]),
+            {
+                "type": "group_message_restored",
+                "group_id": group_id,
+                "message": payload,
+            },
+        )
+
+    return restored
 
 
 @app.post("/api/groups/{group_id}/call-token")
