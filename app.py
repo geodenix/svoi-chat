@@ -28,7 +28,7 @@ VAPID_PRIVATE_KEY_FILE = os.getenv(
 VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip()
 VAPID_SUBJECT = os.getenv(
     "VAPID_SUBJECT",
-    "https://epl-gruz.duckdns.org/",
+    "mailto:admin@epl-gruz.duckdns.org",
 ).strip()
 
 app = FastAPI(title="Свои", version="0.1.0")
