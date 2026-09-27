@@ -24,7 +24,7 @@ def now_iso() -> str:
 
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     try:
@@ -34,7 +34,7 @@ def db():
 
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.executescript("""
     PRAGMA journal_mode=WAL;
     CREATE TABLE IF NOT EXISTS users (
@@ -261,7 +261,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     row = get_user_from_token(conn, token)
     conn.close()
