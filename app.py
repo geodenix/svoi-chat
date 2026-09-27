@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Set
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -14,6 +14,10 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("SVOI_DATA_DIR", BASE_DIR / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "svoi.db"
+UPLOAD_DIR = DATA_DIR / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+INLINE_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 app = FastAPI(title="Свои", version="0.1.0")
 connections: Dict[int, Set[WebSocket]] = {}
@@ -80,7 +84,26 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_group_messages
       ON group_messages(group_id, id);
+    CREATE TABLE IF NOT EXISTS uploads (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      stored_name TEXT NOT NULL UNIQUE,
+      original_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
     """)
+    for table in ("messages", "group_messages"):
+        columns = {
+            row[1]
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if "attachment_id" not in columns:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN attachment_id INTEGER"
+            )
+    conn.commit()
     conn.close()
 
 
@@ -158,7 +181,8 @@ class LoginIn(BaseModel):
 
 class MessageIn(BaseModel):
     recipient_id: int
-    body: str = Field(min_length=1, max_length=4000)
+    body: str = Field(default="", max_length=4000)
+    attachment_id: int | None = None
 
 
 class GroupCreateIn(BaseModel):
@@ -167,7 +191,8 @@ class GroupCreateIn(BaseModel):
 
 
 class GroupMessageIn(BaseModel):
-    body: str = Field(min_length=1, max_length=4000)
+    body: str = Field(default="", max_length=4000)
+    attachment_id: int | None = None
 
 
 @app.get("/health")
@@ -232,6 +257,90 @@ def users(user=Depends(current_user), conn=Depends(db)):
     ]
 
 
+def attachment_json(row):
+    if not row or row["attachment_id"] is None:
+        return None
+    mime = row["attachment_mime"] or "application/octet-stream"
+    return {
+        "id": row["attachment_id"],
+        "url": f"/uploads/{row['attachment_stored_name']}",
+        "name": row["attachment_name"],
+        "mime_type": mime,
+        "size": row["attachment_size"],
+        "is_image": mime in INLINE_IMAGE_TYPES,
+    }
+
+
+def owned_upload(conn, attachment_id: int | None, user_id: int):
+    if attachment_id is None:
+        return None
+    row = conn.execute(
+        """SELECT id,stored_name,original_name,mime_type,size
+           FROM uploads WHERE id=? AND owner_id=?""",
+        (attachment_id, user_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(400, "Вложение не найдено")
+    return row
+
+
+@app.post("/api/uploads")
+async def upload(
+    file: UploadFile = File(...),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    await file.close()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "Файл больше 20 МБ")
+    original = Path(file.filename or "file").name[:255] or "file"
+    suffix = Path(original).suffix.lower()
+    if len(suffix) > 12 or not all(ch.isalnum() or ch == "." for ch in suffix):
+        suffix = ""
+    stored = secrets.token_hex(24) + suffix
+    mime = (file.content_type or "application/octet-stream")[:120]
+    (UPLOAD_DIR / stored).write_bytes(content)
+    cur = conn.execute(
+        """INSERT INTO uploads(
+             owner_id,stored_name,original_name,mime_type,size,created_at
+           ) VALUES(?,?,?,?,?,?)""",
+        (user["id"], stored, original, mime, len(content), now_iso()),
+    )
+    conn.commit()
+    return {
+        "id": cur.lastrowid,
+        "url": f"/uploads/{stored}",
+        "name": original,
+        "mime_type": mime,
+        "size": len(content),
+        "is_image": mime in INLINE_IMAGE_TYPES,
+    }
+
+
+@app.get("/uploads/{stored_name}")
+def get_upload(stored_name: str, conn=Depends(db)):
+    if Path(stored_name).name != stored_name:
+        raise HTTPException(404, "Файл не найден")
+    row = conn.execute(
+        """SELECT stored_name,original_name,mime_type
+           FROM uploads WHERE stored_name=?""",
+        (stored_name,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Файл не найден")
+    path = UPLOAD_DIR / row["stored_name"]
+    if not path.is_file():
+        raise HTTPException(404, "Файл не найден")
+    if row["mime_type"] in INLINE_IMAGE_TYPES:
+        return FileResponse(path, media_type=row["mime_type"])
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        filename=row["original_name"],
+    )
+
+
 @app.get("/api/messages/{other_id}")
 def history(
     other_id: int,
@@ -242,14 +351,31 @@ def history(
     if not conn.execute("SELECT 1 FROM users WHERE id=?", (other_id,)).fetchone():
         raise HTTPException(404, "Пользователь не найден")
     rows = conn.execute(
-        """SELECT id,sender_id,recipient_id,body,created_at
-           FROM messages
-           WHERE (sender_id=? AND recipient_id=?)
-              OR (sender_id=? AND recipient_id=?)
-           ORDER BY id DESC LIMIT ?""",
+        """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
+                  up.id AS attachment_id,
+                  up.stored_name AS attachment_stored_name,
+                  up.original_name AS attachment_name,
+                  up.mime_type AS attachment_mime,
+                  up.size AS attachment_size
+           FROM messages m
+           LEFT JOIN uploads up ON up.id=m.attachment_id
+           WHERE (m.sender_id=? AND m.recipient_id=?)
+              OR (m.sender_id=? AND m.recipient_id=?)
+           ORDER BY m.id DESC LIMIT ?""",
         (user["id"], other_id, other_id, user["id"], limit),
     ).fetchall()
-    return [dict(r) for r in reversed(rows)]
+    result = []
+    for row in reversed(rows):
+        item = {
+            "id": row["id"],
+            "sender_id": row["sender_id"],
+            "recipient_id": row["recipient_id"],
+            "body": row["body"],
+            "created_at": row["created_at"],
+            "attachment": attachment_json(row),
+        }
+        result.append(item)
+    return result
 
 
 async def push(user_id: int, payload: dict):
@@ -270,20 +396,40 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
     if not conn.execute("SELECT 1 FROM users WHERE id=?", (data.recipient_id,)).fetchone():
         raise HTTPException(404, "Пользователь не найден")
     body = data.body.strip()
-    if not body:
+    upload_row = owned_upload(conn, data.attachment_id, user["id"])
+    if not body and not upload_row:
         raise HTTPException(400, "Пустое сообщение")
     created = now_iso()
     cur = conn.execute(
-        "INSERT INTO messages(sender_id,recipient_id,body,created_at) VALUES(?,?,?,?)",
-        (user["id"], data.recipient_id, body, created),
+        """INSERT INTO messages(
+             sender_id,recipient_id,body,created_at,attachment_id
+           ) VALUES(?,?,?,?,?)""",
+        (
+            user["id"],
+            data.recipient_id,
+            body,
+            created,
+            data.attachment_id,
+        ),
     )
     conn.commit()
+    attachment = None
+    if upload_row:
+        attachment = {
+            "id": upload_row["id"],
+            "url": f"/uploads/{upload_row['stored_name']}",
+            "name": upload_row["original_name"],
+            "mime_type": upload_row["mime_type"],
+            "size": upload_row["size"],
+            "is_image": upload_row["mime_type"] in INLINE_IMAGE_TYPES,
+        }
     msg = {
         "id": cur.lastrowid,
         "sender_id": user["id"],
         "recipient_id": data.recipient_id,
         "body": body,
         "created_at": created,
+        "attachment": attachment,
     }
     await push(data.recipient_id, {"type": "message", "message": msg})
     return msg
@@ -382,14 +528,33 @@ def get_group_messages(
         raise HTTPException(404, "Группа не найдена")
     rows = conn.execute(
         """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
-                  u.display_name AS sender_name
+                  u.display_name AS sender_name,
+                  up.id AS attachment_id,
+                  up.stored_name AS attachment_stored_name,
+                  up.original_name AS attachment_name,
+                  up.mime_type AS attachment_mime,
+                  up.size AS attachment_size
            FROM group_messages gm
            JOIN users u ON u.id=gm.sender_id
+           LEFT JOIN uploads up ON up.id=gm.attachment_id
            WHERE gm.group_id=?
            ORDER BY gm.id DESC LIMIT ?""",
         (group_id, limit),
     ).fetchall()
-    return [dict(r) for r in reversed(rows)]
+    result = []
+    for row in reversed(rows):
+        item = dict(row)
+        item["attachment"] = attachment_json(row)
+        for key in (
+            "attachment_id",
+            "attachment_stored_name",
+            "attachment_name",
+            "attachment_mime",
+            "attachment_size",
+        ):
+            item.pop(key, None)
+        result.append(item)
+    return result
 
 
 @app.post("/api/groups/{group_id}/messages")
@@ -402,14 +567,33 @@ async def send_group_message(
     if not group_for_user(conn, group_id, user["id"]):
         raise HTTPException(404, "Группа не найдена")
     body = data.body.strip()
-    if not body:
+    upload_row = owned_upload(conn, data.attachment_id, user["id"])
+    if not body and not upload_row:
         raise HTTPException(400, "Пустое сообщение")
     created = now_iso()
     cur = conn.execute(
-        "INSERT INTO group_messages(group_id,sender_id,body,created_at) VALUES(?,?,?,?)",
-        (group_id, user["id"], body, created),
+        """INSERT INTO group_messages(
+             group_id,sender_id,body,created_at,attachment_id
+           ) VALUES(?,?,?,?,?)""",
+        (
+            group_id,
+            user["id"],
+            body,
+            created,
+            data.attachment_id,
+        ),
     )
     conn.commit()
+    attachment = None
+    if upload_row:
+        attachment = {
+            "id": upload_row["id"],
+            "url": f"/uploads/{upload_row['stored_name']}",
+            "name": upload_row["original_name"],
+            "mime_type": upload_row["mime_type"],
+            "size": upload_row["size"],
+            "is_image": upload_row["mime_type"] in INLINE_IMAGE_TYPES,
+        }
     msg = {
         "id": cur.lastrowid,
         "group_id": group_id,
@@ -417,6 +601,7 @@ async def send_group_message(
         "sender_name": user["display_name"],
         "body": body,
         "created_at": created,
+        "attachment": attachment,
     }
     member_rows = conn.execute(
         "SELECT user_id FROM group_members WHERE group_id=?",
