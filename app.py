@@ -1070,6 +1070,33 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             connections.pop(user_id, None)
 
 
+@app.get("/manifest.webmanifest")
+def manifest():
+    return FileResponse(
+        BASE_DIR / "manifest.webmanifest",
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/icon-192.svg")
+def icon_192():
+    return FileResponse(
+        BASE_DIR / "icon-192.svg",
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/icon-512.svg")
+def icon_512():
+    return FileResponse(
+        BASE_DIR / "icon-512.svg",
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/sw.js")
 def service_worker():
     return FileResponse(
@@ -1081,4 +1108,7 @@ def service_worker():
 
 @app.get("/")
 def root():
-    return FileResponse(BASE_DIR / "index.html")
+    return FileResponse(
+        BASE_DIR / "index.html",
+        headers={"Cache-Control": "no-cache"},
+    )
