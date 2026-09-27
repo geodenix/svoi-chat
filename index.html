@@ -52,7 +52,7 @@
   </aside>
 
   <main class="chat">
-    <div id="chatHead" class="chat-head hidden"><button id="back" class="back">←</button><div class="avatar" id="chatAvatar"></div><div class="chat-title"><strong id="chatName"></strong><small id="chatStatus" class="muted"></small></div><div id="callActions" class="call-actions hidden"><button id="audioCallBtn" class="call-btn" type="button" title="Голосовой звонок">📞</button><button id="videoCallBtn" class="call-btn" type="button" title="Видеозвонок">🎥</button></div></div>
+    <div id="chatHead" class="chat-head hidden"><button id="back" class="back">←</button><div class="avatar" id="chatAvatar"></div><input id="groupAvatarInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="chat-title"><strong id="chatName"></strong><small id="chatStatus" class="muted"></small></div><div id="callActions" class="call-actions hidden"><button id="audioCallBtn" class="call-btn" type="button" title="Голосовой звонок">📞</button><button id="videoCallBtn" class="call-btn" type="button" title="Видеозвонок">🎥</button></div></div>
     <div id="messages" class="messages"><div class="welcome"><div class="mark">С</div><h2>Выбери чат</h2><p>Личные и групповые сообщения приходят в реальном времени.</p></div></div>
     <div id="pendingFile" class="pending-file hidden"><span id="pendingFileName"></span><button id="removeFile" type="button">×</button></div>
     <form id="composer" class="composer hidden"><button id="attach" class="attach" type="button" aria-label="Прикрепить файл">📎</button><input id="fileInput" type="file" hidden><textarea id="text" placeholder="Сообщение…" maxlength="4000" rows="1"></textarea><button id="send" class="send" disabled>↑</button></form>
@@ -394,6 +394,23 @@ function setAvatar(el,user){
     el.textContent=initials(user?.display_name||'?')
   }
 }
+
+function setGroupAvatar(el,group){
+  if(!el)return;
+  el.replaceChildren();
+  const url=group?.avatar_url;
+  el.classList.add('group-avatar');
+  el.classList.toggle('has-photo',!!url);
+  if(url){
+    const img=document.createElement('img');
+    img.src=url;
+    img.alt=group?.name||'Аватар группы';
+    img.loading='lazy';
+    el.append(img)
+  }else{
+    el.textContent='#'
+  }
+}
 function showAuth(){me=null;active=null;foundUser=null;if(socket)socket.close();$('auth').classList.remove('hidden');$('app').classList.add('hidden')}
 
 async function enter(){
@@ -566,6 +583,7 @@ function renderGroups(){
   for(const g of groups){
     const b=document.createElement('button');b.className='item'+(active?.type==='group'&&active.data.id===g.id?' active':'');
     b.innerHTML='<span class="avatar group-avatar">#</span><span class="txt"><strong></strong><small class="muted">'+g.member_count+' участников</small></span>';
+    setGroupAvatar(b.querySelector('.avatar'),g);
     b.querySelector('strong').textContent=g.name;b.onclick=()=>openGroup(g);box.append(b)
   }
 }
@@ -584,9 +602,13 @@ function updateHead(){
   if(!active)return;
   if(active.type==='user'){
     const u=active.data;$('chatName').textContent=u.display_name;$('chatAvatar').classList.remove('group-avatar');setAvatar($('chatAvatar'),u);$('chatStatus').textContent=u.online?'в сети':'не в сети';
+    $('chatAvatar').style.cursor='default';$('chatAvatar').title='Аватар пользователя';
     $('callActions').classList.remove('hidden');$('audioCallBtn').disabled=false;$('videoCallBtn').disabled=false
   }else{
-    const g=active.data;$('chatName').textContent=g.name;$('chatAvatar').replaceChildren();$('chatAvatar').textContent='#';$('chatAvatar').classList.remove('has-photo');$('chatAvatar').classList.add('group-avatar');$('chatStatus').textContent=g.member_count+' участников';
+    const g=active.data;$('chatName').textContent=g.name;setGroupAvatar($('chatAvatar'),g);$('chatStatus').textContent=g.member_count+' участников';
+    const canEditAvatar=Number(g.owner_id)===Number(me?.id);
+    $('chatAvatar').style.cursor=canEditAvatar?'pointer':'default';
+    $('chatAvatar').title=canEditAvatar?'Изменить аватар группы':'Аватар группы';
     $('callActions').classList.remove('hidden');$('audioCallBtn').disabled=false;$('videoCallBtn').disabled=false
   }
 }
@@ -636,6 +658,54 @@ function syncSend(){ $('send').disabled=uploading||(!$('text').value.trim()&&!pe
 function clearPending(){
   pendingAttachment=null;$('pendingFile').classList.add('hidden');$('pendingFileName').textContent='';$('fileInput').value='';syncSend()
 }
+
+$('chatAvatar').onclick=()=>{
+  if(active?.type!=='group')return;
+  if(Number(active.data.owner_id)!==Number(me?.id))return;
+  $('groupAvatarInput').click()
+};
+
+$('groupAvatarInput').onchange=async()=>{
+  const file=$('groupAvatarInput').files?.[0];
+  $('groupAvatarInput').value='';
+  if(!file||active?.type!=='group')return;
+  if(Number(active.data.owner_id)!==Number(me?.id)){
+    alert('Менять аватар группы может только владелец');
+    return
+  }
+  if(file.size>5*1024*1024){
+    alert('Аватар должен быть не больше 5 МБ');
+    return
+  }
+  if(!['image/jpeg','image/png','image/webp'].includes(file.type)){
+    alert('Выбери JPEG, PNG или WebP');
+    return
+  }
+
+  const groupId=active.data.id;
+  const form=new FormData();
+  form.append('file',file);
+  $('chatAvatar').style.opacity='.55';
+  try{
+    const r=await fetch('/api/groups/'+groupId+'/avatar',{
+      method:'POST',
+      headers:{Authorization:'Bearer '+token},
+      body:form
+    });
+    let data=null;
+    try{data=await r.json()}catch{}
+    if(!r.ok)throw new Error(data?.detail||'Не удалось изменить аватар группы');
+
+    groups=groups.map(g=>g.id===data.id?data:g);
+    if(active?.type==='group'&&active.data.id===data.id)active.data=data;
+    renderGroups();
+    updateHead()
+  }catch(err){
+    alert(err.message||'Не удалось изменить аватар группы')
+  }finally{
+    $('chatAvatar').style.opacity=''
+  }
+};
 
 $('text').oninput=()=>{syncSend();$('text').style.height='auto';$('text').style.height=Math.min(120,$('text').scrollHeight)+'px'};
 
@@ -1869,6 +1939,16 @@ function connectWs(){
       }
       if(active?.type==='group'&&m.group_id===active.data.id)appendMessage(m);
       loadGroups().catch(()=>{})
+    }
+    if(data.type==='group_updated'){
+      const updated=data.group;
+      groups=groups.map(g=>g.id===updated.id?updated:g);
+      if(active?.type==='group'&&active.data.id===updated.id){
+        active.data=updated;
+        updateHead()
+      }
+      renderGroups();
+      return
     }
     if(data.type==='group_created')loadGroups().catch(()=>{})
   };
