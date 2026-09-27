@@ -1071,6 +1071,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     await websocket.accept()
     connections.setdefault(user_id, set()).add(websocket)
 
+    for call in list(active_calls.values()):
+        if call.get("callee_id") == user_id and not call.get("answered"):
+            await websocket.send_json(
+                {
+                    "type": "call_offer",
+                    "from_user_id": call["caller_id"],
+                    "from_name": call["caller_name"],
+                    "call_id": call["call_id"],
+                    "video": call["video"],
+                    "sdp": call["offer_sdp"],
+                    "ice_candidates": call.get("caller_ice", []),
+                }
+            )
+
     try:
         while True:
             raw = await websocket.receive_text()
