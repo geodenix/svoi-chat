@@ -119,7 +119,8 @@ def init_db():
       sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      client_message_id TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_messages_pair
       ON messages(sender_id, recipient_id, id);
@@ -140,7 +141,8 @@ def init_db():
       group_id INTEGER NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
       sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      client_message_id TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_group_messages
       ON group_messages(group_id, id);
@@ -203,6 +205,10 @@ def init_db():
             conn.execute(
                 f"ALTER TABLE {table} ADD COLUMN attachment_id INTEGER"
             )
+        if "client_message_id" not in columns:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN client_message_id TEXT"
+            )
         if table == "messages":
             if "delivered_at" not in columns:
                 conn.execute(
@@ -229,6 +235,17 @@ def init_db():
                 conn.execute(
                     "ALTER TABLE group_messages ADD COLUMN forwarded INTEGER NOT NULL DEFAULT 0"
                 )
+
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_message
+           ON messages(sender_id, client_message_id)
+           WHERE client_message_id IS NOT NULL"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_group_messages_client_message
+           ON group_messages(sender_id, client_message_id)
+           WHERE client_message_id IS NOT NULL"""
+    )
 
     user_columns = {
         row[1]
@@ -367,6 +384,7 @@ class MessageIn(BaseModel):
     recipient_id: int
     body: str = Field(default="", max_length=4000)
     attachment_id: int | None = None
+    client_message_id: str | None = Field(default=None, max_length=80)
 
 
 class GroupCreateIn(BaseModel):
@@ -385,6 +403,7 @@ class GroupMemberAddIn(BaseModel):
 class GroupMessageIn(BaseModel):
     body: str = Field(default="", max_length=4000)
     attachment_id: int | None = None
+    client_message_id: str | None = Field(default=None, max_length=80)
 
 
 class ForwardMessageIn(BaseModel):
@@ -1660,6 +1679,34 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         raise HTTPException(404, "Пользователь не найден")
     if users_blocked(conn, user["id"], data.recipient_id):
         raise HTTPException(403, "Личное общение с этим пользователем недоступно")
+    if data.client_message_id:
+        existing = conn.execute(
+            """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
+                      m.delivered_at,m.read_at,m.forwarded,
+                      up.id AS attachment_id,
+                      up.stored_name AS attachment_stored_name,
+                      up.original_name AS attachment_name,
+                      up.mime_type AS attachment_mime,
+                      up.size AS attachment_size
+               FROM messages m
+               LEFT JOIN uploads up ON up.id=m.attachment_id
+               WHERE m.sender_id=? AND m.client_message_id=?""",
+            (user["id"], data.client_message_id),
+        ).fetchone()
+        if existing:
+            if existing["recipient_id"] != data.recipient_id:
+                raise HTTPException(409, "Идентификатор сообщения уже использован")
+            return {
+                "id": existing["id"],
+                "sender_id": existing["sender_id"],
+                "recipient_id": existing["recipient_id"],
+                "body": existing["body"],
+                "created_at": existing["created_at"],
+                "delivered_at": existing["delivered_at"],
+                "read_at": existing["read_at"],
+                "forwarded": bool(existing["forwarded"]),
+                "attachment": attachment_json(existing),
+            }
     body = data.body.strip()
     upload_row = owned_upload(conn, data.attachment_id, user["id"])
     if not body and not upload_row:
@@ -1668,8 +1715,8 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
     cur = conn.execute(
         """INSERT INTO messages(
              sender_id,recipient_id,body,created_at,attachment_id,
-             delivered_at,read_at
-           ) VALUES(?,?,?,?,?,?,?)""",
+             delivered_at,read_at,client_message_id
+           ) VALUES(?,?,?,?,?,?,?,?)""",
         (
             user["id"],
             data.recipient_id,
@@ -1678,6 +1725,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
             data.attachment_id,
             None,
             None,
+            data.client_message_id,
         ),
     )
     conn.commit()
@@ -2387,6 +2435,50 @@ async def send_group_message(
     group = group_for_user(conn, group_id, user["id"])
     if not group:
         raise HTTPException(404, "Группа не найдена")
+    if data.client_message_id:
+        existing = conn.execute(
+            """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
+                      gm.deleted_at,gm.forwarded,
+                      EXISTS(
+                        SELECT 1 FROM group_message_mentions gmm
+                        WHERE gmm.message_id=gm.id AND gmm.user_id=?
+                      ) AS mentioned_me,
+                      EXISTS(
+                        SELECT 1 FROM group_message_mentions gmm_any
+                        WHERE gmm_any.message_id=gm.id
+                      ) AS has_mentions,
+                      u.display_name AS sender_name,
+                      up.id AS attachment_id,
+                      up.stored_name AS attachment_stored_name,
+                      up.original_name AS attachment_name,
+                      up.mime_type AS attachment_mime,
+                      up.size AS attachment_size
+               FROM group_messages gm
+               JOIN users u ON u.id=gm.sender_id
+               LEFT JOIN uploads up ON up.id=gm.attachment_id
+               WHERE gm.sender_id=? AND gm.client_message_id=?""",
+            (user["id"], user["id"], data.client_message_id),
+        ).fetchone()
+        if existing:
+            if existing["group_id"] != group_id:
+                raise HTTPException(409, "Идентификатор сообщения уже использован")
+            deleted = bool(existing["deleted_at"])
+            return {
+                "id": existing["id"],
+                "group_id": existing["group_id"],
+                "sender_id": existing["sender_id"],
+                "sender_name": existing["sender_name"],
+                "body": "" if deleted else existing["body"],
+                "created_at": existing["created_at"],
+                "attachment": None if deleted else attachment_json(existing),
+                "deleted": deleted,
+                "deleted_at": existing["deleted_at"],
+                "forwarded": bool(existing["forwarded"]),
+                "mentioned_me": bool(existing["mentioned_me"]) and not deleted,
+                "has_mentions": bool(existing["has_mentions"]) and not deleted,
+                "can_delete": not deleted,
+                "can_restore": False,
+            }
     body = data.body.strip()
     upload_row = owned_upload(conn, data.attachment_id, user["id"])
     if not body and not upload_row:
@@ -2394,14 +2486,15 @@ async def send_group_message(
     created = now_iso()
     cur = conn.execute(
         """INSERT INTO group_messages(
-             group_id,sender_id,body,created_at,attachment_id
-           ) VALUES(?,?,?,?,?)""",
+             group_id,sender_id,body,created_at,attachment_id,client_message_id
+           ) VALUES(?,?,?,?,?,?)""",
         (
             group_id,
             user["id"],
             body,
             created,
             data.attachment_id,
+            data.client_message_id,
         ),
     )
     mention_ids = resolve_group_mentions(conn, group_id, body)
