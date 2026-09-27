@@ -1,4 +1,6 @@
+import asyncio
 import hashlib
+import json
 import os
 import secrets
 import sqlite3
@@ -9,6 +11,7 @@ from typing import Dict, Set
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from pywebpush import WebPushException, webpush
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("SVOI_DATA_DIR", BASE_DIR / "data"))
@@ -18,6 +21,15 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 INLINE_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+VAPID_PRIVATE_KEY_FILE = os.getenv(
+    "VAPID_PRIVATE_KEY_FILE",
+    "/etc/svoi-vapid-private.pem",
+)
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip()
+VAPID_SUBJECT = os.getenv(
+    "VAPID_SUBJECT",
+    "https://epl-gruz.duckdns.org/",
+).strip()
 
 app = FastAPI(title="Свои", version="0.1.0")
 connections: Dict[int, Set[WebSocket]] = {}
@@ -93,6 +105,15 @@ def init_db():
       size INTEGER NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      endpoint TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
+      ON push_subscriptions(user_id);
     """)
     for table in ("messages", "group_messages"):
         columns = {
@@ -204,6 +225,16 @@ class GroupMessageIn(BaseModel):
     attachment_id: int | None = None
 
 
+class PushKeysIn(BaseModel):
+    p256dh: str = Field(min_length=20, max_length=512)
+    auth: str = Field(min_length=8, max_length=256)
+
+
+class PushSubscriptionIn(BaseModel):
+    endpoint: str = Field(min_length=20, max_length=2048)
+    keys: PushKeysIn
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "svoi-chat"}
@@ -264,6 +295,137 @@ def users(user=Depends(current_user), conn=Depends(db)):
         {**user_json(r), "online": bool(connections.get(r["id"]))}
         for r in rows
     ]
+
+
+def push_configured() -> bool:
+    return bool(
+        VAPID_PUBLIC_KEY
+        and Path(VAPID_PRIVATE_KEY_FILE).is_file()
+    )
+
+
+@app.get("/api/push/public-key")
+def push_public_key(user=Depends(current_user)):
+    return {
+        "configured": push_configured(),
+        "public_key": VAPID_PUBLIC_KEY if push_configured() else None,
+    }
+
+
+@app.post("/api/push/subscribe")
+def subscribe_push(
+    data: PushSubscriptionIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    if not push_configured():
+        raise HTTPException(503, "Push-уведомления пока не настроены")
+    conn.execute(
+        """INSERT INTO push_subscriptions(
+             endpoint,user_id,p256dh,auth,created_at
+           ) VALUES(?,?,?,?,?)
+           ON CONFLICT(endpoint) DO UPDATE SET
+             user_id=excluded.user_id,
+             p256dh=excluded.p256dh,
+             auth=excluded.auth,
+             created_at=excluded.created_at""",
+        (
+            data.endpoint,
+            user["id"],
+            data.keys.p256dh,
+            data.keys.auth,
+            now_iso(),
+        ),
+    )
+    conn.commit()
+    return {"ok": True}
+
+
+@app.post("/api/push/unsubscribe")
+def unsubscribe_push(
+    data: PushSubscriptionIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    conn.execute(
+        "DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=?",
+        (data.endpoint, user["id"]),
+    )
+    conn.commit()
+    return {"ok": True}
+
+
+def _webpush_one(subscription: dict, payload: str) -> bool:
+    try:
+        webpush(
+            subscription_info=subscription,
+            data=payload,
+            vapid_private_key=VAPID_PRIVATE_KEY_FILE,
+            vapid_claims={"sub": VAPID_SUBJECT},
+            ttl=120,
+        )
+        return True
+    except WebPushException as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (404, 410):
+            return False
+        return True
+    except Exception:
+        return True
+
+
+async def send_web_push(
+    user_id: int,
+    title: str,
+    body: str,
+    url: str = "/",
+    tag: str = "svoi",
+):
+    if not push_configured():
+        return
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT endpoint,p256dh,auth
+           FROM push_subscriptions WHERE user_id=?""",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return
+    payload = json.dumps(
+        {
+            "title": title,
+            "body": body[:180],
+            "url": url,
+            "tag": tag,
+        },
+        ensure_ascii=False,
+    )
+    stale = []
+    for row in rows:
+        subscription = {
+            "endpoint": row["endpoint"],
+            "keys": {
+                "p256dh": row["p256dh"],
+                "auth": row["auth"],
+            },
+        }
+        ok = await asyncio.to_thread(
+            _webpush_one,
+            subscription,
+            payload,
+        )
+        if not ok:
+            stale.append(row["endpoint"])
+    if stale:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.executemany(
+            "DELETE FROM push_subscriptions WHERE endpoint=?",
+            [(endpoint,) for endpoint in stale],
+        )
+        conn.commit()
+        conn.close()
 
 
 def attachment_json(row):
@@ -487,6 +649,18 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         )
         conn.commit()
         msg["delivered_at"] = delivered_at
+    preview = body or (
+        "📎 " + attachment["name"]
+        if attachment
+        else "Новое сообщение"
+    )
+    await send_web_push(
+        data.recipient_id,
+        user["display_name"],
+        preview,
+        "/",
+        f"user-{user['id']}",
+    )
     return msg
 
 
@@ -619,7 +793,8 @@ async def send_group_message(
     user=Depends(current_user),
     conn=Depends(db),
 ):
-    if not group_for_user(conn, group_id, user["id"]):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
         raise HTTPException(404, "Группа не найдена")
     body = data.body.strip()
     upload_row = owned_upload(conn, data.attachment_id, user["id"])
@@ -662,9 +837,24 @@ async def send_group_message(
         "SELECT user_id FROM group_members WHERE group_id=?",
         (group_id,),
     ).fetchall()
+    preview = body or (
+        "📎 " + attachment["name"]
+        if attachment
+        else "Новое сообщение"
+    )
     for row in member_rows:
         if row["user_id"] != user["id"]:
-            await push(row["user_id"], {"type": "group_message", "message": msg})
+            await push(
+                row["user_id"],
+                {"type": "group_message", "message": msg},
+            )
+            await send_web_push(
+                row["user_id"],
+                f"{group['name']} · {user['display_name']}",
+                preview,
+                "/",
+                f"group-{group_id}",
+            )
     return msg
 
 
@@ -689,6 +879,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         connections.get(user_id, set()).discard(websocket)
         if not connections.get(user_id):
             connections.pop(user_id, None)
+
+
+@app.get("/sw.js")
+def service_worker():
+    return FileResponse(
+        BASE_DIR / "sw.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/")
