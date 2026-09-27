@@ -105,6 +105,15 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_contacts_contact
       ON contacts(contact_user_id);
+    CREATE TABLE IF NOT EXISTS user_blocks (
+      blocker_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(blocker_id, blocked_id),
+      CHECK(blocker_id <> blocked_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked
+      ON user_blocks(blocked_id);
     CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -510,6 +519,27 @@ def turn_credentials(user=Depends(current_user)):
     }
 
 
+def users_blocked(conn, user_a: int, user_b: int) -> bool:
+    return bool(
+        conn.execute(
+            """SELECT 1 FROM user_blocks
+               WHERE (blocker_id=? AND blocked_id=?)
+                  OR (blocker_id=? AND blocked_id=?)
+               LIMIT 1""",
+            (user_a, user_b, user_b, user_a),
+        ).fetchone()
+    )
+
+
+def blocked_by_user(conn, blocker_id: int, blocked_id: int) -> bool:
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM user_blocks WHERE blocker_id=? AND blocked_id=?",
+            (blocker_id, blocked_id),
+        ).fetchone()
+    )
+
+
 @app.get("/api/users")
 def users(user=Depends(current_user), conn=Depends(db)):
     rows = conn.execute(
@@ -518,7 +548,11 @@ def users(user=Depends(current_user), conn=Depends(db)):
                   EXISTS(
                     SELECT 1 FROM contacts c
                     WHERE c.user_id=? AND c.contact_user_id=u.id
-                  ) AS in_contacts
+                  ) AS in_contacts,
+                  EXISTS(
+                    SELECT 1 FROM user_blocks b
+                    WHERE b.blocker_id=? AND b.blocked_id=u.id
+                  ) AS blocked_by_me
            FROM users u
            LEFT JOIN uploads a ON a.id=u.avatar_id
            WHERE u.id<>?
@@ -540,6 +574,7 @@ def users(user=Depends(current_user), conn=Depends(db)):
             user["id"],
             user["id"],
             user["id"],
+            user["id"],
         ),
     ).fetchall()
     return [
@@ -548,6 +583,7 @@ def users(user=Depends(current_user), conn=Depends(db)):
             "online": bool(connections.get(r["id"])),
             "last_seen_at": r["last_seen_at"],
             "in_contacts": bool(r["in_contacts"]),
+            "blocked_by_me": bool(r["blocked_by_me"]),
         }
         for r in rows
     ]
@@ -571,11 +607,15 @@ def search_user(
                   EXISTS(
                     SELECT 1 FROM contacts c
                     WHERE c.user_id=? AND c.contact_user_id=u.id
-                  ) AS in_contacts
+                  ) AS in_contacts,
+                  EXISTS(
+                    SELECT 1 FROM user_blocks b
+                    WHERE b.blocker_id=? AND b.blocked_id=u.id
+                  ) AS blocked_by_me
            FROM users u
            LEFT JOIN uploads a ON a.id=u.avatar_id
            WHERE u.username=? AND u.id<>?""",
-        (user["id"], username, user["id"]),
+        (user["id"], user["id"], username, user["id"]),
     ).fetchone()
     if not row:
         raise HTTPException(404, "Пользователь с таким тегом не найден")
@@ -585,6 +625,7 @@ def search_user(
         "online": bool(connections.get(row["id"])),
         "last_seen_at": row["last_seen_at"],
         "in_contacts": bool(row["in_contacts"]),
+        "blocked_by_me": bool(row["blocked_by_me"]),
     }
 
 
@@ -620,7 +661,88 @@ async def add_contact(
         "online": bool(connections.get(other_id)),
         "last_seen_at": row["last_seen_at"],
         "in_contacts": True,
+        "blocked_by_me": blocked_by_user(conn, user["id"], other_id),
     }
+
+
+@app.get("/api/blocks")
+def get_blocks(user=Depends(current_user), conn=Depends(db)):
+    rows = conn.execute(
+        """SELECT u.id,u.username,u.display_name,u.last_seen_at,
+                  a.stored_name AS avatar_stored_name,
+                  b.created_at AS blocked_at
+           FROM user_blocks b
+           JOIN users u ON u.id=b.blocked_id
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE b.blocker_id=?
+           ORDER BY b.created_at DESC""",
+        (user["id"],),
+    ).fetchall()
+    return [
+        {
+            **user_json(row),
+            "last_seen_at": row["last_seen_at"],
+            "blocked_at": row["blocked_at"],
+            "blocked_by_me": True,
+        }
+        for row in rows
+    ]
+
+
+@app.post("/api/blocks/{other_id}")
+async def block_user(
+    other_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    if other_id == user["id"]:
+        raise HTTPException(400, "Нельзя заблокировать самого себя")
+    if not conn.execute("SELECT 1 FROM users WHERE id=?", (other_id,)).fetchone():
+        raise HTTPException(404, "Пользователь не найден")
+
+    conn.execute(
+        """INSERT OR IGNORE INTO user_blocks(blocker_id,blocked_id,created_at)
+           VALUES(?,?,?)""",
+        (user["id"], other_id, now_iso()),
+    )
+    conn.commit()
+
+    # End any active private call between these users.
+    for call_id, call in list(active_calls.items()):
+        participants = {call.get("caller_id"), call.get("callee_id")}
+        if participants == {user["id"], other_id}:
+            finish_call_history(
+                call_id,
+                "completed" if call.get("answered") else "rejected",
+            )
+            active_calls.pop(call_id, None)
+            await push(
+                other_id,
+                {
+                    "type": "call_end",
+                    "from_user_id": user["id"],
+                    "from_name": user["display_name"],
+                    "call_id": call_id,
+                },
+            )
+
+    await push(user["id"], {"type": "blocks_updated"})
+    return {"ok": True, "user_id": other_id, "blocked": True}
+
+
+@app.delete("/api/blocks/{other_id}")
+async def unblock_user(
+    other_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    conn.execute(
+        "DELETE FROM user_blocks WHERE blocker_id=? AND blocked_id=?",
+        (user["id"], other_id),
+    )
+    conn.commit()
+    await push(user["id"], {"type": "blocks_updated"})
+    return {"ok": True, "user_id": other_id, "blocked": False}
 
 
 @app.delete("/api/contacts/{other_id}")
@@ -1536,6 +1658,8 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         raise HTTPException(400, "Нельзя отправить сообщение самому себе")
     if not conn.execute("SELECT 1 FROM users WHERE id=?", (data.recipient_id,)).fetchone():
         raise HTTPException(404, "Пользователь не найден")
+    if users_blocked(conn, user["id"], data.recipient_id):
+        raise HTTPException(403, "Личное общение с этим пользователем недоступно")
     body = data.body.strip()
     upload_row = owned_upload(conn, data.attachment_id, user["id"])
     if not body and not upload_row:
@@ -1678,6 +1802,8 @@ async def forward_message(
         ).fetchone()
         if not target:
             raise HTTPException(404, "Получатель не найден")
+        if users_blocked(conn, user["id"], data.target_chat_id):
+            raise HTTPException(403, "Личное общение с этим пользователем недоступно")
 
         cur = conn.execute(
             """INSERT INTO messages(
@@ -2910,6 +3036,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     check.close()
                     if not exists:
                         continue
+                    check = connect_db()
+                    blocked = users_blocked(check, user_id, chat_id)
+                    check.close()
+                    if blocked:
+                        continue
                     await push(
                         chat_id,
                         {
@@ -2972,6 +3103,22 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             ).fetchone()
             check.close()
             if not exists:
+                continue
+
+            block_check = connect_db()
+            blocked = users_blocked(block_check, user_id, target_id)
+            block_check.close()
+            if blocked:
+                if signal_type == "call_offer":
+                    await push(
+                        user_id,
+                        {
+                            "type": "call_unavailable",
+                            "from_user_id": target_id,
+                            "from_name": "Система",
+                            "call_id": call_id,
+                        },
+                    )
                 continue
 
             payload = {
