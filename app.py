@@ -25,7 +25,9 @@ DB_PATH = DATA_DIR / "svoi.db"
 UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+AVATAR_MAX_BYTES = 5 * 1024 * 1024
 INLINE_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+AVATAR_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 VAPID_PRIVATE_KEY_FILE = os.getenv(
     "VAPID_PRIVATE_KEY_FILE",
     "/etc/svoi-vapid-private.pem",
@@ -165,6 +167,14 @@ def init_db():
                 conn.execute(
                     "ALTER TABLE messages ADD COLUMN read_at TEXT"
                 )
+
+    user_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(users)").fetchall()
+    }
+    if "avatar_id" not in user_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN avatar_id INTEGER")
+
     conn.commit()
     conn.close()
 
@@ -200,17 +210,23 @@ def make_session(conn, user_id: int) -> str:
 
 
 def user_json(row):
+    keys = set(row.keys())
+    stored = row["avatar_stored_name"] if "avatar_stored_name" in keys else None
     return {
         "id": row["id"],
         "username": row["username"],
         "display_name": row["display_name"],
+        "avatar_url": f"/uploads/{stored}" if stored else None,
     }
 
 
 def get_user_from_token(conn, token: str):
     row = conn.execute(
-        """SELECT u.id,u.username,u.display_name
-           FROM sessions s JOIN users u ON u.id=s.user_id
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name
+           FROM sessions s
+           JOIN users u ON u.id=s.user_id
+           LEFT JOIN uploads a ON a.id=u.avatar_id
            WHERE s.token_hash=?""",
         (token_hash(token),),
     ).fetchone()
@@ -290,7 +306,12 @@ def register(data: RegisterIn, conn=Depends(db)):
     )
     conn.commit()
     row = conn.execute(
-        "SELECT id,username,display_name FROM users WHERE id=?", (cur.lastrowid,)
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.id=?""",
+        (cur.lastrowid,),
     ).fetchone()
     return {"token": make_session(conn, row["id"]), "user": user_json(row)}
 
@@ -298,7 +319,11 @@ def register(data: RegisterIn, conn=Depends(db)):
 @app.post("/api/login")
 def login(data: LoginIn, conn=Depends(db)):
     row = conn.execute(
-        "SELECT * FROM users WHERE username=?", (data.username.strip().lower(),)
+        """SELECT u.*, a.stored_name AS avatar_stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.username=?""",
+        (data.username.strip().lower(),),
     ).fetchone()
     if not row or not verify_password(data.password, row["password_hash"], row["salt"]):
         raise HTTPException(401, "Неверный логин или пароль")
@@ -366,7 +391,12 @@ def turn_credentials(user=Depends(current_user)):
 @app.get("/api/users")
 def users(user=Depends(current_user), conn=Depends(db)):
     rows = conn.execute(
-        "SELECT id,username,display_name FROM users WHERE id<>? ORDER BY display_name",
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.id<>?
+           ORDER BY u.display_name""",
         (user["id"],),
     ).fetchall()
     return [
@@ -374,6 +404,147 @@ def users(user=Depends(current_user), conn=Depends(db)):
         for r in rows
     ]
 
+
+
+
+def _avatar_suffix(content: bytes, mime: str) -> str:
+    if mime == "image/jpeg" and content.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if mime == "image/png" and content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if (
+        mime == "image/webp"
+        and len(content) >= 12
+        and content[:4] == b"RIFF"
+        and content[8:12] == b"WEBP"
+    ):
+        return ".webp"
+    raise HTTPException(400, "Поддерживаются только JPEG, PNG и WebP")
+
+
+async def _broadcast_profile(user_data: dict):
+    for user_id in list(connections.keys()):
+        await push(
+            user_id,
+            {
+                "type": "profile_updated",
+                "user": user_data,
+            },
+        )
+
+
+@app.post("/api/me/avatar")
+async def set_avatar(
+    file: UploadFile = File(...),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    mime = (file.content_type or "").lower().split(";", 1)[0].strip()
+    if mime not in AVATAR_IMAGE_TYPES:
+        await file.close()
+        raise HTTPException(400, "Для аватара выбери JPEG, PNG или WebP")
+
+    content = await file.read(AVATAR_MAX_BYTES + 1)
+    await file.close()
+    if not content:
+        raise HTTPException(400, "Файл пустой")
+    if len(content) > AVATAR_MAX_BYTES:
+        raise HTTPException(413, "Аватар больше 5 МБ")
+
+    suffix = _avatar_suffix(content, mime)
+    stored = "avatar-" + secrets.token_hex(24) + suffix
+    path = UPLOAD_DIR / stored
+    path.write_bytes(content)
+
+    old = conn.execute(
+        """SELECT u.avatar_id, a.stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.id=?""",
+        (user["id"],),
+    ).fetchone()
+
+    try:
+        cur = conn.execute(
+            """INSERT INTO uploads(
+                 owner_id,stored_name,original_name,mime_type,size,created_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (
+                user["id"],
+                stored,
+                f"avatar{suffix}",
+                mime,
+                len(content),
+                now_iso(),
+            ),
+        )
+        conn.execute(
+            "UPDATE users SET avatar_id=? WHERE id=?",
+            (cur.lastrowid, user["id"]),
+        )
+        conn.commit()
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+    if old and old["avatar_id"]:
+        old_stored = old["stored_name"]
+        conn.execute(
+            "DELETE FROM uploads WHERE id=? AND owner_id=?",
+            (old["avatar_id"], user["id"]),
+        )
+        conn.commit()
+        if old_stored:
+            (UPLOAD_DIR / old_stored).unlink(missing_ok=True)
+
+    row = conn.execute(
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.id=?""",
+        (user["id"],),
+    ).fetchone()
+    data = user_json(row)
+    await _broadcast_profile(data)
+    return data
+
+
+@app.delete("/api/me/avatar")
+async def delete_avatar(
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    old = conn.execute(
+        """SELECT u.avatar_id, a.stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.id=?""",
+        (user["id"],),
+    ).fetchone()
+
+    if old and old["avatar_id"]:
+        conn.execute(
+            "UPDATE users SET avatar_id=NULL WHERE id=?",
+            (user["id"],),
+        )
+        conn.execute(
+            "DELETE FROM uploads WHERE id=? AND owner_id=?",
+            (old["avatar_id"], user["id"]),
+        )
+        conn.commit()
+        if old["stored_name"]:
+            (UPLOAD_DIR / old["stored_name"]).unlink(missing_ok=True)
+
+    row = conn.execute(
+        """SELECT u.id,u.username,u.display_name,
+                  NULL AS avatar_stored_name
+           FROM users u WHERE u.id=?""",
+        (user["id"],),
+    ).fetchone()
+    data = user_json(row)
+    await _broadcast_profile(data)
+    return data
 
 def push_configured() -> bool:
     return bool(
