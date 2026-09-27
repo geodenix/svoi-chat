@@ -167,21 +167,47 @@ async function playRingPulse(){
   const ctx=await unlockAudio();
   if(!ctx||ctx.state!=='running')return;
   const t=ctx.currentTime+0.01;
-  tone(440,t,0.30,0.055,'sine');
-  tone(660,t+0.34,0.30,0.055,'sine');
-  tone(440,t+0.72,0.22,0.045,'sine')
+
+  // Phone-like double ring: two bright chords, then a pause.
+  for(const offset of [0,0.23]){
+    tone(440,t+offset,0.18,0.050,'sine');
+    tone(554,t+offset,0.18,0.032,'sine');
+    tone(659,t+offset,0.18,0.028,'sine')
+  }
+  for(const offset of [0.82,1.05]){
+    tone(440,t+offset,0.18,0.050,'sine');
+    tone(554,t+offset,0.18,0.032,'sine');
+    tone(659,t+offset,0.18,0.028,'sine')
+  }
+}
+
+function vibrateIncomingCall(){
+  if(!soundsEnabled||!navigator.vibrate)return;
+  try{navigator.vibrate([650,220,650,900])}catch{}
+}
+
+function vibrateGroupInvite(){
+  if(!soundsEnabled||!navigator.vibrate)return;
+  try{navigator.vibrate([180,120,260])}catch{}
 }
 
 async function startRingtone(){
   if(!soundsEnabled||ringtoneTimer)return;
   await playRingPulse();
-  ringtoneTimer=setInterval(()=>{playRingPulse().catch(()=>{})},1800)
+  vibrateIncomingCall();
+  ringtoneTimer=setInterval(()=>{
+    playRingPulse().catch(()=>{});
+    vibrateIncomingCall()
+  },3000)
 }
 
 function stopRingtone(){
   if(ringtoneTimer){
     clearInterval(ringtoneTimer);
     ringtoneTimer=null
+  }
+  if(navigator.vibrate){
+    try{navigator.vibrate(0)}catch{}
   }
 }
 
@@ -1475,6 +1501,7 @@ function connectWs(){
     }
     if(data.type==='group_call_invite'){
       playRingPulse().catch(()=>{});
+      vibrateGroupInvite();
       if(!groupCallState&&confirm(data.from_name+' зовёт в групповой '+(data.video?'видеозвонок':'звонок')+' «'+data.group_name+'». Присоединиться?')){
         joinGroupCall(data.group_id,!!data.video,false)
       }
