@@ -1104,6 +1104,8 @@ def attachment_json(row):
         "mime_type": mime,
         "size": row["attachment_size"],
         "is_image": mime in INLINE_IMAGE_TYPES,
+        "is_audio": mime.startswith("audio/"),
+        "is_video": mime.startswith("video/"),
     }
 
 
@@ -1151,6 +1153,8 @@ async def upload(
         "mime_type": mime,
         "size": len(content),
         "is_image": mime in INLINE_IMAGE_TYPES,
+        "is_audio": mime.startswith("audio/"),
+        "is_video": mime.startswith("video/"),
     }
 
 
@@ -1168,8 +1172,13 @@ def get_upload(stored_name: str, conn=Depends(db)):
     path = UPLOAD_DIR / row["stored_name"]
     if not path.is_file():
         raise HTTPException(404, "Файл не найден")
-    if row["mime_type"] in INLINE_IMAGE_TYPES:
-        return FileResponse(path, media_type=row["mime_type"])
+    mime = row["mime_type"] or "application/octet-stream"
+    if (
+        mime in INLINE_IMAGE_TYPES
+        or mime.startswith("audio/")
+        or mime.startswith("video/")
+    ):
+        return FileResponse(path, media_type=mime)
     return FileResponse(
         path,
         media_type="application/octet-stream",
