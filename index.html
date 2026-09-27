@@ -485,6 +485,12 @@ async function startCall(video){
 }
 
 function incomingCall(data){
+  if(currentCall?.callId===data.call_id||pendingCall?.call_id===data.call_id){
+    if(Array.isArray(data.ice_candidates)){
+      pendingIce.push(...data.ice_candidates)
+    }
+    return
+  }
   if(currentCall||pendingCall){
     try{wsSend({type:'call_reject',to_user_id:data.from_user_id,call_id:data.call_id})}catch{}
     return
