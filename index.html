@@ -168,16 +168,22 @@ async function playRingPulse(){
   if(!ctx||ctx.state!=='running')return;
   const t=ctx.currentTime+0.01;
 
-  // Phone-like double ring: two bright chords, then a pause.
-  for(const offset of [0,0.23]){
-    tone(440,t+offset,0.18,0.050,'sine');
-    tone(554,t+offset,0.18,0.032,'sine');
-    tone(659,t+offset,0.18,0.028,'sine')
-  }
-  for(const offset of [0.82,1.05]){
-    tone(440,t+offset,0.18,0.050,'sine');
-    tone(554,t+offset,0.18,0.032,'sine');
-    tone(659,t+offset,0.18,0.028,'sine')
+  // Original bright digital ringtone with a light rising/falling motif.
+  // Similar feel to classic VoIP ringtones, but not a copy of Skype's tune.
+  const notes=[
+    [659,0.00,0.13],
+    [784,0.14,0.13],
+    [988,0.28,0.16],
+    [880,0.47,0.13],
+    [740,0.62,0.13],
+    [988,0.80,0.18],
+    [784,1.03,0.14],
+    [659,1.20,0.20]
+  ];
+
+  for(const [freq,offset,duration] of notes){
+    tone(freq,t+offset,duration,0.045,'sine');
+    tone(freq*2,t+offset,duration*0.75,0.010,'triangle')
   }
 }
 
