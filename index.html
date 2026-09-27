@@ -33,7 +33,7 @@
 
 <div id="app" class="app hidden">
   <aside class="sidebar">
-    <div class="side-head"><button id="meAvatar" class="profile-avatar" type="button" title="Изменить аватар">С</button><input id="avatarInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="notifyBtn" class="logout" type="button" title="Включить уведомления">🔔</button><button id="logout" class="logout">Выйти</button></div>
+    <div class="side-head"><button id="meAvatar" class="profile-avatar" type="button" title="Изменить аватар">С</button><input id="avatarInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="soundBtn" class="logout" type="button" title="Звуки включены">🔊</button><button id="notifyBtn" class="logout" type="button" title="Включить уведомления">🔔</button><button id="logout" class="logout">Выйти</button></div>
     <div class="scroll">
       <div id="installBox" class="install-box"><button id="installBtn" class="install-app" type="button">📲 Установить «Свои»</button></div>
       <div class="section-head"><span>Звонки</span></div>
@@ -116,8 +116,77 @@ const $=id=>document.getElementById(id);
 let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],callHistory=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false,foundUser=null;
 let currentCall=null,pendingCall=null,pendingIce=[],cameraFacing='user',acceptingCall=false,preparedMediaStream=null;
 let callAudioSinkId='',callSpeakerMode=false;
+let soundsEnabled=localStorage.getItem('svoi_sounds')!=='0',audioContext=null,ringtoneTimer=null;
 let deferredInstallPrompt=null;
 let groupCallState=null;
+
+function updateSoundButton(){
+  const button=$('soundBtn');
+  if(!button)return;
+  button.textContent=soundsEnabled?'🔊':'🔇';
+  button.title=soundsEnabled?'Звуки включены':'Звуки выключены'
+}
+
+async function unlockAudio(){
+  if(!soundsEnabled)return null;
+  const AudioCtx=window.AudioContext||window.webkitAudioContext;
+  if(!AudioCtx)return null;
+  if(!audioContext)audioContext=new AudioCtx();
+  if(audioContext.state==='suspended'){
+    try{await audioContext.resume()}catch{}
+  }
+  return audioContext
+}
+
+function tone(frequency,when,duration=0.11,volume=0.04,type='sine'){
+  if(!audioContext||audioContext.state!=='running')return;
+  const oscillator=audioContext.createOscillator();
+  const gain=audioContext.createGain();
+  oscillator.type=type;
+  oscillator.frequency.setValueAtTime(frequency,when);
+  gain.gain.setValueAtTime(0.0001,when);
+  gain.gain.exponentialRampToValueAtTime(Math.max(0.0002,volume),when+0.015);
+  gain.gain.exponentialRampToValueAtTime(0.0001,when+duration);
+  oscillator.connect(gain);
+  gain.connect(audioContext.destination);
+  oscillator.start(when);
+  oscillator.stop(when+duration+0.03)
+}
+
+async function playMessageSound(){
+  if(!soundsEnabled)return;
+  const ctx=await unlockAudio();
+  if(!ctx||ctx.state!=='running')return;
+  const t=ctx.currentTime+0.01;
+  tone(740,t,0.08,0.035,'sine');
+  tone(980,t+0.10,0.12,0.045,'sine')
+}
+
+async function playRingPulse(){
+  if(!soundsEnabled)return;
+  const ctx=await unlockAudio();
+  if(!ctx||ctx.state!=='running')return;
+  const t=ctx.currentTime+0.01;
+  tone(440,t,0.30,0.055,'sine');
+  tone(660,t+0.34,0.30,0.055,'sine');
+  tone(440,t+0.72,0.22,0.045,'sine')
+}
+
+async function startRingtone(){
+  if(!soundsEnabled||ringtoneTimer)return;
+  await playRingPulse();
+  ringtoneTimer=setInterval(()=>{playRingPulse().catch(()=>{})},1800)
+}
+
+function stopRingtone(){
+  if(ringtoneTimer){
+    clearInterval(ringtoneTimer);
+    ringtoneTimer=null
+  }
+}
+
+document.addEventListener('pointerdown',()=>{unlockAudio().catch(()=>{})},{passive:true});
+document.addEventListener('keydown',()=>{unlockAudio().catch(()=>{})},{passive:true});
 
 function isStandalone(){
   return window.matchMedia('(display-mode: standalone)').matches
@@ -155,6 +224,19 @@ $('installBtn').onclick=async()=>{
 };
 
 updateInstallUi();
+updateSoundButton();
+
+$('soundBtn').onclick=async()=>{
+  soundsEnabled=!soundsEnabled;
+  localStorage.setItem('svoi_sounds',soundsEnabled?'1':'0');
+  if(!soundsEnabled){
+    stopRingtone()
+  }else{
+    await unlockAudio();
+    playMessageSound().catch(()=>{})
+  }
+  updateSoundButton()
+};
 
 if('serviceWorker' in navigator){
   navigator.serviceWorker.register('/sw.js')
@@ -984,6 +1066,7 @@ function showCallUi(name,status,video,incoming=false){
 }
 
 function resetCallUi(){
+  stopRingtone();
   $('callOverlay').classList.add('hidden');$('remoteVideo').srcObject=null;$('localVideo').srcObject=null;
   $('incomingActions').classList.add('hidden');$('activeCallControls').classList.add('hidden');$('mediaPermission').classList.add('hidden');
   $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');updateSpeakerButtons();
@@ -1079,6 +1162,7 @@ function incomingCall(data){
     :[];
   pendingCall=data;preparedMediaStream=null;
   showCallUi(data.from_name,data.video?'Входящий видеозвонок':'Входящий голосовой звонок',data.video,true);
+  startRingtone().catch(()=>{});
   $('mediaPermission').classList.toggle('hidden',!data.video);
   if(data.video){
     $('mediaPermissionText').textContent='Нужен доступ к камере и микрофону';
@@ -1116,6 +1200,7 @@ $('mediaPermissionBtn').onclick=requestIncomingMediaPermission;
 
 async function acceptIncomingCall(){
   if(!pendingCall||acceptingCall)return;
+  stopRingtone();
   acceptingCall=true;
   const data=pendingCall;
   $('acceptCall').disabled=true;$('rejectCall').disabled=true;
@@ -1389,6 +1474,7 @@ function connectWs(){
       handleCallSignal(data);return
     }
     if(data.type==='group_call_invite'){
+      playRingPulse().catch(()=>{});
       if(!groupCallState&&confirm(data.from_name+' зовёт в групповой '+(data.video?'видеозвонок':'звонок')+' «'+data.group_name+'». Присоединиться?')){
         joinGroupCall(data.group_id,!!data.video,false)
       }
@@ -1410,6 +1496,7 @@ function connectWs(){
     }
     if(data.type==='message'){
       const m=data.message;
+      if(m.sender_id!==me?.id)playMessageSound().catch(()=>{});
       if(active?.type==='user'&&(m.sender_id===active.data.id||m.recipient_id===active.data.id)){
         appendMessage(m);
         if(m.sender_id===active.data.id){
@@ -1429,6 +1516,7 @@ function connectWs(){
     }
     if(data.type==='group_message'){
       const m=data.message;
+      if(m.sender_id!==me?.id)playMessageSound().catch(()=>{});
       if(active?.type==='group'&&m.group_id===active.data.id)appendMessage(m);
       loadGroups().catch(()=>{})
     }
