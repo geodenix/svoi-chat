@@ -12,7 +12,7 @@ self.addEventListener('push', event => {
       includeUncontrolled: true
     });
 
-    if (windows.some(client => client.visibilityState === 'visible')) {
+    if (!data.force && windows.some(client => client.visibilityState === 'visible')) {
       return;
     }
 
