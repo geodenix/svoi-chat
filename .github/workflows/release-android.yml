@@ -1,0 +1,113 @@
+name: Release Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_code:
+        description: "Android versionCode, e.g. 2"
+        required: true
+        type: string
+      version_name:
+        description: "Version name, e.g. 1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build signed Svoi APK
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: android-app
+
+    env:
+      SVOI_KEYSTORE_PATH: ${{ github.workspace }}/android-app/android/app/svoi-release.jks
+      SVOI_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      SVOI_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      SVOI_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify signing secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          test -n "$SVOI_KEYSTORE_PASSWORD"
+          test -n "$SVOI_KEY_ALIAS"
+          test -n "$SVOI_KEY_PASSWORD"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install Capacitor
+        run: npm install
+
+      - name: Create Android project
+        run: npx cap add android
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Patch Android app
+        run: |
+          python3 patch_android.py
+          python3 patch_release.py "${{ inputs.version_code }}" "${{ inputs.version_name }}"
+
+      - name: Restore signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_B64" | base64 -d > "$SVOI_KEYSTORE_PATH"
+
+      - name: Build signed release APK
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew assembleRelease --stacktrace
+          cp app/build/outputs/apk/release/app-release.apk ../svoi.apk
+
+      - name: Verify APK signature
+        run: |
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs svoi.apk
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: svoi-android-release-${{ inputs.version_code }}
+          path: android-app/svoi.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "android-v${{ inputs.version_code }}" svoi.apk \
+            --repo "${{ github.repository }}" \
+            --title "Свои Android ${{ inputs.version_name }}" \
+            --notes "Android release ${{ inputs.version_name }} (versionCode ${{ inputs.version_code }})." \
+            --latest
