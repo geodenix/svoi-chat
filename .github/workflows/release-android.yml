@@ -44,7 +44,11 @@ jobs:
           KEYSTORE_B64="$(printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]')"
 
           STORE_PASS="${RAW_KEYSTORE_PASSWORD#ANDROID_KEYSTORE_PASSWORD=}"
+          STORE_PASS="$(printf '%s' "$STORE_PASS" | tr -d '\r\n')"
+
           KEY_ALIAS="${RAW_KEY_ALIAS#ANDROID_KEY_ALIAS=}"
+          KEY_ALIAS="$(printf '%s' "$KEY_ALIAS" | tr -d '\r\n')"
+
           KEY_PASS="$STORE_PASS"
 
           test -n "$KEYSTORE_B64"
