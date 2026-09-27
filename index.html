@@ -13,34 +13,14 @@ dialog{width:min(92vw,460px);border:1px solid #334965;border-radius:20px;backgro
 </style></head>
 <body>
 <div id="auth" class="auth">
-  <div class="auth-card">
-    <div class="brand"><div class="mark">С</div><div><h1>Свои</h1><div class="muted">приватный мессенджер</div></div></div>
-    <div class="tabs"><button id="tabPhone" class="active">По телефону</button><button id="tabPassword">По логину</button></div>
-
-    <div id="phonePanel">
-      <form id="phoneRequestForm">
-        <div class="field"><label>Номер телефона</label><input id="phone" type="tel" autocomplete="tel" placeholder="+7 999 123-45-67" required></div>
-        <button class="primary" style="width:100%">Получить код</button>
-      </form>
-
-      <form id="phoneVerifyForm" class="hidden">
-        <p id="phoneHint" class="muted"></p>
-        <div class="field"><label>Код из SMS</label><input id="smsCode" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="000000" required></div>
-        <div class="field"><label>Имя <span class="muted">(только при первом входе)</span></label><input id="phoneDisplayName" maxlength="60" autocomplete="name" placeholder="Иван"></div>
-        <button class="primary" style="width:100%">Войти</button>
-        <button id="changePhone" type="button" style="width:100%;margin-top:8px">Изменить номер</button>
-      </form>
-    </div>
-
-    <div id="passwordPanel" class="hidden">
-      <form id="loginForm">
-        <div class="field"><label>Логин</label><input id="username" maxlength="32" autocomplete="username" required></div>
-        <div class="field"><label>Пароль</label><input id="password" type="password" minlength="6" autocomplete="current-password" required></div>
-        <button class="primary" style="width:100%">Войти</button>
-      </form>
-    </div>
-
-    <div id="authError" class="error"></div>
+  <div class="auth-card"><div class="brand"><div class="mark">С</div><div><h1>Свои</h1><div class="muted">приватный мессенджер</div></div></div>
+    <div class="tabs"><button id="tabLogin" class="active">Войти</button><button id="tabRegister">Регистрация</button></div>
+    <form id="authForm">
+      <div id="nameField" class="field hidden"><label>Имя</label><input id="displayName" maxlength="60" autocomplete="name"></div>
+      <div class="field"><label>Логин</label><input id="username" maxlength="32" autocomplete="username" required></div>
+      <div class="field"><label>Пароль</label><input id="password" type="password" minlength="6" autocomplete="current-password" required></div>
+      <button id="authSubmit" class="primary" style="width:100%">Войти</button><div id="authError" class="error"></div>
+    </form>
   </div>
 </div>
 
@@ -74,58 +54,30 @@ dialog{width:min(92vw,460px);border:1px solid #334965;border-radius:20px;backgro
 
 <script>
 const $=id=>document.getElementById(id);
-let token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false,phoneForCode='';
+let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false;
 
 const api=async(path,opt={})=>{
   opt.headers={...(opt.headers||{}),...(token?{Authorization:'Bearer '+token}:{})};
   if(opt.body&&typeof opt.body!=='string'){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(opt.body)}
   const r=await fetch(path,opt);let data=null;try{data=await r.json()}catch{}
-  if(!r.ok)throw new Error(data?.detail||'Ошибка сервера');return data
+  if(!r.ok){const err=new Error(data?.detail||'Ошибка сервера');err.status=r.status;throw err}
+  return data
 };
 
-function setAuthMode(mode){
-  const phone=mode==='phone';
-  $('tabPhone').classList.toggle('active',phone);$('tabPassword').classList.toggle('active',!phone);
-  $('phonePanel').classList.toggle('hidden',!phone);$('passwordPanel').classList.toggle('hidden',phone);$('authError').textContent=''
+function setMode(next){
+  mode=next;const reg=next==='register';
+  $('tabLogin').classList.toggle('active',!reg);$('tabRegister').classList.toggle('active',reg);
+  $('nameField').classList.toggle('hidden',!reg);$('authSubmit').textContent=reg?'Создать аккаунт':'Войти';
+  $('password').autocomplete=reg?'new-password':'current-password';$('authError').textContent=''
 }
-$('tabPhone').onclick=()=>setAuthMode('phone');
-$('tabPassword').onclick=()=>setAuthMode('password');
+$('tabLogin').onclick=()=>setMode('login');$('tabRegister').onclick=()=>setMode('register');
 
-$('phoneRequestForm').onsubmit=async e=>{
+$('authForm').onsubmit=async e=>{
   e.preventDefault();$('authError').textContent='';
   try{
-    const raw=$('phone').value.trim();
-    const data=await api('/api/auth/phone/request',{method:'POST',body:{phone:raw}});
-    phoneForCode=raw;
-    $('phoneRequestForm').classList.add('hidden');$('phoneVerifyForm').classList.remove('hidden');
-    $('phoneHint').textContent=data.dev_code
-      ?'Тестовый режим. Код: '+data.dev_code
-      :'Код отправлен на '+data.phone+'. Он действует 5 минут.';
-    $('smsCode').focus()
-  }catch(err){$('authError').textContent=err.message}
-};
-
-$('phoneVerifyForm').onsubmit=async e=>{
-  e.preventDefault();$('authError').textContent='';
-  try{
-    const data=await api('/api/auth/phone/verify',{method:'POST',body:{
-      phone:phoneForCode,
-      code:$('smsCode').value.trim(),
-      display_name:$('phoneDisplayName').value.trim()||null
-    }});
-    token=data.token;localStorage.setItem('svoi_token',token);await enter()
-  }catch(err){$('authError').textContent=err.message}
-};
-
-$('changePhone').onclick=()=>{
-  phoneForCode='';$('smsCode').value='';$('phoneDisplayName').value='';
-  $('phoneVerifyForm').classList.add('hidden');$('phoneRequestForm').classList.remove('hidden');$('authError').textContent=''
-};
-
-$('loginForm').onsubmit=async e=>{
-  e.preventDefault();$('authError').textContent='';
-  try{
-    const data=await api('/api/login',{method:'POST',body:{username:$('username').value.trim(),password:$('password').value}});
+    const body={username:$('username').value.trim(),password:$('password').value};
+    if(mode==='register')body.display_name=$('displayName').value.trim();
+    const data=await api(mode==='register'?'/api/register':'/api/login',{method:'POST',body});
     token=data.token;localStorage.setItem('svoi_token',token);await enter()
   }catch(err){$('authError').textContent=err.message}
 };
@@ -135,10 +87,17 @@ function showAuth(){me=null;active=null;if(socket)socket.close();$('auth').class
 
 async function enter(){
   try{
-    me=await api('/api/me');$('meName').textContent=me.display_name;$('meUser').textContent=me.phone?('+'+me.phone):('@'+me.username);
-    $('auth').classList.add('hidden');$('app').classList.remove('hidden');
+    me=await api('/api/me');$('meName').textContent=me.display_name;$('meUser').textContent='@'+me.username;
+    $('authError').textContent='';$('auth').classList.add('hidden');$('app').classList.remove('hidden');
     await Promise.all([loadUsers(),loadGroups()]);connectWs()
-  }catch{token='';localStorage.removeItem('svoi_token');showAuth()}
+  }catch(err){
+    if(err?.status===401){
+      token='';localStorage.removeItem('svoi_token');showAuth();return
+    }
+    $('app').classList.add('hidden');$('auth').classList.remove('hidden');
+    $('authError').textContent='Связь с сервером потеряна. Вход сохранён — подключаемся снова…';
+    setTimeout(()=>{if(token)enter()},3000)
+  }
 }
 
 async function loadUsers(){users=await api('/api/users');renderUsers();if(active?.type==='user'){active.data=users.find(u=>u.id===active.data.id)||active.data;updateHead()}}
