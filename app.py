@@ -1300,6 +1300,8 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
             "mime_type": upload_row["mime_type"],
             "size": upload_row["size"],
             "is_image": upload_row["mime_type"] in INLINE_IMAGE_TYPES,
+            "is_audio": upload_row["mime_type"].startswith("audio/"),
+            "is_video": upload_row["mime_type"].startswith("video/"),
         }
     msg = {
         "id": cur.lastrowid,
@@ -1323,11 +1325,16 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         )
         conn.commit()
         msg["delivered_at"] = delivered_at
-    preview = body or (
-        "📎 " + attachment["name"]
-        if attachment
-        else "Новое сообщение"
-    )
+    if body:
+        preview = body
+    elif attachment and attachment.get("is_audio"):
+        preview = "🎙 Голосовое сообщение"
+    elif attachment and attachment.get("is_video"):
+        preview = "◉ Видеокружок"
+    elif attachment:
+        preview = "📎 " + attachment["name"]
+    else:
+        preview = "Новое сообщение"
     await send_web_push(
         data.recipient_id,
         user["display_name"],
@@ -1741,6 +1748,8 @@ async def send_group_message(
             "mime_type": upload_row["mime_type"],
             "size": upload_row["size"],
             "is_image": upload_row["mime_type"] in INLINE_IMAGE_TYPES,
+            "is_audio": upload_row["mime_type"].startswith("audio/"),
+            "is_video": upload_row["mime_type"].startswith("video/"),
         }
     msg = {
         "id": cur.lastrowid,
@@ -1755,11 +1764,16 @@ async def send_group_message(
         "SELECT user_id FROM group_members WHERE group_id=?",
         (group_id,),
     ).fetchall()
-    preview = body or (
-        "📎 " + attachment["name"]
-        if attachment
-        else "Новое сообщение"
-    )
+    if body:
+        preview = body
+    elif attachment and attachment.get("is_audio"):
+        preview = "🎙 Голосовое сообщение"
+    elif attachment and attachment.get("is_video"):
+        preview = "◉ Видеокружок"
+    elif attachment:
+        preview = "📎 " + attachment["name"]
+    else:
+        preview = "Новое сообщение"
     for row in member_rows:
         if row["user_id"] != user["id"]:
             await push(
