@@ -631,6 +631,7 @@ async function enter(){
     $('authError').textContent='';$('auth').classList.add('hidden');$('app').classList.remove('hidden');
     await Promise.all([loadUsers(),loadGroups(),loadCallHistory()]);
     connectWs();
+    flushOutbox().catch(()=>{});
     initPush().catch(err=>{$('notifyBtn').textContent='⚠️';$('notifyBtn').title=err.message||'Ошибка push'});
     resumeIncomingCallFromUrl().catch(()=>{});
     resumeGroupCallFromUrl().catch(()=>{})
@@ -1558,7 +1559,8 @@ function renderMessages(items){
 }
 
 function appendMessage(m){
-  if(!currentMessages.some(item=>Number(item.id)===Number(m.id)))currentMessages.push(m);
+  if(currentMessages.some(item=>Number(item.id)===Number(m.id)))return;
+  currentMessages.push(m);
   const box=$('messages');box.querySelector('.empty')?.remove();box.append(msgNode(m));box.scrollTop=box.scrollHeight
 }
 
@@ -1575,6 +1577,17 @@ function syncSend(){
 
 function clearPending(){
   pendingAttachment=null;$('pendingFile').classList.add('hidden');$('pendingFileName').textContent='';$('fileInput').value='';syncSend()
+}
+
+function clearComposerAfterQueued(body,attachmentId){
+  if($('text').value.trim()===body){
+    $('text').value='';
+    $('text').style.height='auto';
+    clearCurrentDraft();
+    stopOwnTyping()
+  }
+  if((pendingAttachment?.id||null)===(attachmentId||null))clearPending();
+  else syncSend()
 }
 
 function supportedRecorderMime(kind){
@@ -2128,14 +2141,48 @@ $('fileInput').onchange=async()=>{
 };
 
 $('composer').onsubmit=async e=>{
-  e.preventDefault();const body=$('text').value.trim();if((!body&&!pendingAttachment)||!active||uploading)return;
+  e.preventDefault();
+  const body=$('text').value.trim();
+  if((!body&&!pendingAttachment)||!active||uploading)return;
+
+  const target={type:active.type,id:Number(active.data.id)};
+  const attachmentId=pendingAttachment?.id||null;
+  const clientMessageId=makeClientMessageId();
+  const payload={
+    body,
+    attachment_id:attachmentId,
+    client_message_id:clientMessageId
+  };
+  if(target.type==='user')payload.recipient_id=target.id;
+
+  const entry={
+    id:clientMessageId,
+    chat_type:target.type,
+    chat_id:target.id,
+    path:target.type==='user'
+      ?'/api/messages'
+      :'/api/groups/'+target.id+'/messages',
+    payload,
+    queued_at:new Date().toISOString()
+  };
+  queueOutbox(entry);
+
   try{
-    const payload={body,attachment_id:pendingAttachment?.id||null};
-    const m=active.type==='user'
-      ?await api('/api/messages',{method:'POST',body:{recipient_id:active.data.id,...payload}})
-      :await api('/api/groups/'+active.data.id+'/messages',{method:'POST',body:payload});
-    appendMessage(m);$('text').value='';$('text').style.height='auto';clearCurrentDraft();stopOwnTyping();clearPending()
-  }catch(err){alert(err.message)}
+    const m=await deliverOutboxEntry(entry);
+    if(
+      active
+      && active.type===target.type
+      && Number(active.data.id)===target.id
+    )appendMessage(m);
+    clearComposerAfterQueued(body,attachmentId)
+  }catch(err){
+    if(err?.queued){
+      clearComposerAfterQueued(body,attachmentId);
+      alert('Связь пропала. Сообщение сохранено и отправится автоматически после восстановления интернета.');
+      return
+    }
+    alert(err.message)
+  }
 };
 
 function urlBase64ToUint8Array(value){
