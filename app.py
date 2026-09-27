@@ -2435,6 +2435,50 @@ async def send_group_message(
     group = group_for_user(conn, group_id, user["id"])
     if not group:
         raise HTTPException(404, "Группа не найдена")
+    if data.client_message_id:
+        existing = conn.execute(
+            """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
+                      gm.deleted_at,gm.forwarded,
+                      EXISTS(
+                        SELECT 1 FROM group_message_mentions gmm
+                        WHERE gmm.message_id=gm.id AND gmm.user_id=?
+                      ) AS mentioned_me,
+                      EXISTS(
+                        SELECT 1 FROM group_message_mentions gmm_any
+                        WHERE gmm_any.message_id=gm.id
+                      ) AS has_mentions,
+                      u.display_name AS sender_name,
+                      up.id AS attachment_id,
+                      up.stored_name AS attachment_stored_name,
+                      up.original_name AS attachment_name,
+                      up.mime_type AS attachment_mime,
+                      up.size AS attachment_size
+               FROM group_messages gm
+               JOIN users u ON u.id=gm.sender_id
+               LEFT JOIN uploads up ON up.id=gm.attachment_id
+               WHERE gm.sender_id=? AND gm.client_message_id=?""",
+            (user["id"], user["id"], data.client_message_id),
+        ).fetchone()
+        if existing:
+            if existing["group_id"] != group_id:
+                raise HTTPException(409, "Идентификатор сообщения уже использован")
+            deleted = bool(existing["deleted_at"])
+            return {
+                "id": existing["id"],
+                "group_id": existing["group_id"],
+                "sender_id": existing["sender_id"],
+                "sender_name": existing["sender_name"],
+                "body": "" if deleted else existing["body"],
+                "created_at": existing["created_at"],
+                "attachment": None if deleted else attachment_json(existing),
+                "deleted": deleted,
+                "deleted_at": existing["deleted_at"],
+                "forwarded": bool(existing["forwarded"]),
+                "mentioned_me": bool(existing["mentioned_me"]) and not deleted,
+                "has_mentions": bool(existing["has_mentions"]) and not deleted,
+                "can_delete": not deleted,
+                "can_restore": False,
+            }
     body = data.body.strip()
     upload_row = owned_upload(conn, data.attachment_id, user["id"])
     if not body and not upload_row:
@@ -2442,14 +2486,15 @@ async def send_group_message(
     created = now_iso()
     cur = conn.execute(
         """INSERT INTO group_messages(
-             group_id,sender_id,body,created_at,attachment_id
-           ) VALUES(?,?,?,?,?)""",
+             group_id,sender_id,body,created_at,attachment_id,client_message_id
+           ) VALUES(?,?,?,?,?,?)""",
         (
             group_id,
             user["id"],
             body,
             created,
             data.attachment_id,
+            data.client_message_id,
         ),
     )
     mention_ids = resolve_group_mentions(conn, group_id, body)
