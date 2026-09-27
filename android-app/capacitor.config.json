@@ -1,0 +1,16 @@
+{
+  "appId": "ru.svoi.mobile",
+  "appName": "Свои",
+  "webDir": "www",
+  "server": {
+    "url": "https://epl-gruz.duckdns.org",
+    "cleartext": false,
+    "allowNavigation": [
+      "epl-gruz.duckdns.org"
+    ]
+  },
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true
+  }
+}
