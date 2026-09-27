@@ -1171,6 +1171,10 @@ function updatePrivateVideoControls(){
 
 async function upgradeCurrentCallToVideo(){
   if(!currentCall||currentCall.renegotiating)return;
+  if(!currentCall.answered){
+    alert('Дождись, пока собеседник примет звонок');
+    return
+  }
   currentCall.renegotiating=true;
   const button=$('cameraCall');
   if(button)button.disabled=true;
@@ -1266,7 +1270,7 @@ async function getCallMedia(video){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,renegotiating:false};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,renegotiating:false,answered:false};
   for(const track of stream.getTracks())pc.addTrack(track,stream);
   $('localVideo').srcObject=stream;
   updatePrivateVideoControls();
@@ -1296,7 +1300,7 @@ async function createPeer(peerId,peerName,id,video,stream){
   pc.onconnectionstatechange=()=>{
     if(!currentCall||currentCall.pc!==pc)return;
     const state=pc.connectionState;
-    if(state==='connected'){stopOutgoingTone();$('callStatus').textContent='Соединено'}
+    if(state==='connected'){if(currentCall)currentCall.answered=true;stopOutgoingTone();$('callStatus').textContent='Соединено'}
     else if(state==='connecting')$('callStatus').textContent='Соединение…';
     else if(state==='failed'){ $('callStatus').textContent='Не удалось соединиться'; setTimeout(()=>finishCall(false),1200) }
     else if(state==='closed')finishCall(false)
@@ -1428,7 +1432,8 @@ async function acceptIncomingCall(){
       call_id:data.call_id,
       video:!!data.video,
       sdp:pc.localDescription.toJSON?pc.localDescription.toJSON():pc.localDescription
-    })
+    });
+    if(currentCall)currentCall.answered=true
   }catch(err){
     try{wsSend({type:'call_reject',to_user_id:data.from_user_id,call_id:data.call_id})}catch{}
     finishCall(false);
@@ -1509,6 +1514,7 @@ async function handleCallSignal(data){
           :currentCall.pc.localDescription
       });
       currentCall.video=true;
+      currentCall.answered=true;
       $('callStatus').textContent='Соединено'
     }catch(err){
       $('callStatus').textContent='Ошибка подключения видео'
@@ -1531,6 +1537,7 @@ async function handleCallSignal(data){
   if(data.type==='call_answer'){
     if(!currentCall||currentCall.callId!==data.call_id)return;
     stopOutgoingTone();
+    currentCall.answered=true;
     try{
       await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
       await flushPendingIce();$('callStatus').textContent='Соединение…'
