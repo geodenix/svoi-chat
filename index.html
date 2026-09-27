@@ -1145,22 +1145,109 @@ function wsSend(payload){
 
 function callId(){return crypto.randomUUID?crypto.randomUUID():(Date.now()+'-'+Math.random().toString(16).slice(2))}
 
+function localVideoTrack(){
+  return currentCall?.localStream?.getVideoTracks()?.find(track=>track.readyState==='live')||null
+}
+
+function updatePrivateVideoControls(){
+  const cameraButton=$('cameraCall');
+  const switchButton=$('switchCamera');
+  const preview=$('localVideo');
+  if(!cameraButton||!switchButton||!preview)return;
+
+  const track=localVideoTrack();
+  const hasVideo=!!track;
+  const enabled=!!track?.enabled;
+
+  cameraButton.classList.toggle('off',hasVideo&&!enabled);
+  cameraButton.textContent=!hasVideo?'🎥':(enabled?'📷':'🚫');
+  cameraButton.title=!hasVideo
+    ?'Включить видео'
+    :(enabled?'Выключить камеру':'Включить камеру');
+
+  switchButton.classList.toggle('hidden',!hasVideo);
+  preview.classList.toggle('hidden',!hasVideo||!enabled)
+}
+
+async function upgradeCurrentCallToVideo(){
+  if(!currentCall||currentCall.renegotiating)return;
+  currentCall.renegotiating=true;
+  const button=$('cameraCall');
+  if(button)button.disabled=true;
+
+  let newTrack=null;
+  let sender=null;
+  try{
+    const videoStream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:cameraFacing}},
+      audio:false
+    });
+    newTrack=videoStream.getVideoTracks()[0];
+    if(!newTrack)throw new Error('Камера не открылась');
+
+    currentCall.localStream.addTrack(newTrack);
+    sender=currentCall.pc.addTrack(newTrack,currentCall.localStream);
+    currentCall.video=true;
+    currentCall.cameraOff=false;
+
+    newTrack.onended=()=>{
+      try{currentCall?.localStream?.removeTrack(newTrack)}catch{}
+      updatePrivateVideoControls()
+    };
+
+    $('localVideo').srcObject=currentCall.localStream;
+    $('localVideo').play().catch(()=>{});
+    updatePrivateVideoControls();
+
+    $('callStatus').textContent='Подключаем видео…';
+    const offer=await currentCall.pc.createOffer();
+    await currentCall.pc.setLocalDescription(offer);
+    await waitForSocketOpen();
+    wsSend({
+      type:'call_video_offer',
+      to_user_id:currentCall.peerId,
+      call_id:currentCall.callId,
+      video:true,
+      sdp:currentCall.pc.localDescription.toJSON
+        ?currentCall.pc.localDescription.toJSON()
+        :currentCall.pc.localDescription
+    })
+  }catch(err){
+    if(sender&&currentCall?.pc){
+      try{currentCall.pc.removeTrack(sender)}catch{}
+    }
+    if(newTrack){
+      try{currentCall?.localStream?.removeTrack(newTrack)}catch{}
+      try{newTrack.stop()}catch{}
+    }
+    updatePrivateVideoControls();
+    $('callStatus').textContent='Соединено';
+    alert(err?.name==='NotAllowedError'
+      ?'Разреши доступ к камере для этого сайта'
+      :(err?.message||'Не удалось включить видео'))
+  }finally{
+    if(currentCall)currentCall.renegotiating=false;
+    if(button)button.disabled=false
+  }
+}
+
 function showCallUi(name,status,video,incoming=false){
   $('callOverlay').classList.remove('hidden');$('callName').textContent=name||'Звонок';$('callStatus').textContent=status;
-  $('callAvatar').textContent=initials(name||'С');$('callAvatar').classList.toggle('hidden',video);
-  $('localVideo').classList.toggle('hidden',!video);
+  $('callAvatar').textContent=initials(name||'С');$('callAvatar').classList.remove('hidden');
   $('incomingActions').classList.toggle('hidden',!incoming);
   $('activeCallControls').classList.toggle('hidden',incoming);
   updateSpeakerButtons();
-  $('cameraCall').classList.toggle('hidden',!video);$('switchCamera').classList.toggle('hidden',!video)
+  $('cameraCall').classList.remove('hidden');
+  updatePrivateVideoControls()
 }
 
 function resetCallUi(){
   stopRingtone();
   stopOutgoingTone();
   $('callOverlay').classList.add('hidden');$('remoteVideo').srcObject=null;$('localVideo').srcObject=null;
+  $('callAvatar').classList.remove('hidden');
   $('incomingActions').classList.add('hidden');$('activeCallControls').classList.add('hidden');$('mediaPermission').classList.add('hidden');
-  $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');updateSpeakerButtons();
+  $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');$('cameraCall').disabled=false;updateSpeakerButtons();updatePrivateVideoControls();
   if(preparedMediaStream){try{preparedMediaStream.getTracks().forEach(t=>t.stop())}catch{}preparedMediaStream=null}
 }
 
@@ -1179,15 +1266,26 @@ async function getCallMedia(video){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:false};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,renegotiating:false};
   for(const track of stream.getTracks())pc.addTrack(track,stream);
   $('localVideo').srcObject=stream;
+  updatePrivateVideoControls();
   pc.ontrack=e=>{
     const stream=e.streams?.[0];
     if(stream){
       $('remoteVideo').srcObject=stream;
       applyAudioOutput($('remoteVideo')).catch(()=>{});
       $('remoteVideo').play().catch(()=>{})
+    }
+    if(e.track?.kind==='video'){
+      currentCall.remoteVideo=true;
+      $('callAvatar').classList.add('hidden');
+      e.track.onended=()=>{
+        if(currentCall){
+          currentCall.remoteVideo=false;
+          $('callAvatar').classList.remove('hidden')
+        }
+      }
     }
     $('callStatus').textContent='Соединено'
   };
@@ -1391,6 +1489,45 @@ async function handleCallSignal(data){
     }
     return
   }
+  if(data.type==='call_video_offer'){
+    if(!currentCall||currentCall.callId!==data.call_id)return;
+    try{
+      if(currentCall.pc.signalingState==='have-local-offer'){
+        await currentCall.pc.setLocalDescription({type:'rollback'})
+      }
+      await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      const answer=await currentCall.pc.createAnswer();
+      await currentCall.pc.setLocalDescription(answer);
+      await waitForSocketOpen();
+      wsSend({
+        type:'call_video_answer',
+        to_user_id:data.from_user_id,
+        call_id:data.call_id,
+        video:true,
+        sdp:currentCall.pc.localDescription.toJSON
+          ?currentCall.pc.localDescription.toJSON()
+          :currentCall.pc.localDescription
+      });
+      currentCall.video=true;
+      $('callStatus').textContent='Соединено'
+    }catch(err){
+      $('callStatus').textContent='Ошибка подключения видео'
+    }
+    return
+  }
+  if(data.type==='call_video_answer'){
+    if(!currentCall||currentCall.callId!==data.call_id)return;
+    try{
+      if(currentCall.pc.signalingState==='have-local-offer'){
+        await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp))
+      }
+      currentCall.video=true;
+      $('callStatus').textContent='Соединено'
+    }catch(err){
+      $('callStatus').textContent='Ошибка подключения видео'
+    }
+    return
+  }
   if(data.type==='call_answer'){
     if(!currentCall||currentCall.callId!==data.call_id)return;
     stopOutgoingTone();
@@ -1422,15 +1559,21 @@ $('muteCall').onclick=()=>{
 
 $('speakerCall').onclick=()=>chooseSpeakerOutput();
 
-$('cameraCall').onclick=()=>{
-  if(!currentCall?.video)return;
-  currentCall.cameraOff=!currentCall.cameraOff;
-  currentCall.localStream.getVideoTracks().forEach(t=>t.enabled=!currentCall.cameraOff);
-  $('cameraCall').classList.toggle('off',currentCall.cameraOff);$('cameraCall').textContent=currentCall.cameraOff?'🚫':'📷'
+$('cameraCall').onclick=async()=>{
+  if(!currentCall)return;
+  const track=localVideoTrack();
+  if(!track){
+    await upgradeCurrentCallToVideo();
+    return
+  }
+
+  currentCall.cameraOff=track.enabled;
+  track.enabled=!currentCall.cameraOff;
+  updatePrivateVideoControls()
 };
 
 $('switchCamera').onclick=async()=>{
-  if(!currentCall?.video)return;
+  if(!currentCall||!localVideoTrack())return;
   const button=$('switchCamera');
   button.disabled=true;
 
@@ -1563,7 +1706,7 @@ function connectWs(){
   socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));
   socket.onmessage=e=>{
     const data=JSON.parse(e.data);
-    if(['call_offer','call_answer','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
+    if(['call_offer','call_answer','call_video_offer','call_video_answer','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
       handleCallSignal(data);return
     }
     if(data.type==='group_call_invite'){
