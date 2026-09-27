@@ -201,6 +201,24 @@ def init_db():
     if "avatar_id" not in group_columns:
         conn.execute("ALTER TABLE chat_groups ADD COLUMN avatar_id INTEGER")
 
+    member_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(group_members)").fetchall()
+    }
+    if "is_admin" not in member_columns:
+        conn.execute(
+            "ALTER TABLE group_members ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.execute(
+        """UPDATE group_members
+           SET is_admin=1
+           WHERE EXISTS(
+             SELECT 1 FROM chat_groups g
+             WHERE g.id=group_members.group_id
+               AND g.owner_id=group_members.user_id
+           )"""
+    )
+
     conn.commit()
     conn.close()
 
@@ -258,6 +276,8 @@ def group_json(row):
     }
     if "member_count" in keys:
         data["member_count"] = row["member_count"]
+    if "is_admin" in keys:
+        data["is_admin"] = bool(row["is_admin"])
     return data
 
 
@@ -725,6 +745,24 @@ async def delete_avatar(
     await _broadcast_profile(data)
     return data
 
+async def _broadcast_group_roles(group_id: int):
+    conn = connect_db()
+    members = conn.execute(
+        "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
+        (group_id,),
+    ).fetchall()
+    conn.close()
+    for member in members:
+        await push(
+            int(member["user_id"]),
+            {
+                "type": "group_roles_updated",
+                "group_id": group_id,
+                "is_admin": bool(member["is_admin"]),
+            },
+        )
+
+
 async def _broadcast_group_update(group_id: int):
     conn = connect_db()
     row = conn.execute(
@@ -739,14 +777,15 @@ async def _broadcast_group_update(group_id: int):
         (group_id,),
     ).fetchone()
     members = conn.execute(
-        "SELECT user_id FROM group_members WHERE group_id=?",
+        "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
         (group_id,),
     ).fetchall()
     conn.close()
     if not row:
         return
-    data = group_json(row)
+    base = group_json(row)
     for member in members:
+        data = {**base, "is_admin": bool(member["is_admin"])}
         await push(
             int(member["user_id"]),
             {"type": "group_updated", "group": data},
@@ -764,9 +803,9 @@ async def set_group_avatar(
     if not group:
         await file.close()
         raise HTTPException(404, "Группа не найдена")
-    if group["owner_id"] != user["id"]:
+    if not bool(group["is_admin"]):
         await file.close()
-        raise HTTPException(403, "Менять аватар группы может только владелец")
+        raise HTTPException(403, "Менять аватар группы может только администратор")
 
     mime = (file.content_type or "").lower().split(";", 1)[0].strip()
     if mime not in AVATAR_IMAGE_TYPES:
@@ -1289,7 +1328,8 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
 def group_for_user(conn, group_id: int, user_id: int):
     return conn.execute(
         """SELECT g.id,g.name,g.owner_id,g.created_at,g.avatar_id,
-                  ga.stored_name AS avatar_stored_name
+                  ga.stored_name AS avatar_stored_name,
+                  gm.is_admin AS is_admin
            FROM chat_groups g
            JOIN group_members gm ON gm.group_id=g.id
            LEFT JOIN uploads ga ON ga.id=g.avatar_id
@@ -1303,6 +1343,7 @@ def get_groups(user=Depends(current_user), conn=Depends(db)):
     rows = conn.execute(
         """SELECT g.id,g.name,g.owner_id,g.created_at,
                   ga.stored_name AS avatar_stored_name,
+                  mine.is_admin AS is_admin,
                   COUNT(gm2.user_id) AS member_count
            FROM chat_groups g
            JOIN group_members mine
@@ -1337,8 +1378,13 @@ async def create_group(data: GroupCreateIn, user=Depends(current_user), conn=Dep
     )
     group_id = cur.lastrowid
     conn.executemany(
-        "INSERT INTO group_members(group_id,user_id,joined_at) VALUES(?,?,?)",
-        [(group_id, uid, created) for uid in member_ids],
+        """INSERT INTO group_members(
+             group_id,user_id,joined_at,is_admin
+           ) VALUES(?,?,?,?)""",
+        [
+            (group_id, uid, created, 1 if uid == user["id"] else 0)
+            for uid in member_ids
+        ],
     )
     conn.commit()
     group = {
@@ -1348,6 +1394,7 @@ async def create_group(data: GroupCreateIn, user=Depends(current_user), conn=Dep
         "created_at": created,
         "member_count": len(member_ids),
         "avatar_url": None,
+        "is_admin": True,
     }
     for uid in member_ids:
         if uid != user["id"]:
@@ -1357,20 +1404,97 @@ async def create_group(data: GroupCreateIn, user=Depends(current_user), conn=Dep
 
 @app.get("/api/groups/{group_id}/members")
 def get_group_members(group_id: int, user=Depends(current_user), conn=Depends(db)):
-    if not group_for_user(conn, group_id, user["id"]):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
         raise HTTPException(404, "Группа не найдена")
     rows = conn.execute(
-        """SELECT u.id,u.username,u.display_name
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name,
+                  gm.is_admin,
+                  CASE WHEN g.owner_id=u.id THEN 1 ELSE 0 END AS is_owner
            FROM group_members gm
            JOIN users u ON u.id=gm.user_id
+           JOIN chat_groups g ON g.id=gm.group_id
+           LEFT JOIN uploads a ON a.id=u.avatar_id
            WHERE gm.group_id=?
-           ORDER BY u.display_name""",
+           ORDER BY is_owner DESC, gm.is_admin DESC, u.display_name""",
         (group_id,),
     ).fetchall()
-    return [
-        {**user_json(r), "online": bool(connections.get(r["id"]))}
-        for r in rows
-    ]
+    return {
+        "group_id": group_id,
+        "owner_id": group["owner_id"],
+        "can_manage_admins": group["owner_id"] == user["id"],
+        "members": [
+            {
+                **user_json(r),
+                "online": bool(connections.get(r["id"])),
+                "is_admin": bool(r["is_admin"]),
+                "is_owner": bool(r["is_owner"]),
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/groups/{group_id}/admins/{member_id}")
+async def add_group_admin(
+    group_id: int,
+    member_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+    if group["owner_id"] != user["id"]:
+        raise HTTPException(403, "Назначать администраторов может только владелец")
+
+    member = conn.execute(
+        """SELECT user_id,is_admin FROM group_members
+           WHERE group_id=? AND user_id=?""",
+        (group_id, member_id),
+    ).fetchone()
+    if not member:
+        raise HTTPException(404, "Участник не найден")
+
+    conn.execute(
+        "UPDATE group_members SET is_admin=1 WHERE group_id=? AND user_id=?",
+        (group_id, member_id),
+    )
+    conn.commit()
+    await _broadcast_group_roles(group_id)
+    return {"ok": True, "member_id": member_id, "is_admin": True}
+
+
+@app.delete("/api/groups/{group_id}/admins/{member_id}")
+async def remove_group_admin(
+    group_id: int,
+    member_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+    if group["owner_id"] != user["id"]:
+        raise HTTPException(403, "Снимать администраторов может только владелец")
+    if member_id == group["owner_id"]:
+        raise HTTPException(400, "Владелец группы всегда администратор")
+
+    member = conn.execute(
+        "SELECT 1 FROM group_members WHERE group_id=? AND user_id=?",
+        (group_id, member_id),
+    ).fetchone()
+    if not member:
+        raise HTTPException(404, "Участник не найден")
+
+    conn.execute(
+        "UPDATE group_members SET is_admin=0 WHERE group_id=? AND user_id=?",
+        (group_id, member_id),
+    )
+    conn.commit()
+    await _broadcast_group_roles(group_id)
+    return {"ok": True, "member_id": member_id, "is_admin": False}
 
 
 @app.get("/api/groups/{group_id}/messages")
