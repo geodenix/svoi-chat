@@ -1679,6 +1679,34 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         raise HTTPException(404, "Пользователь не найден")
     if users_blocked(conn, user["id"], data.recipient_id):
         raise HTTPException(403, "Личное общение с этим пользователем недоступно")
+    if data.client_message_id:
+        existing = conn.execute(
+            """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
+                      m.delivered_at,m.read_at,m.forwarded,
+                      up.id AS attachment_id,
+                      up.stored_name AS attachment_stored_name,
+                      up.original_name AS attachment_name,
+                      up.mime_type AS attachment_mime,
+                      up.size AS attachment_size
+               FROM messages m
+               LEFT JOIN uploads up ON up.id=m.attachment_id
+               WHERE m.sender_id=? AND m.client_message_id=?""",
+            (user["id"], data.client_message_id),
+        ).fetchone()
+        if existing:
+            if existing["recipient_id"] != data.recipient_id:
+                raise HTTPException(409, "Идентификатор сообщения уже использован")
+            return {
+                "id": existing["id"],
+                "sender_id": existing["sender_id"],
+                "recipient_id": existing["recipient_id"],
+                "body": existing["body"],
+                "created_at": existing["created_at"],
+                "delivered_at": existing["delivered_at"],
+                "read_at": existing["read_at"],
+                "forwarded": bool(existing["forwarded"]),
+                "attachment": attachment_json(existing),
+            }
     body = data.body.strip()
     upload_row = owned_upload(conn, data.attachment_id, user["id"])
     if not body and not upload_row:
@@ -1687,8 +1715,8 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
     cur = conn.execute(
         """INSERT INTO messages(
              sender_id,recipient_id,body,created_at,attachment_id,
-             delivered_at,read_at
-           ) VALUES(?,?,?,?,?,?,?)""",
+             delivered_at,read_at,client_message_id
+           ) VALUES(?,?,?,?,?,?,?,?)""",
         (
             user["id"],
             data.recipient_id,
@@ -1697,6 +1725,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
             data.attachment_id,
             None,
             None,
+            data.client_message_id,
         ),
     )
     conn.commit()
