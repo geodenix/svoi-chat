@@ -1474,6 +1474,16 @@ def finish_call_history(call_id: str, status: str):
     conn.close()
 
 
+def mark_call_video(call_id: str):
+    conn = connect_db()
+    conn.execute(
+        "UPDATE call_history SET video=1 WHERE call_id=?",
+        (call_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
 @app.get("/api/calls/history")
 def call_history(
     limit: int = Query(30, ge=1, le=100),
@@ -1564,6 +1574,8 @@ def pending_call(
 CALL_SIGNAL_TYPES = {
     "call_offer",
     "call_answer",
+    "call_video_offer",
+    "call_video_answer",
     "ice_candidate",
     "call_reject",
     "call_end",
@@ -1683,7 +1695,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 "call_id": call_id,
             }
 
-            if signal_type in {"call_offer", "call_answer"}:
+            if signal_type in {
+                "call_offer",
+                "call_answer",
+                "call_video_offer",
+                "call_video_answer",
+            }:
                 sdp = data.get("sdp")
                 if not isinstance(sdp, dict):
                     continue
@@ -1726,6 +1743,21 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 continue
 
             call = active_calls.get(call_id)
+
+            if signal_type in {"call_video_offer", "call_video_answer"}:
+                if not call or not call.get("answered"):
+                    continue
+                participants = {call["caller_id"], call["callee_id"]}
+                if user_id not in participants or target_id not in participants:
+                    continue
+                if user_id == target_id:
+                    continue
+                if signal_type == "call_video_offer":
+                    call["video"] = True
+                    mark_call_video(call_id)
+                payload["video"] = True
+                await push(target_id, payload)
+                continue
 
             if signal_type == "call_answer":
                 if call:
