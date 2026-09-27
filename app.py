@@ -1,9 +1,12 @@
 import asyncio
+import base64
 import hashlib
+import hmac
 import json
 import os
 import secrets
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Set
@@ -29,6 +32,11 @@ VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip()
 VAPID_SUBJECT = os.getenv(
     "VAPID_SUBJECT",
     "mailto:admin@epl-gruz.duckdns.org",
+).strip()
+TURN_SHARED_SECRET = os.getenv("TURN_SHARED_SECRET", "").strip()
+TURN_HOST = os.getenv(
+    "TURN_HOST",
+    "epl-gruz.duckdns.org",
 ).strip()
 
 app = FastAPI(title="Свои", version="0.1.0")
@@ -283,6 +291,47 @@ def logout(
 @app.get("/api/me")
 def me(user=Depends(current_user)):
     return user_json(user)
+
+
+@app.get("/api/turn")
+def turn_credentials(user=Depends(current_user)):
+    if not TURN_SHARED_SECRET:
+        return {
+            "configured": False,
+            "ice_servers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+            ],
+        }
+
+    expires = int(time.time()) + 3600
+    username = f"{expires}:{user['id']}"
+    digest = hmac.new(
+        TURN_SHARED_SECRET.encode(),
+        username.encode(),
+        hashlib.sha1,
+    ).digest()
+    password = base64.b64encode(digest).decode()
+
+    return {
+        "configured": True,
+        "expires_at": expires,
+        "ice_servers": [
+            {
+                "urls": [
+                    "stun:stun.l.google.com:19302",
+                    "stun:stun1.l.google.com:19302",
+                ],
+            },
+            {
+                "urls": [
+                    f"turn:{TURN_HOST}:3478?transport=udp",
+                    f"turn:{TURN_HOST}:3478?transport=tcp",
+                ],
+                "username": username,
+                "credential": password,
+            },
+        ],
+    }
 
 
 @app.get("/api/users")
