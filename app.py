@@ -1689,7 +1689,7 @@ def get_group_members(group_id: int, user=Depends(current_user), conn=Depends(db
     if not group:
         raise HTTPException(404, "Группа не найдена")
     rows = conn.execute(
-        """SELECT u.id,u.username,u.display_name,
+        """SELECT u.id,u.username,u.display_name,u.last_seen_at,
                   a.stored_name AS avatar_stored_name,
                   gm.is_admin,
                   CASE WHEN g.owner_id=u.id THEN 1 ELSE 0 END AS is_owner
@@ -1710,6 +1710,7 @@ def get_group_members(group_id: int, user=Depends(current_user), conn=Depends(db
             {
                 **user_json(r),
                 "online": bool(connections.get(r["id"])),
+                "last_seen_at": r["last_seen_at"],
                 "is_admin": bool(r["is_admin"]),
                 "is_owner": bool(r["is_owner"]),
             }
