@@ -108,6 +108,9 @@ public class MainActivity extends BridgeActivity {
 
     private SharedPreferences updaterPrefs;
     private BroadcastReceiver downloadReceiver;
+    private volatile boolean updateCheckRunning = false;
+    private boolean updateDialogShowing = false;
+    private long lastUpdateCheckAt = 0L;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -128,6 +131,7 @@ public class MainActivity extends BridgeActivity {
                 && canInstallPackages()) {
             installDownloadedUpdate();
         }
+        checkForUpdates();
     }
 
     @Override
@@ -218,6 +222,13 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void checkForUpdates() {
+        long now = System.currentTimeMillis();
+        if (updateCheckRunning || now - lastUpdateCheckAt < 10000L) {
+            return;
+        }
+        updateCheckRunning = true;
+        lastUpdateCheckAt = now;
+
         new Thread(() -> {
             HttpURLConnection connection = null;
             try {
@@ -299,6 +310,7 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception ignored) {
                 // Update checks must never block app startup.
             } finally {
+                updateCheckRunning = false;
                 if (connection != null) {
                     connection.disconnect();
                 }
@@ -311,11 +323,12 @@ public class MainActivity extends BridgeActivity {
         String versionName,
         int versionCode
     ) {
-        if (isFinishing() || isDestroyed()) {
+        if (isFinishing() || isDestroyed() || updateDialogShowing) {
             return;
         }
 
-        new AlertDialog.Builder(this)
+        updateDialogShowing = true;
+        AlertDialog dialog = new AlertDialog.Builder(this)
             .setTitle("Доступно обновление")
             .setMessage(
                 "Новая версия «Свои»: " + versionName +
@@ -325,13 +338,18 @@ public class MainActivity extends BridgeActivity {
             .setNegativeButton("Позже", null)
             .setPositiveButton(
                 "Скачать",
-                (dialog, which) -> startUpdateDownload(
+                (dialogInterface, which) -> startUpdateDownload(
                     url,
                     versionName,
                     versionCode
                 )
             )
-            .show();
+            .create();
+
+        dialog.setOnDismissListener(ignored -> {
+            updateDialogShowing = false;
+        });
+        dialog.show();
     }
 
     private void startUpdateDownload(
