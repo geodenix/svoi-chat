@@ -4,13 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       version_code:
-        description: "Android versionCode, e.g. 2"
+        description: "Android versionCode (leave the suggested next value when running manually)"
         required: true
         type: string
       version_name:
-        description: "Version name, e.g. 1.0.0"
+        description: "Version name, e.g. 1.0.10"
         required: true
         type: string
+  push:
+    branches:
+      - main
+    paths:
+      - "android-app/**"
+      - ".github/workflows/release-android.yml"
+
+concurrency:
+  group: svoi-android-release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -33,6 +43,71 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve release version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_VERSION_CODE: ${{ inputs.version_code }}
+          MANUAL_VERSION_NAME: ${{ inputs.version_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION_CODE="$MANUAL_VERSION_CODE"
+            VERSION_NAME="$MANUAL_VERSION_NAME"
+          else
+            LATEST_CODE="$(
+              gh release list \
+                --repo "${{ github.repository }}" \
+                --limit 100 \
+                --json tagName \
+                --jq '.[].tagName' \
+              | sed -n 's/^android-v\([0-9][0-9]*\)$/\1/p' \
+              | sort -n \
+              | tail -n 1
+            )"
+
+            if [ -z "$LATEST_CODE" ]; then
+              LATEST_CODE=1
+            fi
+
+            VERSION_CODE=$((LATEST_CODE + 1))
+            PATCH=$((VERSION_CODE - 2))
+            if [ "$PATCH" -lt 0 ]; then
+              PATCH=0
+            fi
+            VERSION_NAME="1.0.$PATCH"
+          fi
+
+          case "$VERSION_CODE" in
+            ''|*[!0-9]*)
+              echo "::error::versionCode must be a positive integer"
+              exit 1
+              ;;
+          esac
+
+          if [ "$VERSION_CODE" -lt 1 ]; then
+            echo "::error::versionCode must be at least 1"
+            exit 1
+          fi
+
+          if [ -z "$VERSION_NAME" ]; then
+            echo "::error::versionName must not be empty"
+            exit 1
+          fi
+
+          TAG="android-v$VERSION_CODE"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists"
+            exit 1
+          fi
+
+          printf 'SVOI_VERSION_CODE=%s\n' "$VERSION_CODE" >> "$GITHUB_ENV"
+          printf 'SVOI_VERSION_NAME=%s\n' "$VERSION_NAME" >> "$GITHUB_ENV"
+          printf 'SVOI_RELEASE_TAG=%s\n' "$TAG" >> "$GITHUB_ENV"
+
+          echo "Resolved Android release: $TAG / $VERSION_NAME"
 
       - name: Normalize signing secrets
         shell: bash
@@ -94,30 +169,10 @@ jobs:
       - name: Sync Capacitor
         run: npx cap sync android
 
-      - name: Validate release version
-        shell: bash
-        run: |
-          case "${{ inputs.version_code }}" in
-            ''|*[!0-9]*)
-              echo "::error::version_code must be a positive integer"
-              exit 1
-              ;;
-          esac
-          if [ "${{ inputs.version_code }}" -lt 1 ]; then
-            echo "::error::version_code must be at least 1"
-            exit 1
-          fi
-          if gh release view "android-v${{ inputs.version_code }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "::error::Release android-v${{ inputs.version_code }} already exists. Use a larger version_code."
-            exit 1
-          fi
-        env:
-          GH_TOKEN: ${{ github.token }}
-
       - name: Patch Android app
         run: |
           python3 patch_android.py
-          python3 patch_release.py "${{ inputs.version_code }}" "${{ inputs.version_name }}"
+          python3 patch_release.py "$SVOI_VERSION_CODE" "$SVOI_VERSION_NAME"
 
       - name: Restore and verify signing key
         shell: bash
@@ -155,7 +210,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: svoi-android-release-${{ inputs.version_code }}
+          name: svoi-android-release-${{ env.SVOI_VERSION_CODE }}
           path: android-app/svoi.apk
           if-no-files-found: error
           retention-days: 30
@@ -164,8 +219,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "android-v${{ inputs.version_code }}" svoi.apk \
+          gh release create "$SVOI_RELEASE_TAG" svoi.apk \
             --repo "${{ github.repository }}" \
-            --title "Свои Android ${{ inputs.version_name }}" \
-            --notes "Android release ${{ inputs.version_name }} (versionCode ${{ inputs.version_code }})." \
+            --title "Свои Android $SVOI_VERSION_NAME" \
+            --notes "Автоматическая Android-сборка $SVOI_VERSION_NAME (versionCode $SVOI_VERSION_CODE)." \
             --latest
