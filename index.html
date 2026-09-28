@@ -6565,6 +6565,11 @@ function clearPendingNativeCallAction(){
 async function restoreIncomingCallAction(action){
   if(!action?.callId)return;
   const callId=String(action.callId);
+  const nativeSystemControls=!!(action.nativeRing||action.nativeAccept);
+
+  if(nativeSystemControls){
+    $('incomingActions')?.classList.add('hidden');
+  }
 
   await waitForAppForeground();
   await waitForSocketOpen(10000);
@@ -6586,8 +6591,17 @@ async function restoreIncomingCallAction(action){
   if(data&&pendingCall?.call_id!==callId&&currentCall?.callId!==callId){
     incomingCall(
       data,
-      action.nativeRing||action.nativeAccept,
-      action.nativeRing||action.nativeAccept
+      nativeSystemControls,
+      nativeSystemControls
+    )
+  }else if(nativeSystemControls&&pendingCall?.call_id===callId){
+    $('incomingActions')?.classList.add('hidden');
+    if(data?.from_avatar_url){
+      pendingCall.from_avatar_url=data.from_avatar_url
+    }
+    setCallVisual(
+      data?.from_name||pendingCall?.from_name||$('callName')?.textContent,
+      data?.from_avatar_url||pendingCall?.from_avatar_url||null
     )
   }
 
