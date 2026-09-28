@@ -9,3 +9,5 @@
 - Camera/microphone permissions are declared for WebRTC calls.
 
 APK собирается автоматически через GitHub Actions.
+
+Служебная пересборка Android после обновления экрана звонка: 2026-09-28.
