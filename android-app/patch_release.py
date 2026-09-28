@@ -48,4 +48,17 @@ android {
 '''
 
 gradle.write_text(text)
+
+version_file = Path(
+    "android/app/src/main/java/ru/svoi/mobile/SvoiVersion.java"
+)
+version_file.write_text(
+    "package ru.svoi.mobile;\n\n"
+    "public final class SvoiVersion {\n"
+    f"    public static final int VERSION_CODE = {version_code};\n"
+    f'    public static final String VERSION_NAME = "{version_name}";\n'
+    "    private SvoiVersion() {}\n"
+    "}\n"
+)
+
 print(f"Release configured: {version_name} ({version_code})")
