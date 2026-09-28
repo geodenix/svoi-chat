@@ -2412,6 +2412,8 @@ import org.webrtc.MediaStream;
 import org.webrtc.PeerConnection;
 import org.webrtc.PeerConnectionFactory;
 import org.webrtc.RtpReceiver;
+import org.webrtc.RtpParameters;
+import org.webrtc.RtpSender;
 import org.webrtc.ScreenCapturerAndroid;
 import org.webrtc.SdpObserver;
 import org.webrtc.SessionDescription;
@@ -2509,8 +2511,8 @@ public class NativeScreenSharePlugin extends Plugin {
             int height = Math.max(640, metrics.heightPixels);
 
             int maxSide = Math.max(width, height);
-            if (maxSide > 1280) {
-                double scale = 1280.0 / maxSide;
+            if (maxSide > 960) {
+                double scale = 960.0 / maxSide;
                 width = Math.max(360, (int) Math.round(width * scale));
                 height = Math.max(640, (int) Math.round(height * scale));
             }
@@ -2525,7 +2527,7 @@ public class NativeScreenSharePlugin extends Plugin {
                 getContext(),
                 videoSource.getCapturerObserver()
             );
-            capturer.startCapture(width, height, 20);
+            capturer.startCapture(width, height, 15);
 
             videoTrack = factory.createVideoTrack(
                 VIDEO_TRACK_ID,
@@ -2578,7 +2580,19 @@ public class NativeScreenSharePlugin extends Plugin {
                 return;
             }
 
-            state.pc.addTrack(videoTrack);
+            RtpSender sender = state.pc.addTrack(videoTrack);
+            if (sender != null) {
+                try {
+                    RtpParameters parameters = sender.getParameters();
+                    if (parameters != null && parameters.encodings != null) {
+                        for (RtpParameters.Encoding encoding : parameters.encodings) {
+                            encoding.maxBitrateBps = 650000;
+                        }
+                        sender.setParameters(parameters);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
             state.pendingOfferCall = call;
             peers.put(peerKey, state);
 
