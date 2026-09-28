@@ -10,6 +10,8 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Set
@@ -61,6 +63,14 @@ SERVER_ADMIN_IDS = {
     for value in os.getenv("SVOI_SERVER_ADMIN_IDS", "").split(",")
     if value.strip().isdigit()
 }
+SMS_RU_API_ID = os.getenv("SMS_RU_API_ID", "").strip()
+SMS_RU_FROM = os.getenv("SMS_RU_FROM", "").strip()
+SMS_RU_TEST = os.getenv("SMS_RU_TEST", "0").strip() == "1"
+SMS_CODE_TTL_SECONDS = 10 * 60
+SMS_RESEND_COOLDOWN_SECONDS = 60
+SMS_MAX_REQUESTS_24H = 10
+SMS_MAX_VERIFY_ATTEMPTS = 5
+
 APP_STARTED_AT = time.time()
 
 app = FastAPI(title="Свои", version="0.1.0")
@@ -106,6 +116,7 @@ def init_db():
       phone_hash TEXT,
       phone_last4 TEXT,
       phone_linked_at TEXT,
+      phone_verified_at TEXT,
       created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
@@ -122,6 +133,22 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_contacts_contact
       ON contacts(contact_user_id);
+    CREATE TABLE IF NOT EXISTS phone_verifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      phone_hash TEXT NOT NULL,
+      phone_last4 TEXT NOT NULL,
+      code_hash TEXT NOT NULL,
+      code_salt TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      sent_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_phone_verifications_user
+      ON phone_verifications(user_id, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_phone_verifications_sent
+      ON phone_verifications(user_id, sent_at);
     CREATE TABLE IF NOT EXISTS user_blocks (
       blocker_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -323,6 +350,8 @@ def init_db():
         conn.execute("ALTER TABLE users ADD COLUMN phone_last4 TEXT")
     if "phone_linked_at" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN phone_linked_at TEXT")
+    if "phone_verified_at" not in user_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN phone_verified_at TEXT")
     conn.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_hash_unique
            ON users(phone_hash)
