@@ -81,6 +81,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.ComponentName;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.ResolveInfo;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
@@ -98,6 +101,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.List;
 
 public class MainActivity extends BridgeActivity {
     private static final String LATEST_RELEASE =
@@ -483,10 +487,68 @@ public class MainActivity extends BridgeActivity {
                 .remove(PREF_PENDING_INSTALL)
                 .apply();
 
-            Intent install = new Intent(Intent.ACTION_INSTALL_PACKAGE);
-            install.setData(apkUri);
+            Intent install = new Intent(Intent.ACTION_VIEW);
+            install.setDataAndType(
+                apkUri,
+                "application/vnd.android.package-archive"
+            );
             install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+            // Pick a system package installer explicitly so Android does not
+            // show an "Open with" chooser with unrelated apps such as Termux.
+            try {
+                List<ResolveInfo> handlers =
+                    getPackageManager().queryIntentActivities(
+                        install,
+                        0
+                    );
+
+                ResolveInfo best = null;
+                for (ResolveInfo handler : handlers) {
+                    if (handler.activityInfo == null
+                            || handler.activityInfo.applicationInfo == null) {
+                        continue;
+                    }
+
+                    ApplicationInfo appInfo =
+                        handler.activityInfo.applicationInfo;
+                    int flags = appInfo.flags;
+                    boolean systemApp =
+                        (flags & ApplicationInfo.FLAG_SYSTEM) != 0
+                        || (flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0;
+
+                    if (!systemApp) {
+                        continue;
+                    }
+
+                    String packageName =
+                        handler.activityInfo.packageName == null
+                            ? ""
+                            : handler.activityInfo.packageName.toLowerCase();
+
+                    if (packageName.contains("packageinstaller")
+                            || packageName.contains("permissioncontroller")) {
+                        best = handler;
+                        break;
+                    }
+
+                    if (best == null) {
+                        best = handler;
+                    }
+                }
+
+                if (best != null) {
+                    install.setComponent(
+                        new ComponentName(
+                            best.activityInfo.packageName,
+                            best.activityInfo.name
+                        )
+                    );
+                }
+            } catch (Exception ignored) {
+            }
+
             startActivity(install);
         } catch (Exception error) {
             // Restore the id so the user can retry if the system installer
