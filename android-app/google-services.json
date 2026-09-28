@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "921205957410",
+    "project_id": "svoi-d23ef",
+    "storage_bucket": "svoi-d23ef.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:921205957410:android:941210cf3b367f32adfb7b",
+        "android_client_info": {
+          "package_name": "ru.svoi.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAO4tX9Y1NBSe-tfrfl7FgH4iJcfb1wINM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
