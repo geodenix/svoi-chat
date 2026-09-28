@@ -51,6 +51,13 @@ def send_fcm_one(token: str, payload: dict) -> dict:
                 "force": "true" if payload.get("force") else "false",
                 "silent": "true" if payload.get("silent") else "false",
                 "unread_count": str(int(payload.get("unread_count") or 0)),
+                "type": (
+                    "call"
+                    if str(payload.get("tag") or "").startswith(
+                        ("incoming-call-", "group-call-")
+                    )
+                    else "message"
+                ),
             },
             android=messaging.AndroidConfig(
                 priority="high",
