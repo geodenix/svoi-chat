@@ -54,7 +54,7 @@ def send_fcm_one(token: str, payload: dict) -> dict:
                 "type": (
                     "call"
                     if str(payload.get("tag") or "").startswith(
-                        ("incoming-call-", "group-call-")
+                        "incoming-call-"
                     )
                     else "message"
                 ),
