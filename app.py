@@ -3770,20 +3770,29 @@ def get_group_messages(
            ORDER BY gm.id DESC LIMIT ?""",
         (user["id"], group_id, user["id"], limit),
     ).fetchall()
-    visible_read_ids = [
-        int(row["id"])
-        for row in rows
-        if not row["deleted_at"] and int(row["sender_id"]) != int(user["id"])
-    ]
-    if visible_read_ids:
-        read_at = now_iso()
-        conn.executemany(
-            """INSERT OR IGNORE INTO group_message_reads(
-                 message_id,user_id,read_at
-               ) VALUES(?,?,?)""",
-            [(message_id, user["id"], read_at) for message_id in visible_read_ids],
-        )
-        conn.commit()
+    read_at = now_iso()
+    conn.execute(
+        """INSERT OR IGNORE INTO group_message_reads(
+             message_id,user_id,read_at
+           )
+           SELECT gm.id,?,?
+           FROM group_messages gm
+           WHERE gm.group_id=?
+             AND gm.sender_id<>?
+             AND gm.deleted_at IS NULL
+             AND NOT EXISTS(
+               SELECT 1 FROM group_message_hidden_by_user gh
+               WHERE gh.message_id=gm.id AND gh.user_id=?
+             )""",
+        (
+            user["id"],
+            read_at,
+            group_id,
+            user["id"],
+            user["id"],
+        ),
+    )
+    conn.commit()
 
     result = []
     is_admin = bool(group["is_admin"])
