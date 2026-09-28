@@ -9,6 +9,7 @@ permissions = """    <uses-permission android:name="android.permission.CAMERA" /
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 """
@@ -24,6 +25,7 @@ else:
     for permission in [
         "android.permission.REQUEST_INSTALL_PACKAGES",
         "android.permission.WAKE_LOCK",
+        "android.permission.READ_CONTACTS",
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
     ]:
@@ -134,6 +136,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(NativeScreenSharePlugin.class);
         registerPlugin(NativeProximityPlugin.class);
+        registerPlugin(NativeContactsPlugin.class);
         super.onCreate(savedInstanceState);
 
         updaterPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -581,6 +584,192 @@ public class MainActivity extends BridgeActivity {
 ''')
 
 
+
+
+contacts_plugin = Path(
+    "android/app/src/main/java/ru/svoi/mobile/NativeContactsPlugin.java"
+)
+contacts_plugin.write_text(r'''package ru.svoi.mobile;
+
+import android.Manifest;
+import android.database.Cursor;
+import android.provider.ContactsContract;
+
+import com.getcapacitor.JSArray;
+import com.getcapacitor.JSObject;
+import com.getcapacitor.PermissionState;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HashSet;
+import java.util.Set;
+
+@CapacitorPlugin(
+    name = "NativeContacts",
+    permissions = {
+        @Permission(
+            alias = "contacts",
+            strings = {Manifest.permission.READ_CONTACTS}
+        )
+    }
+)
+public class NativeContactsPlugin extends Plugin {
+    @PluginMethod
+    public void isAvailable(PluginCall call) {
+        JSObject result = new JSObject();
+        result.put("available", true);
+        result.put(
+            "granted",
+            getPermissionState("contacts") == PermissionState.GRANTED
+        );
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void readHashedContacts(PluginCall call) {
+        if (getPermissionState("contacts") != PermissionState.GRANTED) {
+            requestPermissionForAlias(
+                "contacts",
+                call,
+                "contactsPermissionCallback"
+            );
+            return;
+        }
+        readContacts(call);
+    }
+
+    @PermissionCallback
+    private void contactsPermissionCallback(PluginCall call) {
+        if (getPermissionState("contacts") != PermissionState.GRANTED) {
+            call.reject("Доступ к контактам не разрешён");
+            return;
+        }
+        readContacts(call);
+    }
+
+    private void readContacts(PluginCall call) {
+        JSArray contacts = new JSArray();
+        Set<String> seenHashes = new HashSet<>();
+        Cursor cursor = null;
+
+        try {
+            cursor = getContext().getContentResolver().query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                new String[] {
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    ContactsContract.CommonDataKinds.Phone.NUMBER
+                },
+                null,
+                null,
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
+            );
+
+            if (cursor != null) {
+                int nameIndex = cursor.getColumnIndex(
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+                );
+                int numberIndex = cursor.getColumnIndex(
+                    ContactsContract.CommonDataKinds.Phone.NUMBER
+                );
+
+                while (cursor.moveToNext()) {
+                    String name = nameIndex >= 0
+                        ? cursor.getString(nameIndex)
+                        : "";
+                    String number = numberIndex >= 0
+                        ? cursor.getString(numberIndex)
+                        : "";
+
+                    String digits = normalizePhone(number);
+                    if (digits == null) {
+                        continue;
+                    }
+
+                    String hash = phoneHash(digits);
+                    if (hash == null || !seenHashes.add(hash)) {
+                        continue;
+                    }
+
+                    JSObject item = new JSObject();
+                    item.put("name", name == null ? "" : name);
+                    item.put("hash", hash);
+                    item.put(
+                        "last4",
+                        digits.substring(Math.max(0, digits.length() - 4))
+                    );
+                    contacts.put(item);
+                }
+            }
+
+            JSObject result = new JSObject();
+            result.put("contacts", contacts);
+            result.put("count", contacts.length());
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject(
+                error.getMessage() != null
+                    ? error.getMessage()
+                    : "Не удалось прочитать телефонную книгу"
+            );
+        } finally {
+            if (cursor != null) {
+                try {
+                    cursor.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private String normalizePhone(String rawValue) {
+        if (rawValue == null) {
+            return null;
+        }
+
+        String raw = rawValue.trim();
+        String digits = raw.replaceAll("\\D", "");
+
+        if (raw.startsWith("+")) {
+            // Already international.
+        } else if (digits.startsWith("00")) {
+            digits = digits.substring(2);
+        } else if (digits.length() == 11 && digits.startsWith("8")) {
+            digits = "7" + digits.substring(1);
+        } else if (digits.length() == 10) {
+            // Default for the current Russian-language deployment.
+            digits = "7" + digits;
+        }
+
+        if (digits.length() < 8 || digits.length() > 15) {
+            return null;
+        }
+        return digits;
+    }
+
+    private String phoneHash(String digits) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = digest.digest(
+                ("svoi-phone-v1:" + digits)
+                    .getBytes(StandardCharsets.UTF_8)
+            );
+            StringBuilder out = new StringBuilder(bytes.length * 2);
+            for (byte value : bytes) {
+                out.append(String.format("%02x", value & 0xff));
+            }
+            return out.toString();
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+}
+''')
 
 proximity_plugin = Path(
     "android/app/src/main/java/ru/svoi/mobile/NativeProximityPlugin.java"
