@@ -344,10 +344,19 @@ public class MainActivity extends BridgeActivity {
         }
 
         String path = intent.getStringExtra("svoi_url");
+        boolean openActiveCall = intent.getBooleanExtra(
+            "svoi_open_active_call",
+            false
+        );
+
         if (path != null && path.startsWith("/") && bridge != null) {
-            bridge.getWebView().post(() ->
-                bridge.getWebView().loadUrl(APP_URL + path)
-            );
+            final String targetUrl = APP_URL + path;
+            bridge.getWebView().post(() -> {
+                bridge.getWebView().loadUrl(targetUrl);
+                if (openActiveCall) {
+                    bridge.getWebView().requestFocus();
+                }
+            });
         }
     }
 
@@ -1229,23 +1238,6 @@ public class CallActionReceiver extends BroadcastReceiver {
             return;
         }
 
-        if ("ru.svoi.mobile.ACCEPT_CALL".equals(action)) {
-            String separator = path.contains("?") ? "&" : "?";
-            Intent open = new Intent(context, MainActivity.class);
-            open.addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK
-                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    | Intent.FLAG_ACTIVITY_SINGLE_TOP
-            );
-            open.putExtra(
-                "svoi_url",
-                path + separator + "native_accept=1"
-            );
-            open.putExtra("svoi_incoming_call", true);
-            context.startActivity(open);
-            return;
-        }
-
         if (!"ru.svoi.mobile.REJECT_CALL".equals(action)) {
             return;
         }
@@ -1443,17 +1435,28 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
             );
 
         if (isCall) {
-            Intent acceptIntent = new Intent(this, CallActionReceiver.class);
-            acceptIntent.setAction("ru.svoi.mobile.ACCEPT_CALL");
-            acceptIntent.putExtra("svoi_url", url);
-            acceptIntent.putExtra("notification_id", notificationId);
+            String acceptUrl = url;
+            if (acceptUrl != null && !acceptUrl.isEmpty()) {
+                String separator = acceptUrl.contains("?") ? "&" : "?";
+                acceptUrl = acceptUrl + separator + "native_accept=1";
+            }
+
+            Intent acceptIntent = new Intent(this, MainActivity.class);
+            acceptIntent.addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP
+            );
+            acceptIntent.putExtra("svoi_url", acceptUrl);
+            acceptIntent.putExtra("svoi_incoming_call", true);
+            acceptIntent.putExtra("svoi_open_active_call", true);
 
             Intent declineIntent = new Intent(this, CallActionReceiver.class);
             declineIntent.setAction("ru.svoi.mobile.REJECT_CALL");
             declineIntent.putExtra("svoi_url", url);
             declineIntent.putExtra("notification_id", notificationId);
 
-            PendingIntent acceptPendingIntent = PendingIntent.getBroadcast(
+            PendingIntent acceptPendingIntent = PendingIntent.getActivity(
                 this,
                 notificationId ^ 0x13579BDF,
                 acceptIntent,
