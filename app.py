@@ -3255,7 +3255,7 @@ async def delete_group_message(
         """SELECT id,sender_id,deleted_at
            FROM group_messages
            WHERE id=? AND group_id=?""",
-        (user["id"], message_id, group_id),
+        (message_id, group_id),
     ).fetchone()
     if not row:
         raise HTTPException(404, "Сообщение не найдено")
