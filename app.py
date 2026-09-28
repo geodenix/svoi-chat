@@ -2301,6 +2301,7 @@ async def send_web_push(
     url: str = "/",
     tag: str = "svoi",
     force: bool = False,
+    silent: bool = False,
 ):
     stats = {
         "configured": push_configured(),
@@ -2319,6 +2320,7 @@ async def send_web_push(
            FROM push_subscriptions WHERE user_id=?""",
         (user_id,),
     ).fetchall()
+    unread_count = unread_count_for_user(conn, user_id)
     conn.close()
 
     stats["attempted"] = len(rows)
@@ -2332,6 +2334,8 @@ async def send_web_push(
             "url": url,
             "tag": tag,
             "force": force,
+            "silent": silent,
+            "unread_count": unread_count,
         },
         ensure_ascii=False,
     )
@@ -2948,6 +2952,12 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         preview,
         "/",
         f"user-{user['id']}",
+        silent=is_chat_muted(
+            conn,
+            data.recipient_id,
+            "user",
+            user["id"],
+        ),
     )
     return msg
 
@@ -3215,6 +3225,12 @@ async def forward_message(
             "↪ " + preview,
             "/",
             f"user-{user['id']}",
+            silent=is_chat_muted(
+                conn,
+                data.target_chat_id,
+                "user",
+                user["id"],
+            ),
         )
         return msg
 
@@ -3301,6 +3317,12 @@ async def forward_message(
                 ),
                 "/",
                 f"group-{data.target_chat_id}",
+                silent=is_chat_muted(
+                    conn,
+                    recipient_id,
+                    "group",
+                    data.target_chat_id,
+                ),
             )
 
     return msg
@@ -3961,6 +3983,12 @@ async def send_group_message(
                     ),
                     "/",
                     f"group-{group_id}",
+                    silent=is_chat_muted(
+                        conn,
+                        recipient_id,
+                        "group",
+                        group_id,
+                    ),
                 )
     return msg
 
