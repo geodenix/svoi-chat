@@ -1599,8 +1599,71 @@ def blocked_by_user(conn, blocker_id: int, blocked_id: int) -> bool:
     )
 
 
+@app.post("/api/chat-mute")
+def set_chat_mute(
+    data: ChatMuteIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    if data.chat_type == "user":
+        if data.chat_id == user["id"]:
+            raise HTTPException(400, "Нельзя изменить уведомления для самого себя")
+        if not conn.execute(
+            "SELECT 1 FROM users WHERE id=?",
+            (data.chat_id,),
+        ).fetchone():
+            raise HTTPException(404, "Пользователь не найден")
+    else:
+        if not group_for_user(conn, data.chat_id, user["id"]):
+            raise HTTPException(404, "Группа не найдена")
+
+    if data.duration == "off":
+        conn.execute(
+            "DELETE FROM chat_mutes WHERE user_id=? AND chat_type=? AND chat_id=?",
+            (user["id"], data.chat_type, data.chat_id),
+        )
+    else:
+        muted_until = None
+        if data.duration == "1h":
+            muted_until = (
+                datetime.now(timezone.utc) + timedelta(hours=1)
+            ).isoformat()
+        elif data.duration == "8h":
+            muted_until = (
+                datetime.now(timezone.utc) + timedelta(hours=8)
+            ).isoformat()
+
+        conn.execute(
+            """INSERT INTO chat_mutes(
+                 user_id,chat_type,chat_id,muted_until,updated_at
+               ) VALUES(?,?,?,?,?)
+               ON CONFLICT(user_id,chat_type,chat_id) DO UPDATE SET
+                 muted_until=excluded.muted_until,
+                 updated_at=excluded.updated_at""",
+            (
+                user["id"],
+                data.chat_type,
+                data.chat_id,
+                muted_until,
+                now_iso(),
+            ),
+        )
+    conn.commit()
+    return {
+        "chat_type": data.chat_type,
+        "chat_id": data.chat_id,
+        **chat_mute_state(
+            conn,
+            user["id"],
+            data.chat_type,
+            data.chat_id,
+        ),
+    }
+
+
 @app.get("/api/users")
 def users(user=Depends(current_user), conn=Depends(db)):
+    now = now_iso()
     rows = conn.execute(
         """SELECT u.id,u.username,u.display_name,u.last_seen_at,
                   a.stored_name AS avatar_stored_name,
@@ -1611,7 +1674,28 @@ def users(user=Depends(current_user), conn=Depends(db)):
                   EXISTS(
                     SELECT 1 FROM user_blocks b
                     WHERE b.blocker_id=? AND b.blocked_id=u.id
-                  ) AS blocked_by_me
+                  ) AS blocked_by_me,
+                  (
+                    SELECT COUNT(*) FROM messages incoming
+                    WHERE incoming.sender_id=u.id
+                      AND incoming.recipient_id=?
+                      AND incoming.read_at IS NULL
+                      AND NOT EXISTS(
+                        SELECT 1 FROM message_hidden_by_user mh
+                        WHERE mh.message_id=incoming.id AND mh.user_id=?
+                      )
+                  ) AS unread_count,
+                  EXISTS(
+                    SELECT 1 FROM chat_mutes cm
+                    WHERE cm.user_id=? AND cm.chat_type='user' AND cm.chat_id=u.id
+                      AND (cm.muted_until IS NULL OR cm.muted_until>?)
+                  ) AS muted,
+                  (
+                    SELECT cm.muted_until FROM chat_mutes cm
+                    WHERE cm.user_id=? AND cm.chat_type='user' AND cm.chat_id=u.id
+                      AND (cm.muted_until IS NULL OR cm.muted_until>?)
+                    LIMIT 1
+                  ) AS muted_until
            FROM users u
            LEFT JOIN uploads a ON a.id=u.avatar_id
            WHERE u.id<>?
@@ -1633,6 +1717,12 @@ def users(user=Depends(current_user), conn=Depends(db)):
             user["id"],
             user["id"],
             user["id"],
+            now,
+            user["id"],
+            now,
+            user["id"],
+            user["id"],
+            user["id"],
             user["id"],
         ),
     ).fetchall()
@@ -1643,10 +1733,12 @@ def users(user=Depends(current_user), conn=Depends(db)):
             "last_seen_at": r["last_seen_at"],
             "in_contacts": bool(r["in_contacts"]),
             "blocked_by_me": bool(r["blocked_by_me"]),
+            "unread_count": int(r["unread_count"] or 0),
+            "muted": bool(r["muted"]),
+            "muted_until": r["muted_until"],
         }
         for r in rows
     ]
-
 
 @app.get("/api/users/search")
 def search_user(
@@ -3229,11 +3321,38 @@ def group_for_user(conn, group_id: int, user_id: int):
 
 @app.get("/api/groups")
 def get_groups(user=Depends(current_user), conn=Depends(db)):
+    now = now_iso()
     rows = conn.execute(
         """SELECT g.id,g.name,g.owner_id,g.created_at,
                   ga.stored_name AS avatar_stored_name,
                   mine.is_admin AS is_admin,
-                  COUNT(gm2.user_id) AS member_count
+                  COUNT(DISTINCT gm2.user_id) AS member_count,
+                  (
+                    SELECT COUNT(*) FROM group_messages unread
+                    WHERE unread.group_id=g.id
+                      AND unread.sender_id<>?
+                      AND unread.deleted_at IS NULL
+                      AND unread.created_at>=mine.joined_at
+                      AND NOT EXISTS(
+                        SELECT 1 FROM group_message_reads gr
+                        WHERE gr.message_id=unread.id AND gr.user_id=?
+                      )
+                      AND NOT EXISTS(
+                        SELECT 1 FROM group_message_hidden_by_user gh
+                        WHERE gh.message_id=unread.id AND gh.user_id=?
+                      )
+                  ) AS unread_count,
+                  EXISTS(
+                    SELECT 1 FROM chat_mutes cm
+                    WHERE cm.user_id=? AND cm.chat_type='group' AND cm.chat_id=g.id
+                      AND (cm.muted_until IS NULL OR cm.muted_until>?)
+                  ) AS muted,
+                  (
+                    SELECT cm.muted_until FROM chat_mutes cm
+                    WHERE cm.user_id=? AND cm.chat_type='group' AND cm.chat_id=g.id
+                      AND (cm.muted_until IS NULL OR cm.muted_until>?)
+                    LIMIT 1
+                  ) AS muted_until
            FROM chat_groups g
            JOIN group_members mine
              ON mine.group_id=g.id AND mine.user_id=?
@@ -3241,10 +3360,18 @@ def get_groups(user=Depends(current_user), conn=Depends(db)):
            LEFT JOIN uploads ga ON ga.id=g.avatar_id
            GROUP BY g.id
            ORDER BY g.id DESC""",
-        (user["id"],),
+        (
+            user["id"],
+            user["id"],
+            user["id"],
+            user["id"],
+            now,
+            user["id"],
+            now,
+            user["id"],
+        ),
     ).fetchall()
     return [group_json(r) for r in rows]
-
 
 @app.post("/api/groups")
 async def create_group(data: GroupCreateIn, user=Depends(current_user), conn=Depends(db)):
