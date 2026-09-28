@@ -212,6 +212,13 @@ def init_db():
       ON call_history(caller_id, id DESC);
     CREATE INDEX IF NOT EXISTS idx_call_history_callee
       ON call_history(callee_id, id DESC);
+    CREATE TABLE IF NOT EXISTS online_samples (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      recorded_at TEXT NOT NULL,
+      online_count INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_online_samples_time
+      ON online_samples(recorded_at);
     """)
     for table in ("messages", "group_messages"):
         columns = {
@@ -595,6 +602,58 @@ def me(user=Depends(current_user)):
     return data
 
 
+def record_online_sample(conn=None) -> None:
+    owns_conn = conn is None
+    if owns_conn:
+        conn = connect_db()
+    try:
+        online_count = sum(
+            1 for sockets in connections.values() if sockets
+        )
+        recorded_at = now_iso()
+        conn.execute(
+            "INSERT INTO online_samples(recorded_at,online_count) VALUES(?,?)",
+            (recorded_at, online_count),
+        )
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=31)
+        ).isoformat()
+        conn.execute(
+            "DELETE FROM online_samples WHERE recorded_at<?",
+            (cutoff,),
+        )
+        conn.commit()
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def _parse_stat_time(value: str | None):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _bucket_counts(rows, start, step, bucket_count):
+    values = [0 for _ in range(bucket_count)]
+    seconds = step.total_seconds()
+    for row in rows:
+        value = row[0] if not isinstance(row, sqlite3.Row) else row[0]
+        dt = _parse_stat_time(value)
+        if dt is None:
+            continue
+        index = int((dt - start).total_seconds() // seconds)
+        if 0 <= index < bucket_count:
+            values[index] += 1
+    return values
+
+
 @app.get("/api/admin/overview")
 def admin_overview(
     user=Depends(require_server_admin),
@@ -725,6 +784,142 @@ def admin_overview(
             "process_rss_bytes": _process_rss_bytes(),
         },
         "services": services,
+    }
+
+
+@app.get("/api/admin/stats")
+def admin_stats(
+    period: str = Query("day", max_length=12),
+    user=Depends(require_server_admin),
+    conn=Depends(db),
+):
+    period = period.strip().lower()
+    if period not in {"day", "week"}:
+        raise HTTPException(400, "Период должен быть day или week")
+
+    now = datetime.now(timezone.utc)
+    if period == "day":
+        bucket_count = 24
+        step = timedelta(hours=1)
+        current = now.replace(minute=0, second=0, microsecond=0)
+        start = current - step * (bucket_count - 1)
+    else:
+        bucket_count = 7
+        step = timedelta(days=1)
+        current = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = current - step * (bucket_count - 1)
+
+    end = current + step
+    start_iso = start.isoformat()
+    end_iso = end.isoformat()
+
+    registrations = _bucket_counts(
+        conn.execute(
+            "SELECT created_at FROM users WHERE created_at>=? AND created_at<?",
+            (start_iso, end_iso),
+        ).fetchall(),
+        start,
+        step,
+        bucket_count,
+    )
+
+    message_rows = conn.execute(
+        """SELECT created_at FROM messages
+           WHERE created_at>=? AND created_at<?
+           UNION ALL
+           SELECT created_at FROM group_messages
+           WHERE created_at>=? AND created_at<?""",
+        (start_iso, end_iso, start_iso, end_iso),
+    ).fetchall()
+    messages = _bucket_counts(
+        message_rows,
+        start,
+        step,
+        bucket_count,
+    )
+
+    calls = _bucket_counts(
+        conn.execute(
+            """SELECT started_at FROM call_history
+               WHERE started_at>=? AND started_at<?""",
+            (start_iso, end_iso),
+        ).fetchall(),
+        start,
+        step,
+        bucket_count,
+    )
+
+    # Add a fresh point so the graph always reflects current live online.
+    record_online_sample(conn)
+
+    previous = conn.execute(
+        """SELECT recorded_at,online_count
+           FROM online_samples
+           WHERE recorded_at<?
+           ORDER BY recorded_at DESC
+           LIMIT 1""",
+        (start_iso,),
+    ).fetchone()
+    samples = conn.execute(
+        """SELECT recorded_at,online_count
+           FROM online_samples
+           WHERE recorded_at>=? AND recorded_at<?
+           ORDER BY recorded_at""",
+        (start_iso, end_iso),
+    ).fetchall()
+
+    current_online = int(previous["online_count"]) if previous else 0
+    online_peak = []
+    sample_index = 0
+    parsed_samples = [
+        (_parse_stat_time(row["recorded_at"]), int(row["online_count"]))
+        for row in samples
+    ]
+    parsed_samples = [
+        item for item in parsed_samples if item[0] is not None
+    ]
+
+    points = []
+    for index in range(bucket_count):
+        bucket_start = start + step * index
+        bucket_end = bucket_start + step
+        peak = current_online
+
+        while sample_index < len(parsed_samples):
+            sample_time, sample_count = parsed_samples[sample_index]
+            if sample_time >= bucket_end:
+                break
+            if sample_time >= bucket_start:
+                current_online = sample_count
+                peak = max(peak, sample_count)
+            sample_index += 1
+
+        online_peak.append(peak)
+        points.append(
+            {
+                "start": bucket_start.isoformat(),
+                "online": peak,
+                "messages": messages[index],
+                "registrations": registrations[index],
+                "calls": calls[index],
+            }
+        )
+
+    return {
+        "period": period,
+        "generated_at": now.isoformat(),
+        "online_tracking_since": (
+            conn.execute(
+                "SELECT MIN(recorded_at) FROM online_samples"
+            ).fetchone()[0]
+        ),
+        "points": points,
+        "totals": {
+            "messages": sum(messages),
+            "registrations": sum(registrations),
+            "calls": sum(calls),
+            "peak_online": max(online_peak, default=0),
+        },
     }
 
 
@@ -3533,6 +3728,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     connections.setdefault(user_id, set()).add(websocket)
 
     if was_offline:
+        try:
+            record_online_sample()
+        except Exception:
+            pass
         presence_conn = connect_db()
         last_seen_row = presence_conn.execute(
             "SELECT last_seen_at FROM users WHERE id=?",
@@ -3799,6 +3998,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         connections.get(user_id, set()).discard(websocket)
         if not connections.get(user_id):
             connections.pop(user_id, None)
+            try:
+                record_online_sample()
+            except Exception:
+                pass
             last_seen_at = now_iso()
             presence_conn = connect_db()
             presence_conn.execute(
