@@ -456,6 +456,62 @@ def phone_lookup_hash(value: str) -> tuple[str, str]:
     return digest, digits[-4:]
 
 
+def send_phone_verification_sms(phone_digits: str, code: str) -> None:
+    if not SMS_RU_API_ID:
+        raise HTTPException(
+            503,
+            "SMS-подтверждение пока не настроено на сервере",
+        )
+
+    payload = {
+        "api_id": SMS_RU_API_ID,
+        "to": phone_digits,
+        "msg": (
+            f"Код подтверждения Свои: {code}. "
+            "Никому не сообщайте этот код."
+        ),
+        "json": "1",
+    }
+    if SMS_RU_FROM:
+        payload["from"] = SMS_RU_FROM
+    if SMS_RU_TEST:
+        payload["test"] = "1"
+
+    request = urllib.request.Request(
+        "https://sms.ru/sms/send",
+        data=urllib.parse.urlencode(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Svoi-Messenger/1.0",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            raw = response.read().decode("utf-8", "replace")
+        result = json.loads(raw)
+    except Exception as error:
+        raise HTTPException(
+            502,
+            "Не удалось связаться с SMS-сервисом",
+        ) from error
+
+    if int(result.get("status_code", 0) or 0) != 100:
+        raise HTTPException(
+            502,
+            "SMS-сервис отклонил отправку кода",
+        )
+
+    sms_info = (result.get("sms") or {}).get(phone_digits) or {}
+    if int(sms_info.get("status_code", 0) or 0) != 100:
+        message = str(
+            sms_info.get("status_text")
+            or "SMS не принято к отправке"
+        )
+        raise HTTPException(502, message)
+
+
 def make_session(conn, user_id: int) -> str:
     token = secrets.token_urlsafe(32)
     conn.execute(
@@ -606,9 +662,17 @@ class PasswordRecoverIn(BaseModel):
     new_password: str = Field(min_length=6, max_length=128)
 
 
-class PhoneLinkIn(BaseModel):
+class PhoneSmsRequestIn(BaseModel):
     phone: str = Field(min_length=8, max_length=40)
     current_password: str = Field(min_length=6, max_length=128)
+
+
+class PhoneSmsVerifyIn(BaseModel):
+    code: str = Field(
+        min_length=6,
+        max_length=6,
+        pattern=r"^[0-9]{6}$",
+    )
 
 
 class PhoneUnlinkIn(BaseModel):
