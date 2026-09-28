@@ -151,18 +151,11 @@ public class MainActivity extends BridgeActivity {
     }
 
     private int currentVersionCode() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                return (int) getPackageManager()
-                    .getPackageInfo(getPackageName(), 0)
-                    .getLongVersionCode();
-            }
-            return getPackageManager()
-                .getPackageInfo(getPackageName(), 0)
-                .versionCode;
-        } catch (Exception ignored) {
-            return 1;
-        }
+        return BuildConfig.VERSION_CODE;
+    }
+
+    private String currentVersionName() {
+        return BuildConfig.VERSION_NAME;
     }
 
     private void registerDownloadReceiver() {
@@ -279,7 +272,12 @@ public class MainActivity extends BridgeActivity {
                     return;
                 }
 
-                if (latestCode <= currentVersionCode()) {
+                int installedCode = currentVersionCode();
+                if (latestCode <= installedCode) {
+                    updaterPrefs.edit()
+                        .remove(PREF_DOWNLOAD_ID)
+                        .remove(PREF_PENDING_INSTALL)
+                        .apply();
                     return;
                 }
 
