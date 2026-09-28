@@ -244,6 +244,14 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_chat_mutes_user
       ON chat_mutes(user_id, chat_type, chat_id);
+    CREATE TABLE IF NOT EXISTS android_push_tokens (
+      token TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_android_push_tokens_user
+      ON android_push_tokens(user_id);
     CREATE TABLE IF NOT EXISTS push_subscriptions (
       endpoint TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -681,6 +689,10 @@ class ChatMuteIn(BaseModel):
     chat_type: str = Field(pattern=r"^(user|group)$")
     chat_id: int = Field(gt=0)
     duration: str = Field(pattern=r"^(1h|8h|forever|off)$")
+
+
+class AndroidPushTokenIn(BaseModel):
+    token: str = Field(min_length=20, max_length=4096)
 
 
 class PushKeysIn(BaseModel):
@@ -2222,6 +2234,45 @@ def push_public_key(user=Depends(current_user)):
     }
 
 
+@app.post("/api/push/android/register")
+def register_android_push(
+    data: AndroidPushTokenIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    token = data.token.strip()
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO android_push_tokens(
+             token,user_id,created_at,updated_at
+           ) VALUES(?,?,?,?)
+           ON CONFLICT(token) DO UPDATE SET
+             user_id=excluded.user_id,
+             updated_at=excluded.updated_at""",
+        (token, user["id"], now, now),
+    )
+    conn.commit()
+    count = conn.execute(
+        "SELECT COUNT(*) FROM android_push_tokens WHERE user_id=?",
+        (user["id"],),
+    ).fetchone()[0]
+    return {"ok": True, "android_tokens": int(count)}
+
+
+@app.post("/api/push/android/unregister")
+def unregister_android_push(
+    data: AndroidPushTokenIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    conn.execute(
+        "DELETE FROM android_push_tokens WHERE token=? AND user_id=?",
+        (data.token.strip(), user["id"]),
+    )
+    conn.commit()
+    return {"ok": True}
+
+
 @app.post("/api/push/subscribe")
 def subscribe_push(
     data: PushSubscriptionIn,
@@ -2386,9 +2437,14 @@ def push_status(
         "SELECT COUNT(*) FROM push_subscriptions WHERE user_id=?",
         (user["id"],),
     ).fetchone()[0]
+    android_count = conn.execute(
+        "SELECT COUNT(*) FROM android_push_tokens WHERE user_id=?",
+        (user["id"],),
+    ).fetchone()[0]
     return {
         "configured": push_configured(),
         "subscriptions": count,
+        "android_tokens": int(android_count),
     }
 
 
