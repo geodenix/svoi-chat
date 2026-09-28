@@ -55,6 +55,65 @@ if 'android:name=".ScreenShareService"' not in text:
 
 manifest.write_text(text)
 
+# Replace Capacitor launcher icons with the Svoi messenger logo.
+res_dir = Path("android/app/src/main/res")
+(res_dir / "drawable").mkdir(parents=True, exist_ok=True)
+(res_dir / "mipmap-anydpi").mkdir(parents=True, exist_ok=True)
+(res_dir / "mipmap-anydpi-v26").mkdir(parents=True, exist_ok=True)
+(res_dir / "values").mkdir(parents=True, exist_ok=True)
+
+(res_dir / "values" / "svoi_icon_colors.xml").write_text(r'''<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="svoi_icon_bg">#0757E8</color>
+</resources>
+''')
+
+(res_dir / "drawable" / "svoi_launcher_foreground.xml").write_text(r'''<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="192"
+    android:viewportHeight="192">
+    <path
+        android:fillColor="#18DDF8"
+        android:pathData="M112,57h22c24,0 43,18 43,40v11c0,17 -11,32 -27,39l-1,19 -18,-15h-26c-21,0 -38,-16 -41,-36c11,4 23,7 36,7h31c11,0 20,-8 20,-18V92c0,-10 -9,-18 -20,-18h-19z"/>
+    <path
+        android:fillColor="#F6FCFF"
+        android:pathData="M82,38h20c27,0 49,20 49,45v12c0,25 -22,45 -49,45H70l-28,22 5,-29c-18,-8 -30,-25 -30,-44v-6c0,-25 22,-45 49,-45h16zM83,64H67c-14,0 -25,10 -25,23v4c0,13 11,23 25,23h37c14,0 25,-10 25,-23v-4c0,-13 -11,-23 -25,-23H83z"/>
+</vector>
+''')
+
+(res_dir / "drawable" / "svoi_launcher.xml").write_text(r'''<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="45"
+                android:startColor="#071B60"
+                android:centerColor="#0757E8"
+                android:endColor="#23E9FF"/>
+            <corners android:radius="24dp"/>
+        </shape>
+    </item>
+    <item
+        android:drawable="@drawable/svoi_launcher_foreground"
+        android:gravity="center"/>
+</layer-list>
+''')
+
+for name in ["ic_launcher", "ic_launcher_round"]:
+    (res_dir / "mipmap-anydpi" / f"{name}.xml").write_text(r'''<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/svoi_launcher"/>
+</layer-list>
+''')
+    (res_dir / "mipmap-anydpi-v26" / f"{name}.xml").write_text(r'''<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/svoi_icon_bg"/>
+    <foreground android:drawable="@drawable/svoi_launcher_foreground"/>
+</adaptive-icon>
+''')
+
 gradle = Path("android/app/build.gradle")
 gradle_text = gradle.read_text()
 webrtc_dependency = "implementation 'io.github.webrtc-sdk:android:150.7871.01'"
