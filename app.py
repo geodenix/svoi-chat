@@ -4632,6 +4632,7 @@ def pending_call(
         "call_id": call["call_id"],
         "from_user_id": call["caller_id"],
         "from_name": call["caller_name"],
+        "from_avatar_url": call.get("caller_avatar_url"),
         "video": call["video"],
         "sdp": call["offer_sdp"],
         "ice_candidates": call.get("caller_ice", []),
@@ -4808,6 +4809,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
     user_id = row["id"]
     display_name = row["display_name"]
+    caller_avatar_url = user_json(row).get("avatar_url")
     await websocket.accept()
     was_offline = not bool(connections.get(user_id))
     connections.setdefault(user_id, set()).add(websocket)
@@ -4836,6 +4838,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     "type": "call_offer",
                     "from_user_id": call["caller_id"],
                     "from_name": call["caller_name"],
+                    "from_avatar_url": call.get("caller_avatar_url"),
                     "call_id": call["call_id"],
                     "video": call["video"],
                     "sdp": call["offer_sdp"],
@@ -4963,6 +4966,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 "type": signal_type,
                 "from_user_id": user_id,
                 "from_name": display_name,
+                "from_avatar_url": caller_avatar_url,
                 "call_id": call_id,
             }
 
@@ -5037,6 +5041,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     "call_id": call_id,
                     "caller_id": user_id,
                     "caller_name": display_name,
+                    "caller_avatar_url": caller_avatar_url,
                     "callee_id": target_id,
                     "video": bool(data.get("video", False)),
                     "offer_sdp": payload["sdp"],
