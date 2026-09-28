@@ -233,6 +233,17 @@ def init_db():
       PRIMARY KEY(user_id, chat_type, chat_id),
       CHECK(chat_type IN ('user','group'))
     );
+    CREATE TABLE IF NOT EXISTS chat_mutes (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      chat_type TEXT NOT NULL,
+      chat_id INTEGER NOT NULL,
+      muted_until TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(user_id, chat_type, chat_id),
+      CHECK(chat_type IN ('user','group'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_mutes_user
+      ON chat_mutes(user_id, chat_type, chat_id);
     CREATE TABLE IF NOT EXISTS push_subscriptions (
       endpoint TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -493,6 +504,12 @@ def group_json(row):
         data["member_count"] = row["member_count"]
     if "is_admin" in keys:
         data["is_admin"] = bool(row["is_admin"])
+    if "unread_count" in keys:
+        data["unread_count"] = int(row["unread_count"] or 0)
+    if "muted" in keys:
+        data["muted"] = bool(row["muted"])
+    if "muted_until" in keys:
+        data["muted_until"] = row["muted_until"]
     return data
 
 
@@ -658,6 +675,12 @@ class ForwardMessageIn(BaseModel):
     source_message_id: int
     target_type: str = Field(pattern=r"^(user|group)$")
     target_chat_id: int
+
+
+class ChatMuteIn(BaseModel):
+    chat_type: str = Field(pattern=r"^(user|group)$")
+    chat_id: int = Field(gt=0)
+    duration: str = Field(pattern=r"^(1h|8h|forever|off)$")
 
 
 class PushKeysIn(BaseModel):
@@ -1488,6 +1511,71 @@ def turn_credentials(user=Depends(current_user)):
             },
         ],
     }
+
+
+def chat_mute_state(conn, user_id: int, chat_type: str, chat_id: int) -> dict:
+    row = conn.execute(
+        """SELECT muted_until FROM chat_mutes
+           WHERE user_id=? AND chat_type=? AND chat_id=?""",
+        (user_id, chat_type, chat_id),
+    ).fetchone()
+    if not row:
+        return {"muted": False, "muted_until": None}
+
+    muted_until = row["muted_until"]
+    if muted_until is not None and muted_until <= now_iso():
+        conn.execute(
+            "DELETE FROM chat_mutes WHERE user_id=? AND chat_type=? AND chat_id=?",
+            (user_id, chat_type, chat_id),
+        )
+        conn.commit()
+        return {"muted": False, "muted_until": None}
+
+    return {"muted": True, "muted_until": muted_until}
+
+
+def is_chat_muted(conn, user_id: int, chat_type: str, chat_id: int) -> bool:
+    return bool(
+        conn.execute(
+            """SELECT 1 FROM chat_mutes
+               WHERE user_id=? AND chat_type=? AND chat_id=?
+                 AND (muted_until IS NULL OR muted_until>?)
+               LIMIT 1""",
+            (user_id, chat_type, chat_id, now_iso()),
+        ).fetchone()
+    )
+
+
+def unread_count_for_user(conn, user_id: int) -> int:
+    direct = conn.execute(
+        """SELECT COUNT(*) FROM messages m
+           WHERE m.recipient_id=? AND m.read_at IS NULL
+             AND NOT EXISTS(
+               SELECT 1 FROM message_hidden_by_user mh
+               WHERE mh.message_id=m.id AND mh.user_id=?
+             )""",
+        (user_id, user_id),
+    ).fetchone()[0]
+
+    groups = conn.execute(
+        """SELECT COUNT(*)
+           FROM group_messages gm
+           JOIN group_members member
+             ON member.group_id=gm.group_id AND member.user_id=?
+           WHERE gm.sender_id<>?
+             AND gm.deleted_at IS NULL
+             AND gm.created_at>=member.joined_at
+             AND NOT EXISTS(
+               SELECT 1 FROM group_message_reads gr
+               WHERE gr.message_id=gm.id AND gr.user_id=?
+             )
+             AND NOT EXISTS(
+               SELECT 1 FROM group_message_hidden_by_user gh
+               WHERE gh.message_id=gm.id AND gh.user_id=?
+             )""",
+        (user_id, user_id, user_id, user_id),
+    ).fetchone()[0]
+    return int(direct or 0) + int(groups or 0)
 
 
 def users_blocked(conn, user_a: int, user_b: int) -> bool:
