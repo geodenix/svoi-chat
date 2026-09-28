@@ -39,6 +39,9 @@
 .edit-message-dialog textarea{width:100%;min-height:130px;max-height:48dvh;resize:vertical;border:1px solid #354b68;background:#0f1d30;color:#fff;border-radius:14px;padding:12px 13px;margin:12px 0;line-height:1.4}
 .edit-message-dialog .edit-hint{font-size:12px;color:#8fa3be;margin-top:4px}
 .edited-label{font-size:10px;color:#9db1ca;white-space:nowrap}
+.message-actions-dialog{width:min(92vw,430px);padding:0;overflow:hidden;border-radius:20px}.message-actions-head{padding:16px 16px 12px;border-bottom:1px solid #2a3e59}.message-actions-head strong{display:block;font-size:15px}.message-actions-head small{display:block;color:#91a5bf;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.message-actions-list{display:grid;padding:8px}.message-actions-list button{border:0;background:transparent;color:#fff;border-radius:12px;padding:13px 12px;text-align:left;font-size:15px;font-weight:700;display:flex;align-items:center;gap:10px}.message-actions-list button:hover,.message-actions-list button:active{background:#1d334f}.message-actions-list button.danger{color:#ffb8bd}.message-actions-list button.hidden{display:none}.message-actions-close{margin:0 8px 8px;border:1px solid #304866;background:#172a42;color:#dce8f8;border-radius:12px;padding:11px;font-weight:750}
+.seen-dialog{width:min(92vw,460px);padding:0;overflow:hidden;border-radius:20px}.seen-list{display:grid;gap:7px;padding:12px;max-height:62dvh;overflow:auto}.seen-entry{display:flex;align-items:center;gap:10px;background:#17283f;border-radius:13px;padding:10px 12px}.seen-copy{min-width:0;flex:1}.seen-copy strong,.seen-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.seen-copy small{color:#8fa3be;margin-top:2px}.seen-empty{padding:24px;text-align:center;color:#8fa3be}
+.bubble{cursor:pointer}
 .menu-toggle{width:44px;height:44px;border:0;border-radius:13px;background:#17283f;color:#fff;font-size:24px;display:grid;place-items:center;flex:0 0 44px}
 .drawer-backdrop{position:fixed;inset:0;z-index:1600;background:#0008;opacity:0;pointer-events:none;transition:opacity .2s ease}
 .drawer-backdrop.open{opacity:1;pointer-events:auto}
@@ -205,6 +208,33 @@ body.drawer-open{overflow:hidden}
   </div>
 </dialog>
 
+<dialog id="messageActionsDialog" class="message-actions-dialog">
+  <div class="message-actions-head">
+    <strong id="messageActionsTitle">Сообщение</strong>
+    <small id="messageActionsPreview"></small>
+  </div>
+  <div class="message-actions-list">
+    <button id="messageActionReply" type="button">↩️ Ответить</button>
+    <button id="messageActionEdit" type="button">✏️ Редактировать</button>
+    <button id="messageActionForward" type="button">↗️ Переслать</button>
+    <button id="messageActionSeen" type="button">👁 Кто просмотрел</button>
+    <button id="messageActionDeleteMe" class="danger" type="button">🗑 Удалить у меня</button>
+    <button id="messageActionDeleteAll" class="danger" type="button">🗑 Удалить для всех</button>
+  </div>
+  <button id="closeMessageActions" class="message-actions-close" type="button">Отмена</button>
+</dialog>
+
+<dialog id="seenByDialog" class="seen-dialog">
+  <div class="chat-menu-head">
+    <div>
+      <h2>Кто просмотрел</h2>
+      <small id="seenByCount" class="muted"></small>
+    </div>
+    <button id="closeSeenBy" class="chat-menu-close" type="button" aria-label="Закрыть">×</button>
+  </div>
+  <div id="seenByList" class="seen-list"></div>
+</dialog>
+
 <dialog id="editMessageDialog" class="edit-message-dialog">
   <div class="chat-menu-head">
     <div>
@@ -353,7 +383,7 @@ const $=id=>document.getElementById(id);
 let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],callHistory=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false,foundUser=null;
 let chatBackgroundRequest=0,currentChatBackgroundUrl='';
 let currentMessages=[],typingStopTimer=null,lastTypingSentAt=0;
-let forwardSource=null,replySource=null,editSource=null;
+let forwardSource=null,replySource=null,editSource=null,messageActionSource=null;
 const incomingTyping=new Map();
 let messageRecorder=null,messageRecordStream=null,messageRecordChunks=[],messageRecordKind=null,messageRecordTimer=null,messageRecordStartedAt=0,messageRecordBlob=null,messageRecordMime='',messageRecordTarget=null,messageRecordAction=null,messageRecordObjectUrl='';
 let messageRecordFacing='user';
@@ -1511,6 +1541,8 @@ function replaceMessageNode(message){
 function removeGroupMessageNode(messageId){
   const id=Number(messageId);
   currentMessages=currentMessages.filter(item=>Number(item.id)!==id);
+  if(Number(replySource?.id)===id)clearReplySource();
+  if(Number(messageActionSource?.message?.id)===id)messageActionSource=null;
   document.querySelector('.bubble[data-message-id="'+id+'"]')?.remove();
 
   for(const item of currentMessages){
@@ -1855,6 +1887,142 @@ async function saveEditedMessage(){
   }
 }
 
+function closeMessageActions(){
+  messageActionSource=null;
+  if($('messageActionsDialog').open)$('messageActionsDialog').close()
+}
+
+function openMessageActions(message){
+  if(!active||!message||message.deleted)return;
+  messageActionSource={
+    type:active.type,
+    chat_id:Number(active.data.id),
+    message
+  };
+
+  $('messageActionsTitle').textContent=messageSenderName(message);
+  $('messageActionsPreview').textContent=messagePreviewText(message);
+
+  const mine=Number(message.sender_id)===Number(me?.id);
+  $('messageActionEdit').classList.toggle('hidden',!mine);
+  $('messageActionDeleteAll').classList.toggle(
+    'hidden',
+    !(mine||(active.type==='group'&&message.can_delete))
+  );
+
+  $('messageActionsDialog').showModal()
+}
+
+async function deleteMessageForMe(){
+  const source=messageActionSource;
+  if(!source)return;
+  const messageId=Number(source.message.id);
+  const path=source.type==='group'
+    ?'/api/groups/'+source.chat_id+'/messages/'+messageId+'/me'
+    :'/api/messages/'+messageId+'/me';
+
+  try{
+    await api(path,{method:'DELETE'});
+    closeMessageActions();
+    if(
+      active
+      && active.type===source.type
+      && Number(active.data.id)===source.chat_id
+    )removeGroupMessageNode(messageId)
+  }catch(err){
+    alert(err.message||'Не удалось удалить сообщение')
+  }
+}
+
+async function deleteMessageForAllFromMenu(){
+  const source=messageActionSource;
+  if(!source)return;
+  const message=source.message;
+  const ok=confirm('Удалить это сообщение для всех?');
+  if(!ok)return;
+  closeMessageActions();
+
+  if(source.type==='group'){
+    if(
+      active?.type==='group'
+      && Number(active.data.id)===source.chat_id
+    ){
+      try{
+        const result=await api(
+          '/api/groups/'+source.chat_id+'/messages/'+message.id,
+          {method:'DELETE'}
+        );
+        applyGroupMessageDeleted(
+          source.chat_id,
+          message.id,
+          result.deleted_at,
+          !!result.show_deleted_notice
+        )
+      }catch(err){
+        alert(err.message||'Не удалось удалить сообщение')
+      }
+    }
+    return
+  }
+
+  try{
+    await api('/api/messages/'+message.id+'/all',{method:'DELETE'});
+    if(
+      active?.type==='user'
+      && Number(active.data.id)===source.chat_id
+    )removeGroupMessageNode(message.id)
+  }catch(err){
+    alert(err.message||'Не удалось удалить сообщение для всех')
+  }
+}
+
+function renderSeenBy(viewers){
+  const box=$('seenByList');box.replaceChildren();
+  const items=Array.isArray(viewers)?viewers:[];
+  $('seenByCount').textContent='Просмотрели: '+items.length;
+
+  if(!items.length){
+    const empty=document.createElement('div');
+    empty.className='seen-empty';
+    empty.textContent='Пока никто не просмотрел';
+    box.append(empty);
+    return
+  }
+
+  for(const viewer of items){
+    const row=document.createElement('div');row.className='seen-entry';
+    const avatar=document.createElement('span');avatar.className='avatar';
+    setAvatar(avatar,viewer);
+    const copy=document.createElement('div');copy.className='seen-copy';
+    const name=document.createElement('strong');
+    name.textContent=Number(viewer.id)===Number(me?.id)?'Вы':viewer.display_name;
+    const meta=document.createElement('small');
+    meta.textContent='@'+viewer.username+' · '+(
+      viewer.read_at
+        ?new Date(viewer.read_at).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})
+        :'просмотрено'
+    );
+    copy.append(name,meta);row.append(avatar,copy);box.append(row)
+  }
+}
+
+async function openSeenBy(){
+  const source=messageActionSource;
+  if(!source)return;
+  const path=source.type==='group'
+    ?'/api/groups/'+source.chat_id+'/messages/'+source.message.id+'/seen-by'
+    :'/api/messages/'+source.message.id+'/seen-by';
+
+  try{
+    const result=await api(path);
+    if($('messageActionsDialog').open)$('messageActionsDialog').close();
+    renderSeenBy(result.viewers||[]);
+    $('seenByDialog').showModal()
+  }catch(err){
+    alert(err.message||'Не удалось получить просмотры')
+  }
+}
+
 function renderForwardTargets(){
   const box=$('forwardList');
   box.replaceChildren();
@@ -1941,6 +2109,16 @@ async function forwardMessageTo(target){
 
 function msgNode(m){
   const d=document.createElement('div');d.className='bubble'+(m.sender_id===me.id?' mine':'');d.dataset.messageId=String(m.id);d._message=m;
+  d.addEventListener('click',event=>{
+    if(m.deleted)return;
+    if(event.target.closest('button,a,audio,video,input,textarea,.circle-player'))return;
+    openMessageActions(m)
+  });
+  d.addEventListener('contextmenu',event=>{
+    if(m.deleted)return;
+    event.preventDefault();
+    openMessageActions(m)
+  });
   if(active?.type==='group'&&m.mentioned_me&&m.sender_id!==me.id&&!m.deleted)d.classList.add('mentioned-me');
   if(active?.type==='group'&&m.sender_id!==me.id){const s=document.createElement('div');s.className='sender';s.textContent=m.sender_name||'Участник';d.append(s)}
   if(active?.type==='group'&&m.mentioned_me&&m.sender_id!==me.id&&!m.deleted){
@@ -2072,53 +2250,13 @@ function msgNode(m){
     }
   }
   const meta=document.createElement('div');meta.className='meta';
-  if(!m.deleted){
-    if(Number(m.sender_id)===Number(me?.id)){
-      const edit=document.createElement('button');
-      edit.className='message-action';
-      edit.type='button';
-      edit.textContent='✎';
-      edit.title='Редактировать';
-      edit.setAttribute('aria-label','Редактировать сообщение');
-      edit.onclick=event=>{event.stopPropagation();openEditMessage(m)};
-      meta.append(edit)
-    }
-
-    const reply=document.createElement('button');
-    reply.className='message-action';
-    reply.type='button';
-    reply.textContent='↩';
-    reply.title='Ответить';
-    reply.setAttribute('aria-label','Ответить на сообщение');
-    reply.onclick=event=>{event.stopPropagation();setReplySource(m)};
-    meta.append(reply);
-
-    const forward=document.createElement('button');
-    forward.className='message-action';
-    forward.type='button';
-    forward.textContent='↗';
-    forward.title='Переслать';
-    forward.setAttribute('aria-label','Переслать сообщение');
-    forward.onclick=event=>{event.stopPropagation();openForwardDialog(m)};
-    meta.append(forward)
-  }
-  if(active?.type==='group'){
-    if(m.deleted&&m.can_restore){
-      const restore=document.createElement('button');
-      restore.className='restore-action';
-      restore.type='button';
-      restore.textContent='↩ Восстановить';
-      restore.onclick=event=>{event.stopPropagation();restoreGroupMessage(m)};
-      meta.append(restore)
-    }else if(!m.deleted&&m.can_delete){
-      const del=document.createElement('button');
-      del.className='message-action danger';
-      del.type='button';
-      del.textContent='🗑';
-      del.title='Удалить для всех';
-      del.onclick=event=>{event.stopPropagation();deleteGroupMessageForAll(m)};
-      meta.append(del)
-    }
+  if(active?.type==='group'&&m.deleted&&m.can_restore){
+    const restore=document.createElement('button');
+    restore.className='restore-action';
+    restore.type='button';
+    restore.textContent='↩ Восстановить';
+    restore.onclick=event=>{event.stopPropagation();restoreGroupMessage(m)};
+    meta.append(restore)
   }
   if(m.edited_at&&!m.deleted){
     const edited=document.createElement('span');
@@ -4491,6 +4629,12 @@ function connectWs(){
       }
       return
     }
+    if(data.type==='message_deleted_all'){
+      if(currentMessages.some(item=>Number(item.id)===Number(data.message_id))){
+        removeGroupMessageNode(data.message_id)
+      }
+      return
+    }
     if(data.type==='read_receipt'){
       if(active?.type==='user'&&data.reader_id===active.data.id){
         for(const id of data.message_ids||[]){
@@ -4507,7 +4651,15 @@ function connectWs(){
         playMessageSound().catch(()=>{});
         vibrateMessage()
       }
-      if(active?.type==='group'&&m.group_id===active.data.id)appendMessage(m);
+      if(active?.type==='group'&&m.group_id===active.data.id){
+        appendMessage(m);
+        if(Number(m.sender_id)!==Number(me?.id)){
+          api(
+            '/api/groups/'+m.group_id+'/messages/'+m.id+'/read',
+            {method:'POST'}
+          ).catch(()=>{})
+        }
+      }
       loadGroups().catch(()=>{})
     }
     if(data.type==='group_message_edited'){
@@ -4618,6 +4770,38 @@ function connectWs(){
   };
   socket.onclose=()=>{if(currentCall||pendingCall)finishCall(false);clearTimeout(retry);if(token)retry=setTimeout(connectWs,2500)}
 }
+
+$('messageActionReply').onclick=()=>{
+  const message=messageActionSource?.message;
+  if(!message)return;
+  closeMessageActions();
+  setReplySource(message)
+};
+$('messageActionEdit').onclick=()=>{
+  const message=messageActionSource?.message;
+  if(!message)return;
+  closeMessageActions();
+  openEditMessage(message)
+};
+$('messageActionForward').onclick=()=>{
+  const message=messageActionSource?.message;
+  if(!message)return;
+  closeMessageActions();
+  openForwardDialog(message)
+};
+$('messageActionSeen').onclick=()=>openSeenBy();
+$('messageActionDeleteMe').onclick=()=>deleteMessageForMe();
+$('messageActionDeleteAll').onclick=()=>deleteMessageForAllFromMenu();
+$('closeMessageActions').onclick=closeMessageActions;
+$('messageActionsDialog').addEventListener('click',event=>{
+  if(event.target===$('messageActionsDialog'))closeMessageActions()
+});
+$('messageActionsDialog').addEventListener('close',()=>{messageActionSource=null});
+
+$('closeSeenBy').onclick=()=>$('seenByDialog').close();
+$('seenByDialog').addEventListener('click',event=>{
+  if(event.target===$('seenByDialog'))$('seenByDialog').close()
+});
 
 $('closeEditMessage').onclick=closeEditMessageDialog;
 $('cancelEditMessage').onclick=closeEditMessageDialog;
