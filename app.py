@@ -103,6 +103,9 @@ def init_db():
       password_hash TEXT NOT NULL,
       salt TEXT NOT NULL,
       recovery_code_hash TEXT,
+      phone_hash TEXT,
+      phone_last4 TEXT,
+      phone_linked_at TEXT,
       created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
@@ -314,6 +317,17 @@ def init_db():
         conn.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT")
     if "recovery_code_hash" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN recovery_code_hash TEXT")
+    if "phone_hash" not in user_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN phone_hash TEXT")
+    if "phone_last4" not in user_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN phone_last4 TEXT")
+    if "phone_linked_at" not in user_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN phone_linked_at TEXT")
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_hash_unique
+           ON users(phone_hash)
+           WHERE phone_hash IS NOT NULL"""
+    )
 
     group_columns = {
         row[1]
@@ -381,6 +395,36 @@ def make_recovery_code() -> str:
         raw[index:index + 4]
         for index in range(0, len(raw), 4)
     )
+
+
+def normalize_phone_digits(value: str) -> str:
+    raw = str(value or "").strip()
+    digits = re.sub(r"\D", "", raw)
+
+    if raw.startswith("+"):
+        pass
+    elif digits.startswith("00"):
+        digits = digits[2:]
+    elif len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    elif len(digits) == 10:
+        # Default for the current Russian-language deployment.
+        digits = "7" + digits
+
+    if not 8 <= len(digits) <= 15:
+        raise HTTPException(
+            400,
+            "Укажи номер в международном формате, например +79991234567",
+        )
+    return digits
+
+
+def phone_lookup_hash(value: str) -> tuple[str, str]:
+    digits = normalize_phone_digits(value)
+    digest = hashlib.sha256(
+        ("svoi-phone-v1:" + digits).encode()
+    ).hexdigest()
+    return digest, digits[-4:]
 
 
 def make_session(conn, user_id: int) -> str:
@@ -531,6 +575,19 @@ class PasswordRecoverIn(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     recovery_code: str = Field(min_length=12, max_length=128)
     new_password: str = Field(min_length=6, max_length=128)
+
+
+class PhoneLinkIn(BaseModel):
+    phone: str = Field(min_length=8, max_length=40)
+    current_password: str = Field(min_length=6, max_length=128)
+
+
+class PhoneUnlinkIn(BaseModel):
+    current_password: str = Field(min_length=6, max_length=128)
+
+
+class PhoneContactSyncIn(BaseModel):
+    hashes: list[str] = Field(default_factory=list)
 
 
 class MessageIn(BaseModel):
@@ -795,6 +852,180 @@ def me(user=Depends(current_user)):
     data = user_json(user)
     data["is_server_admin"] = is_server_admin(user)
     return data
+
+
+@app.get("/api/account/phone")
+def account_phone(
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    row = conn.execute(
+        """SELECT phone_last4,phone_linked_at
+           FROM users
+           WHERE id=?""",
+        (user["id"],),
+    ).fetchone()
+    return {
+        "linked": bool(row and row["phone_last4"]),
+        "last4": row["phone_last4"] if row else None,
+        "linked_at": row["phone_linked_at"] if row else None,
+        "verified": False,
+    }
+
+
+@app.post("/api/account/phone")
+def link_account_phone(
+    data: PhoneLinkIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    row = conn.execute(
+        """SELECT id,password_hash,salt
+           FROM users
+           WHERE id=?""",
+        (user["id"],),
+    ).fetchone()
+    if not row or not verify_password(
+        data.current_password,
+        row["password_hash"],
+        row["salt"],
+    ):
+        raise HTTPException(401, "Неверный текущий пароль")
+
+    phone_hash, last4 = phone_lookup_hash(data.phone)
+    owner = conn.execute(
+        "SELECT id FROM users WHERE phone_hash=? AND id<>?",
+        (phone_hash, user["id"]),
+    ).fetchone()
+    if owner:
+        raise HTTPException(
+            409,
+            "Этот номер уже привязан к другому аккаунту",
+        )
+
+    conn.execute(
+        """UPDATE users
+           SET phone_hash=?,phone_last4=?,phone_linked_at=?
+           WHERE id=?""",
+        (phone_hash, last4, now_iso(), user["id"]),
+    )
+    conn.commit()
+    return {
+        "linked": True,
+        "last4": last4,
+        "verified": False,
+    }
+
+
+@app.delete("/api/account/phone")
+def unlink_account_phone(
+    data: PhoneUnlinkIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    row = conn.execute(
+        """SELECT id,password_hash,salt
+           FROM users
+           WHERE id=?""",
+        (user["id"],),
+    ).fetchone()
+    if not row or not verify_password(
+        data.current_password,
+        row["password_hash"],
+        row["salt"],
+    ):
+        raise HTTPException(401, "Неверный текущий пароль")
+
+    conn.execute(
+        """UPDATE users
+           SET phone_hash=NULL,
+               phone_last4=NULL,
+               phone_linked_at=NULL
+           WHERE id=?""",
+        (user["id"],),
+    )
+    conn.commit()
+    return {"linked": False, "last4": None, "verified": False}
+
+
+@app.post("/api/phone-contacts/sync")
+async def sync_phone_contacts(
+    data: PhoneContactSyncIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    if len(data.hashes) > 5000:
+        raise HTTPException(400, "Слишком много контактов за один раз")
+
+    hashes = []
+    seen = set()
+    for value in data.hashes:
+        item = str(value or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", item):
+            continue
+        if item in seen:
+            continue
+        seen.add(item)
+        hashes.append(item)
+
+    if not hashes:
+        return {"matched": 0, "users": []}
+
+    rows = []
+    for offset in range(0, len(hashes), 400):
+        chunk = hashes[offset:offset + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        query = f"""
+            SELECT u.id,u.username,u.display_name,u.last_seen_at,u.phone_hash,
+                   a.stored_name AS avatar_stored_name
+            FROM users u
+            LEFT JOIN uploads a ON a.id=u.avatar_id
+            WHERE u.id<>?
+              AND u.phone_hash IN ({placeholders})
+        """
+        rows.extend(
+            conn.execute(
+                query,
+                [user["id"], *chunk],
+            ).fetchall()
+        )
+
+    matched = {}
+    for row in rows:
+        if row["id"] in matched:
+            continue
+        matched[row["id"]] = row
+        conn.execute(
+            """INSERT OR IGNORE INTO contacts(
+                 user_id,contact_user_id,created_at
+               ) VALUES(?,?,?)""",
+            (user["id"], row["id"], now_iso()),
+        )
+    conn.commit()
+
+    result = [
+        {
+            **user_json(row),
+            "phone_hash": row["phone_hash"],
+            "online": bool(connections.get(row["id"])),
+            "last_seen_at": row["last_seen_at"],
+            "in_contacts": True,
+            "blocked_by_me": blocked_by_user(
+                conn,
+                user["id"],
+                row["id"],
+            ),
+        }
+        for row in matched.values()
+    ]
+
+    if result:
+        await push(user["id"], {"type": "contacts_updated"})
+
+    return {
+        "matched": len(result),
+        "users": result,
+    }
 
 
 def record_online_sample(conn=None) -> None:
