@@ -352,6 +352,18 @@ def init_db():
         conn.execute("ALTER TABLE users ADD COLUMN phone_linked_at TEXT")
     if "phone_verified_at" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN phone_verified_at TEXT")
+
+    # Legacy phone links created before SMS verification are not trusted.
+    # Pending SMS verification is stored in phone_verifications instead.
+    conn.execute(
+        """UPDATE users
+           SET phone_hash=NULL,
+               phone_last4=NULL,
+               phone_linked_at=NULL
+           WHERE phone_verified_at IS NULL
+             AND phone_hash IS NOT NULL"""
+    )
+
     conn.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_hash_unique
            ON users(phone_hash)
