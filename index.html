@@ -3286,6 +3286,31 @@ function ensureNativeScreenStoppedListener(){
         $('callStatus').textContent='Соединено';
         updatePrivateVideoControls()
       }
+
+      const state=groupCallState;
+      if(state?.nativeScreenSharing){
+        const peerIds=[...(state.nativeScreenPeerKeys?.keys?.()||[])];
+        state.nativeScreenSharing=false;
+        state.screenSharing=false;
+        state.nativeScreenPeerKeys=new Map();
+        for(const userId of peerIds){
+          try{
+            wsSend({
+              type:'native_screen_stop',
+              to_user_id:userId,
+              call_id:'group-'+state.groupId,
+              group_id:state.groupId
+            })
+          }catch{}
+        }
+        if(state.screenRestoreCamera&&!state.cameraOff){
+          state.room.localParticipant.setCameraEnabled(true).catch(()=>{})
+        }
+        state.screenRestoreCamera=false;
+        renderGroupLocalTracks().catch(()=>{});
+        updateGroupScreenShareControls();
+        refreshGroupCount()
+      }
     })
   ).catch(()=>{nativeScreenListenerReady=false})
 }
@@ -3849,9 +3874,21 @@ async function joinGroupCall(groupId,video=false,invite=false){
         detachGroupTrack(track,participant,publication)
       })
       .on(LivekitClient.RoomEvent.ParticipantConnected,(participant)=>{
-        ensureGroupTile(participant,false);refreshGroupCount()
+        ensureGroupTile(participant,false);refreshGroupCount();
+        if(groupCallState?.nativeScreenSharing){
+          sendNativeGroupScreenToParticipant(participant).catch(()=>{})
+        }
       })
       .on(LivekitClient.RoomEvent.ParticipantDisconnected,(participant)=>{
+        const userId=groupParticipantUserId(participant);
+        if(userId&&groupCallState){
+          const key=groupCallState.nativeScreenPeerKeys?.get(userId);
+          if(key){
+            nativeScreenPlugin()?.removePeer?.({peerKey:key}).catch(()=>{});
+            groupCallState.nativeScreenPeerKeys.delete(userId)
+          }
+          closeNativeGroupScreenReceiver(userId,false)
+        }
         $(groupTileId(participant.identity))?.remove();refreshGroupCount()
       })
       .on(LivekitClient.RoomEvent.ActiveSpeakersChanged,(speakers)=>{
@@ -3909,10 +3946,17 @@ async function joinGroupCall(groupId,video=false,invite=false){
 function leaveGroupCall(disconnect=true){
   const state=groupCallState;
   if(state)state.manualLeave=true;
-  groupCallState=null;
-  if(state?.screenSharing){
+  if(state?.nativeScreenSharing){
+    stopNativeGroupScreenShare(state,true).catch(()=>{})
+  }else if(state?.screenSharing){
     try{state.room.localParticipant.setScreenShareEnabled(false).catch(()=>{})}catch{}
   }
+  if(state?.nativeScreenReceivers){
+    for(const userId of [...state.nativeScreenReceivers.keys()]){
+      closeNativeGroupScreenReceiver(userId,false)
+    }
+  }
+  groupCallState=null;
   if(state&&disconnect){
     try{state.room.disconnect()}catch{}
   }
@@ -3975,12 +4019,24 @@ async function toggleGroupScreenShare(){
   const state=groupCallState;
   if(!state)return;
   if(!screenShareSupported()){
-    alert('Кнопка демонстрации экрана доступна, но эта версия Android/браузера не даёт веб-приложению захватывать экран. Для полноценной демонстрации на таком устройстве нужен нативный Android-модуль MediaProjection.');
+    alert('Это устройство не поддерживает демонстрацию экрана.');
     return
   }
   const participant=state.room.localParticipant;
   const button=$('groupScreenShareBtn');
   button.disabled=true;
+
+  if(state.nativeScreenSharing){
+    try{
+      await stopNativeGroupScreenShare(state,true)
+    }catch(err){
+      alert(screenShareErrorMessage(err))
+    }finally{
+      button.disabled=false;
+      updateGroupScreenShareControls()
+    }
+    return
+  }
 
   if(state.screenSharing){
     try{
@@ -3992,6 +4048,18 @@ async function toggleGroupScreenShare(){
       state.screenRestoreCamera=false;
       await renderGroupLocalTracks();
       refreshGroupCount()
+    }catch(err){
+      alert(screenShareErrorMessage(err))
+    }finally{
+      button.disabled=false;
+      updateGroupScreenShareControls()
+    }
+    return
+  }
+
+  if(nativeScreenShareSupported()){
+    try{
+      await startNativeGroupScreenShare(state)
     }catch(err){
       alert(screenShareErrorMessage(err))
     }finally{
@@ -4748,13 +4816,32 @@ function finishCall(notify=true){
 
 async function handleCallSignal(data){
   if(data.type==='native_screen_offer'){
-    await acceptNativePrivateScreenOffer(data);
+    if(data.group_id)await acceptNativeGroupScreenOffer(data);
+    else await acceptNativePrivateScreenOffer(data);
     return
   }
   if(data.type==='native_screen_answer'){
-    if(
-      !data.group_id
-      && currentCall
+    if(data.group_id){
+      const state=groupCallState;
+      const fromId=Number(data.from_user_id);
+      const peerKey=state?.nativeScreenPeerKeys?.get(fromId);
+      if(
+        state
+        && Number(state.groupId)===Number(data.group_id)
+        && state.nativeScreenSharing
+        && peerKey
+      ){
+        try{
+          await nativeScreenPlugin()?.setAnswer?.({
+            peerKey,
+            sdp:data.sdp?.sdp||''
+          })
+        }catch(err){
+          alert(err?.message||'Не удалось подключить демонстрацию экрана')
+        }
+      }
+    }else if(
+      currentCall
       && currentCall.callId===data.call_id
       && currentCall.nativeScreenSharing
       && currentCall.nativeScreenPeerKey
@@ -4771,7 +4858,12 @@ async function handleCallSignal(data){
     return
   }
   if(data.type==='native_screen_stop'){
-    if(!data.group_id&&currentCall&&currentCall.callId===data.call_id){
+    if(data.group_id){
+      if(
+        groupCallState
+        && Number(groupCallState.groupId)===Number(data.group_id)
+      )closeNativeGroupScreenReceiver(Number(data.from_user_id),true)
+    }else if(currentCall&&currentCall.callId===data.call_id){
       closeNativePrivateScreenReceiver(currentCall,true)
     }
     return
