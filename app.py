@@ -102,6 +102,7 @@ def init_db():
       display_name TEXT NOT NULL,
       password_hash TEXT NOT NULL,
       salt TEXT NOT NULL,
+      recovery_code_hash TEXT,
       created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
@@ -311,6 +312,8 @@ def init_db():
         conn.execute("ALTER TABLE users ADD COLUMN avatar_id INTEGER")
     if "last_seen_at" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT")
+    if "recovery_code_hash" not in user_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN recovery_code_hash TEXT")
 
     group_columns = {
         row[1]
@@ -359,6 +362,25 @@ def verify_password(password: str, expected: str, salt: str) -> bool:
 
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def normalize_recovery_code(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", value or "").upper()
+
+
+def recovery_code_hash(value: str) -> str:
+    normalized = normalize_recovery_code(value)
+    return hashlib.sha256(
+        ("svoi-recovery-v1:" + normalized).encode()
+    ).hexdigest()
+
+
+def make_recovery_code() -> str:
+    raw = secrets.token_hex(12).upper()
+    return "-".join(
+        raw[index:index + 4]
+        for index in range(0, len(raw), 4)
+    )
 
 
 def make_session(conn, user_id: int) -> str:
@@ -501,6 +523,16 @@ class LoginIn(BaseModel):
     password: str
 
 
+class RecoveryCodeCreateIn(BaseModel):
+    current_password: str = Field(min_length=6, max_length=128)
+
+
+class PasswordRecoverIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    recovery_code: str = Field(min_length=12, max_length=128)
+    new_password: str = Field(min_length=6, max_length=128)
+
+
 class MessageIn(BaseModel):
     recipient_id: int
     body: str = Field(default="", max_length=4000)
@@ -576,10 +608,19 @@ def register(data: RegisterIn, conn=Depends(db)):
     if conn.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
         raise HTTPException(409, "Такой логин уже занят")
     password_hash, salt = hash_password(data.password)
+    recovery_code = make_recovery_code()
     cur = conn.execute(
-        """INSERT INTO users(username,display_name,password_hash,salt,created_at)
-           VALUES(?,?,?,?,?)""",
-        (username, data.display_name.strip(), password_hash, salt, now_iso()),
+        """INSERT INTO users(
+             username,display_name,password_hash,salt,recovery_code_hash,created_at
+           ) VALUES(?,?,?,?,?,?)""",
+        (
+            username,
+            data.display_name.strip(),
+            password_hash,
+            salt,
+            recovery_code_hash(recovery_code),
+            now_iso(),
+        ),
     )
     conn.commit()
     row = conn.execute(
@@ -590,7 +631,11 @@ def register(data: RegisterIn, conn=Depends(db)):
            WHERE u.id=?""",
         (cur.lastrowid,),
     ).fetchone()
-    return {"token": make_session(conn, row["id"]), "user": user_json(row)}
+    return {
+        "token": make_session(conn, row["id"]),
+        "user": user_json(row),
+        "recovery_code": recovery_code,
+    }
 
 
 @app.post("/api/login")
@@ -605,6 +650,132 @@ def login(data: LoginIn, conn=Depends(db)):
     if not row or not verify_password(data.password, row["password_hash"], row["salt"]):
         raise HTTPException(401, "Неверный логин или пароль")
     return {"token": make_session(conn, row["id"]), "user": user_json(row)}
+
+
+@app.get("/api/account/recovery")
+def recovery_status(
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    row = conn.execute(
+        "SELECT recovery_code_hash FROM users WHERE id=?",
+        (user["id"],),
+    ).fetchone()
+    return {
+        "configured": bool(
+            row and row["recovery_code_hash"]
+        )
+    }
+
+
+@app.post("/api/account/recovery-code")
+def create_recovery_code(
+    data: RecoveryCodeCreateIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    row = conn.execute(
+        """SELECT id,password_hash,salt
+           FROM users
+           WHERE id=?""",
+        (user["id"],),
+    ).fetchone()
+    if not row or not verify_password(
+        data.current_password,
+        row["password_hash"],
+        row["salt"],
+    ):
+        raise HTTPException(401, "Неверный текущий пароль")
+
+    code = make_recovery_code()
+    conn.execute(
+        "UPDATE users SET recovery_code_hash=? WHERE id=?",
+        (recovery_code_hash(code), user["id"]),
+    )
+    conn.commit()
+    return {
+        "recovery_code": code,
+        "message": "Новый код восстановления создан",
+    }
+
+
+@app.post("/api/password/recover")
+async def recover_password(
+    data: PasswordRecoverIn,
+    conn=Depends(db),
+):
+    username = data.username.strip().lower().lstrip("@")
+    code_hash = recovery_code_hash(data.recovery_code)
+    row = conn.execute(
+        """SELECT u.*, a.stored_name AS avatar_stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.username=?""",
+        (username,),
+    ).fetchone()
+
+    valid = bool(
+        row
+        and row["recovery_code_hash"]
+        and secrets.compare_digest(
+            str(row["recovery_code_hash"]),
+            code_hash,
+        )
+    )
+    if not valid:
+        raise HTTPException(
+            401,
+            "Неверный логин или код восстановления",
+        )
+
+    password_hash, salt = hash_password(data.new_password)
+    next_recovery_code = make_recovery_code()
+
+    conn.execute(
+        """UPDATE users
+           SET password_hash=?,
+               salt=?,
+               recovery_code_hash=?
+           WHERE id=?""",
+        (
+            password_hash,
+            salt,
+            recovery_code_hash(next_recovery_code),
+            row["id"],
+        ),
+    )
+    conn.execute(
+        "DELETE FROM sessions WHERE user_id=?",
+        (row["id"],),
+    )
+    conn.commit()
+
+    new_token = make_session(conn, row["id"])
+
+    for websocket in list(connections.get(row["id"], set())):
+        try:
+            await websocket.close(
+                code=4401,
+                reason="Пароль изменён",
+            )
+        except Exception:
+            pass
+
+    fresh = conn.execute(
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.id=?""",
+        (row["id"],),
+    ).fetchone()
+
+    return {
+        "token": new_token,
+        "user": user_json(fresh),
+        "recovery_code": next_recovery_code,
+        "message": "Пароль изменён",
+    }
 
 
 @app.post("/api/logout")
