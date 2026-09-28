@@ -29,7 +29,6 @@ jobs:
       RAW_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       RAW_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       RAW_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-      RAW_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -94,6 +93,26 @@ jobs:
 
       - name: Sync Capacitor
         run: npx cap sync android
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          case "${{ inputs.version_code }}" in
+            ''|*[!0-9]*)
+              echo "::error::version_code must be a positive integer"
+              exit 1
+              ;;
+          esac
+          if [ "${{ inputs.version_code }}" -lt 1 ]; then
+            echo "::error::version_code must be at least 1"
+            exit 1
+          fi
+          if gh release view "android-v${{ inputs.version_code }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::Release android-v${{ inputs.version_code }} already exists. Use a larger version_code."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Patch Android app
         run: |
