@@ -4016,12 +4016,31 @@ async function startNativePrivateScreenShare(call){
   if(!plugin)throw new Error('Нативная демонстрация экрана недоступна');
 
   ensureNativeScreenStoppedListener();
+
+  const cameraTrack=localVideoTrack();
+  call.screenRestoreCamera=!!cameraTrack?.enabled;
+  if(call.screenRestoreCamera){
+    cameraTrack.enabled=false;
+    updatePrivateVideoControls()
+  }
+
   await startNativeCallService(
     call.peerName||$('callName').textContent||'Звонок',
-    !!localVideoTrack(),
+    false,
     false
   ).catch(()=>{});
-  await plugin.startCapture();
+
+  try{
+    await plugin.startCapture()
+  }catch(err){
+    if(call.screenRestoreCamera&&cameraTrack?.readyState==='live'){
+      cameraTrack.enabled=true
+    }
+    call.screenRestoreCamera=false;
+    updatePrivateVideoControls();
+    throw err
+  }
+
   const rtc=await getRtcConfig();
   const peerKey='private-'+call.callId+'-'+call.peerId;
   const offer=await plugin.createOffer({
@@ -4066,7 +4085,23 @@ async function stopNativePrivateScreenShare(call,notifyPeer=true){
   if(call){
     call.nativeScreenPeerKey=null;
     call.nativeScreenSharing=false;
-    call.screenSharing=false
+    call.screenSharing=false;
+
+    const camera=localVideoTrack();
+    if(
+      call.screenRestoreCamera
+      && !call.cameraOff
+      && camera
+      && camera.readyState==='live'
+    ){
+      camera.enabled=true
+    }
+    call.screenRestoreCamera=false;
+    startNativeCallService(
+      call.peerName||$('callName').textContent||'Звонок',
+      !!camera?.enabled,
+      false
+    ).catch(()=>{})
   }
 
   if(notifyPeer&&call){
@@ -4103,6 +4138,21 @@ function ensureNativeScreenStoppedListener(){
         call.nativeScreenSharing=false;
         call.screenSharing=false;
         call.nativeScreenPeerKey=null;
+        const camera=localVideoTrack();
+        if(
+          call.screenRestoreCamera
+          && !call.cameraOff
+          && camera
+          && camera.readyState==='live'
+        ){
+          camera.enabled=true
+        }
+        call.screenRestoreCamera=false;
+        startNativeCallService(
+          call.peerName||$('callName').textContent||'Звонок',
+          !!camera?.enabled,
+          false
+        ).catch(()=>{});
         try{
           wsSend({
             type:'native_screen_stop',
@@ -5378,6 +5428,21 @@ async function startPrivateScreenShare(){
       call.nativeScreenSharing=false;
       call.screenSharing=false;
       call.nativeScreenPeerKey=null;
+      const camera=localVideoTrack();
+      if(
+        call.screenRestoreCamera
+        && !call.cameraOff
+        && camera
+        && camera.readyState==='live'
+      ){
+        camera.enabled=true
+      }
+      call.screenRestoreCamera=false;
+      startNativeCallService(
+        call.peerName||$('callName').textContent||'Звонок',
+        !!camera?.enabled,
+        false
+      ).catch(()=>{});
       alert(screenShareErrorMessage(err))
     }finally{
       if(currentCall===call){
@@ -5664,7 +5729,7 @@ function schedulePrivateCallRecovery(call,delay=900){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,remoteScreenSharing:false,screenSharing:false,screenShareBusy:false,screenStream:null,screenSender:null,screenPreviousTrack:null,screenAddedSender:false,nativeScreenSharing:false,nativeScreenPeerKey:null,nativeScreenReceiver:null,nativeScreenRemoteStream:null,nativeScreenReceiverTimer:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,remoteScreenSharing:false,screenSharing:false,screenShareBusy:false,screenStream:null,screenSender:null,screenPreviousTrack:null,screenAddedSender:false,screenRestoreCamera:false,nativeScreenSharing:false,nativeScreenPeerKey:null,nativeScreenReceiver:null,nativeScreenRemoteStream:null,nativeScreenReceiverTimer:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks())pc.addTrack(track,stream);
   $('localVideo').srcObject=stream;
