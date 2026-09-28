@@ -73,6 +73,16 @@ if 'android:name=".ScreenShareService"' not in text:
         raise SystemExit("AndroidManifest.xml: application tag not found")
     text = text[:app_end] + service_decl + text[app_end:]
 
+call_action_receiver_decl = """        <receiver
+            android:name=".CallActionReceiver"
+            android:exported="false" />
+"""
+if 'android:name=".CallActionReceiver"' not in text:
+    app_end = text.find("</application>")
+    if app_end == -1:
+        raise SystemExit("AndroidManifest.xml: application tag not found")
+    text = text[:app_end] + call_action_receiver_decl + text[app_end:]
+
 manifest.write_text(text)
 
 # Replace Capacitor launcher icons with the Svoi messenger logo.
@@ -1001,8 +1011,11 @@ import android.Manifest;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
+import android.provider.Settings;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -1078,6 +1091,15 @@ public class NativePushPlugin extends Plugin {
         ) == PackageManager.PERMISSION_GRANTED;
     }
 
+    private boolean fullScreenAllowed() {
+        if (Build.VERSION.SDK_INT < 34) {
+            return true;
+        }
+        NotificationManager manager = (NotificationManager)
+            getContext().getSystemService(Context.NOTIFICATION_SERVICE);
+        return manager != null && manager.canUseFullScreenIntent();
+    }
+
     @PluginMethod
     public void register(PluginCall call) {
         ensureChannels();
@@ -1098,6 +1120,7 @@ public class NativePushPlugin extends Plugin {
             JSObject result = new JSObject();
             result.put("token", task.getResult());
             result.put("permission", notificationPermissionGranted());
+            result.put("fullScreenAllowed", fullScreenAllowed());
             call.resolve(result);
         });
     }
@@ -1107,7 +1130,143 @@ public class NativePushPlugin extends Plugin {
         ensureChannels();
         JSObject result = new JSObject();
         result.put("permission", notificationPermissionGranted());
+        result.put("fullScreenAllowed", fullScreenAllowed());
         call.resolve(result);
+    }
+
+    @PluginMethod
+    public void requestFullScreen(PluginCall call) {
+        if (Build.VERSION.SDK_INT < 34 || fullScreenAllowed()) {
+            JSObject result = new JSObject();
+            result.put("allowed", true);
+            call.resolve(result);
+            return;
+        }
+        try {
+            Intent intent = new Intent(
+                Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                Uri.parse("package:" + getContext().getPackageName())
+            );
+            getActivity().startActivity(intent);
+            JSObject result = new JSObject();
+            result.put("allowed", false);
+            result.put("openedSettings", true);
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject("Не удалось открыть настройку полноэкранных уведомлений");
+        }
+    }
+
+    @PluginMethod
+    public void clearCall(PluginCall call) {
+        String callId = call.getString("callId", "");
+        if (callId == null || callId.isEmpty()) {
+            call.reject("callId is required");
+            return;
+        }
+        int notificationId = Math.abs(("incoming-call-" + callId).hashCode());
+        NotificationManager manager = (NotificationManager)
+            getContext().getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager != null) {
+            manager.cancel(notificationId);
+        }
+        JSObject result = new JSObject();
+        result.put("cleared", true);
+        call.resolve(result);
+    }
+}
+''')
+
+call_action_receiver = Path(
+    "android/app/src/main/java/ru/svoi/mobile/CallActionReceiver.java"
+)
+call_action_receiver.write_text(r'''package ru.svoi.mobile;
+
+import android.app.NotificationManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
+
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+
+public class CallActionReceiver extends BroadcastReceiver {
+    private static final String BASE_URL = "https://epl-gruz.duckdns.org";
+
+    @Override
+    public void onReceive(Context context, Intent intent) {
+        int notificationId = intent.getIntExtra("notification_id", 0);
+        NotificationManager manager = (NotificationManager)
+            context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager != null && notificationId != 0) {
+            manager.cancel(notificationId);
+        }
+
+        String action = intent.getAction();
+        String path = intent.getStringExtra("svoi_url");
+        if (path == null || path.isEmpty()) {
+            return;
+        }
+
+        if ("ru.svoi.mobile.ACCEPT_CALL".equals(action)) {
+            String separator = path.contains("?") ? "&" : "?";
+            Intent open = new Intent(context, MainActivity.class);
+            open.addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP
+            );
+            open.putExtra(
+                "svoi_url",
+                path + separator + "native_accept=1"
+            );
+            open.putExtra("svoi_incoming_call", true);
+            context.startActivity(open);
+            return;
+        }
+
+        if (!"ru.svoi.mobile.REJECT_CALL".equals(action)) {
+            return;
+        }
+
+        Uri uri = Uri.parse(BASE_URL + path);
+        String callId = uri.getQueryParameter("incoming_call");
+        String token = uri.getQueryParameter("action_token");
+        if (callId == null || token == null) {
+            return;
+        }
+
+        PendingResult pending = goAsync();
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                String endpoint = BASE_URL
+                    + "/api/calls/native-action/"
+                    + URLEncoder.encode(callId, "UTF-8")
+                    + "/reject?token="
+                    + URLEncoder.encode(token, "UTF-8");
+                connection = (HttpURLConnection) new URL(endpoint).openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setDoOutput(true);
+                connection.setFixedLengthStreamingMode(0);
+                try (OutputStream output = connection.getOutputStream()) {
+                    output.flush();
+                }
+                connection.getResponseCode();
+            } catch (Exception ignored) {
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+                pending.finish();
+            }
+        }).start();
     }
 }
 ''')
@@ -1125,6 +1284,7 @@ import android.os.Build;
 
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
+import androidx.core.app.Person;
 
 import com.google.firebase.messaging.FirebaseMessagingService;
 import com.google.firebase.messaging.RemoteMessage;
@@ -1219,6 +1379,10 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
             body = "Новое сообщение";
         }
 
+        int notificationId = tag == null || tag.isEmpty()
+            ? (int) (System.currentTimeMillis() & 0x7fffffff)
+            : Math.abs(tag.hashCode());
+
         Intent intent = new Intent(this, MainActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         if (url != null) {
@@ -1227,7 +1391,7 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
         intent.putExtra("svoi_incoming_call", isCall);
         PendingIntent pendingIntent = PendingIntent.getActivity(
             this,
-            0,
+            notificationId,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
@@ -1247,7 +1411,6 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
             .setSmallIcon(android.R.drawable.sym_action_chat)
             .setContentTitle(title)
             .setContentText(body)
-            .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setNumber(unread)
@@ -1263,7 +1426,45 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
             );
 
         if (isCall) {
+            Intent acceptIntent = new Intent(this, CallActionReceiver.class);
+            acceptIntent.setAction("ru.svoi.mobile.ACCEPT_CALL");
+            acceptIntent.putExtra("svoi_url", url);
+            acceptIntent.putExtra("notification_id", notificationId);
+
+            Intent declineIntent = new Intent(this, CallActionReceiver.class);
+            declineIntent.setAction("ru.svoi.mobile.REJECT_CALL");
+            declineIntent.putExtra("svoi_url", url);
+            declineIntent.putExtra("notification_id", notificationId);
+
+            PendingIntent acceptPendingIntent = PendingIntent.getBroadcast(
+                this,
+                notificationId ^ 0x13579BDF,
+                acceptIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+            );
+            PendingIntent declinePendingIntent = PendingIntent.getBroadcast(
+                this,
+                notificationId ^ 0x2468ACE0,
+                declineIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+            );
+
+            String callerName = body.startsWith("Звонит ")
+                ? body.substring("Звонит ".length())
+                : body;
+            Person caller = new Person.Builder()
+                .setName(callerName)
+                .setImportant(true)
+                .build();
+
             builder
+                .setStyle(
+                    NotificationCompat.CallStyle.forIncomingCall(
+                        caller,
+                        declinePendingIntent,
+                        acceptPendingIntent
+                    )
+                )
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setOngoing(true)
@@ -1272,19 +1473,14 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
                 .setTimeoutAfter(45000L)
                 .setOnlyAlertOnce(false)
                 .setVibrate(new long[]{0, 500, 350, 500, 350, 700});
-        }
-
-        if (!isCall) {
+        } else {
+            builder.setStyle(new NotificationCompat.BigTextStyle().bigText(body));
             if (silent) {
                 builder.setSilent(true);
             } else {
                 builder.setVibrate(new long[]{0, 180});
             }
         }
-
-        int notificationId = tag == null || tag.isEmpty()
-            ? (int) (System.currentTimeMillis() & 0x7fffffff)
-            : Math.abs(tag.hashCode());
 
         try {
             NotificationManagerCompat.from(this).notify(
