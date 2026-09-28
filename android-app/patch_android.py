@@ -13,6 +13,8 @@ permissions = """    <uses-permission android:name="android.permission.CAMERA" /
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 """
 
@@ -32,6 +34,8 @@ else:
         "android.permission.WAKE_LOCK",
         "android.permission.READ_CONTACTS",
         "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+        "android.permission.FOREGROUND_SERVICE_CAMERA",
         "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
     ]:
         if permission not in text:
@@ -51,6 +55,11 @@ service_decl = """        <service
             android:name=".ScreenShareService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+"""
+call_service_decl = """        <service
+            android:name=".CallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|camera" />
 """
 firebase_service_decl = """        <service
             android:name=".SvoiFirebaseMessagingService"
@@ -72,6 +81,12 @@ if 'android:name=".ScreenShareService"' not in text:
     if app_end == -1:
         raise SystemExit("AndroidManifest.xml: application tag not found")
     text = text[:app_end] + service_decl + text[app_end:]
+
+if 'android:name=".CallForegroundService"' not in text:
+    app_end = text.find("</application>")
+    if app_end == -1:
+        raise SystemExit("AndroidManifest.xml: application tag not found")
+    text = text[:app_end] + call_service_decl + text[app_end:]
 
 call_action_receiver_decl = """        <receiver
             android:name=".CallActionReceiver"
@@ -282,6 +297,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(NativeScreenSharePlugin.class);
         registerPlugin(NativeProximityPlugin.class);
         registerPlugin(NativeAudioRoutePlugin.class);
+        registerPlugin(NativeCallServicePlugin.class);
         registerPlugin(NativeContactsPlugin.class);
         registerPlugin(NativeVibrationPlugin.class);
         registerPlugin(NativeBadgePlugin.class);
@@ -1820,6 +1836,265 @@ public class NativeAudioRoutePlugin extends Plugin {
         previousMode = null;
         previousSpeakerphone = null;
         super.handleOnDestroy();
+    }
+}
+''')
+
+call_service_plugin = Path(
+    "android/app/src/main/java/ru/svoi/mobile/NativeCallServicePlugin.java"
+)
+call_service_plugin.write_text(r'''package ru.svoi.mobile;
+
+import android.content.Context;
+import android.content.Intent;
+import android.os.Build;
+
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+
+@CapacitorPlugin(name = "NativeCallService")
+public class NativeCallServicePlugin extends Plugin {
+    @PluginMethod
+    public void start(PluginCall call) {
+        String name = call.getString("name", "Звонок");
+        boolean video = call.getBoolean("video", false);
+        boolean group = call.getBoolean("group", false);
+
+        Intent intent = new Intent(getContext(), CallForegroundService.class);
+        intent.setAction(CallForegroundService.ACTION_START);
+        intent.putExtra(CallForegroundService.EXTRA_NAME, name);
+        intent.putExtra(CallForegroundService.EXTRA_VIDEO, video);
+        intent.putExtra(CallForegroundService.EXTRA_GROUP, group);
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                getContext().startForegroundService(intent);
+            } else {
+                getContext().startService(intent);
+            }
+            JSObject result = new JSObject();
+            result.put("active", true);
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject(
+                error.getMessage() != null
+                    ? error.getMessage()
+                    : "Не удалось запустить фоновый режим звонка"
+            );
+        }
+    }
+
+    @PluginMethod
+    public void stop(PluginCall call) {
+        Intent intent = new Intent(getContext(), CallForegroundService.class);
+        intent.setAction(CallForegroundService.ACTION_STOP);
+        try {
+            getContext().startService(intent);
+        } catch (Exception ignored) {
+            try {
+                getContext().stopService(
+                    new Intent(getContext(), CallForegroundService.class)
+                );
+            } catch (Exception ignoredAgain) {
+            }
+        }
+        JSObject result = new JSObject();
+        result.put("active", false);
+        call.resolve(result);
+    }
+}
+''')
+
+call_foreground_service = Path(
+    "android/app/src/main/java/ru/svoi/mobile/CallForegroundService.java"
+)
+call_foreground_service.write_text(r'''package ru.svoi.mobile;
+
+import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
+import android.os.Build;
+import android.os.IBinder;
+import android.os.PowerManager;
+
+import androidx.core.app.NotificationCompat;
+
+public class CallForegroundService extends Service {
+    public static final String ACTION_START = "ru.svoi.mobile.CALL_SERVICE_START";
+    public static final String ACTION_STOP = "ru.svoi.mobile.CALL_SERVICE_STOP";
+    public static final String EXTRA_NAME = "name";
+    public static final String EXTRA_VIDEO = "video";
+    public static final String EXTRA_GROUP = "group";
+
+    private static final String CHANNEL_ID = "svoi_active_call_v1";
+    private static final int NOTIFICATION_ID = 4601;
+
+    private PowerManager.WakeLock wakeLock;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        ensureChannel();
+        acquireWakeLock();
+    }
+
+    private void ensureChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return;
+        }
+        NotificationManager manager = (NotificationManager)
+            getSystemService(NOTIFICATION_SERVICE);
+        if (manager == null) {
+            return;
+        }
+        NotificationChannel channel = new NotificationChannel(
+            CHANNEL_ID,
+            "Активный звонок",
+            NotificationManager.IMPORTANCE_LOW
+        );
+        channel.setDescription("Поддерживает активный звонок «Свои» в фоне");
+        channel.setShowBadge(false);
+        channel.setSound(null, null);
+        manager.createNotificationChannel(channel);
+    }
+
+    private void acquireWakeLock() {
+        try {
+            PowerManager manager = (PowerManager)
+                getSystemService(POWER_SERVICE);
+            if (manager == null) {
+                return;
+            }
+            wakeLock = manager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "svoi:active-call"
+            );
+            wakeLock.setReferenceCounted(false);
+            wakeLock.acquire();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private Notification buildNotification(
+        String name,
+        boolean video,
+        boolean group
+    ) {
+        Intent open = new Intent(this, MainActivity.class);
+        open.addFlags(
+            Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+        );
+        open.putExtra("svoi_restore_active_call", true);
+
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+            this,
+            4601,
+            open,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        String kind = group
+            ? "Групповой звонок"
+            : (video ? "Видеозвонок" : "Голосовой звонок");
+
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.sym_action_call)
+            .setContentTitle(name == null || name.isEmpty() ? "Свои" : name)
+            .setContentText(kind + " · нажмите, чтобы вернуться")
+            .setContentIntent(pendingIntent)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .build();
+    }
+
+    private int foregroundTypes(boolean video) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return 0;
+        }
+
+        int types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+
+        if (
+            video
+            && checkSelfPermission(Manifest.permission.CAMERA)
+                == PackageManager.PERMISSION_GRANTED
+        ) {
+            types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
+        }
+        return types;
+    }
+
+    private void showForeground(
+        String name,
+        boolean video,
+        boolean group
+    ) {
+        Notification notification = buildNotification(name, video, group);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                foregroundTypes(video)
+            );
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            stopForeground(true);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        String name = intent == null
+            ? "Звонок"
+            : intent.getStringExtra(EXTRA_NAME);
+        boolean video = intent != null
+            && intent.getBooleanExtra(EXTRA_VIDEO, false);
+        boolean group = intent != null
+            && intent.getBooleanExtra(EXTRA_GROUP, false);
+
+        try {
+            showForeground(name, video, group);
+        } catch (Exception error) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        return START_NOT_STICKY;
+    }
+
+    @Override
+    public void onDestroy() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+            }
+        } catch (Exception ignored) {
+        }
+        wakeLock = null;
+        super.onDestroy();
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
     }
 }
 ''')
