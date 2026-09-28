@@ -2527,6 +2527,8 @@ public class NativeScreenSharePlugin extends Plugin {
                 getContext(),
                 videoSource.getCapturerObserver()
             );
+            // Keep screen sharing light enough that the main call
+            // remains stable on mobile uplinks and iPhone Safari receivers.
             capturer.startCapture(width, height, 15);
 
             videoTrack = factory.createVideoTrack(
