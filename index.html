@@ -41,6 +41,22 @@
 .edited-label{font-size:10px;color:#9db1ca;white-space:nowrap}
 .message-actions-dialog{width:min(92vw,430px);padding:0;overflow:hidden;border-radius:20px}.message-actions-head{padding:16px 16px 12px;border-bottom:1px solid #2a3e59}.message-actions-head strong{display:block;font-size:15px}.message-actions-head small{display:block;color:#91a5bf;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.message-actions-list{display:grid;padding:8px}.message-actions-list button{border:0;background:transparent;color:#fff;border-radius:12px;padding:13px 12px;text-align:left;font-size:15px;font-weight:700;display:flex;align-items:center;gap:10px}.message-actions-list button:hover,.message-actions-list button:active{background:#1d334f}.message-actions-list button.danger{color:#ffb8bd}.message-actions-list button.hidden{display:none}.message-actions-close{margin:0 8px 8px;border:1px solid #304866;background:#172a42;color:#dce8f8;border-radius:12px;padding:11px;font-weight:750}
 .seen-dialog{width:min(92vw,460px);padding:0;overflow:hidden;border-radius:20px}.seen-list{display:grid;gap:7px;padding:12px;max-height:62dvh;overflow:auto}.seen-entry{display:flex;align-items:center;gap:10px;background:#17283f;border-radius:13px;padding:10px 12px}.seen-copy{min-width:0;flex:1}.seen-copy strong,.seen-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.seen-copy small{color:#8fa3be;margin-top:2px}.seen-empty{padding:24px;text-align:center;color:#8fa3be}
+.phone-contacts-dialog{width:min(94vw,520px)}
+.phone-status{padding:12px 14px;border:1px solid #304866;background:#101f33;border-radius:13px;margin:10px 0 14px}
+.phone-status strong,.phone-status small{display:block}
+.phone-status small{margin-top:4px;color:#95a9c4;line-height:1.4}
+.phone-link-grid{display:grid;gap:9px}
+.phone-link-grid input{width:100%;border:1px solid #354b68;background:#0f1d30;color:#fff;border-radius:12px;padding:12px}
+.phone-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.phone-actions button{border:0;border-radius:12px;padding:11px 13px;background:#244f7e;color:#fff;font-weight:700;flex:1;min-width:150px}
+.phone-actions button.danger{background:#70404a}
+.phone-actions button:disabled{opacity:.5}
+.phone-sync-note{font-size:12px;color:#91a5bf;line-height:1.45;margin:10px 2px}
+.phone-match-list{display:grid;gap:8px;max-height:38dvh;overflow:auto;margin-top:12px}
+.phone-match{display:flex;align-items:center;gap:10px;width:100%;border:0;border-radius:13px;padding:10px 12px;background:#17283f;color:#fff;text-align:left}
+.phone-match .txt{min-width:0;flex:1}
+.phone-match strong,.phone-match small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.phone-match small{color:#91a5bf;margin-top:2px}
 .bubble{cursor:pointer}
 .menu-toggle{width:44px;height:44px;border:0;border-radius:13px;background:#17283f;color:#fff;font-size:24px;display:grid;place-items:center;flex:0 0 44px}
 .drawer-backdrop{position:fixed;inset:0;z-index:1600;background:#0008;opacity:0;pointer-events:none;transition:opacity .2s ease}
@@ -108,6 +124,44 @@ body.drawer-open{overflow:hidden}
   </div>
 </dialog>
 
+<dialog id="phoneContactsDialog" class="phone-contacts-dialog">
+  <h2 class="dialog-title">Телефон и контакты</h2>
+  <div id="phoneStatus" class="phone-status">
+    <strong>Номер не привязан</strong>
+    <small>Привяжи свой номер, чтобы люди из телефонной книги могли находить тебя в «Своих».</small>
+  </div>
+
+  <form id="phoneLinkForm" class="phone-link-grid">
+    <div class="field">
+      <label>Номер телефона</label>
+      <input id="phoneNumberInput" type="tel" maxlength="40" autocomplete="tel" placeholder="+79991234567">
+    </div>
+    <div class="field">
+      <label>Текущий пароль</label>
+      <input id="phonePasswordInput" type="password" minlength="6" maxlength="128" autocomplete="current-password" placeholder="Для подтверждения изменения">
+    </div>
+    <div id="phoneLinkError" class="error"></div>
+    <div class="phone-actions">
+      <button id="phoneLinkBtn" class="primary" type="submit">Привязать номер</button>
+      <button id="phoneUnlinkBtn" class="danger hidden" type="button">Отвязать номер</button>
+    </div>
+  </form>
+
+  <div class="phone-sync-note">
+    Телефонная книга читается только на устройстве. На сервер отправляются хэши номеров, а не сами номера. SMS-подтверждение номера добавим отдельным этапом.
+  </div>
+
+  <div class="phone-actions">
+    <button id="syncPhoneContactsBtn" type="button">📱 Синхронизировать телефонную книгу</button>
+  </div>
+  <div id="phoneSyncStatus" class="muted" style="margin-top:9px"></div>
+  <div id="phoneMatchList" class="phone-match-list"></div>
+
+  <div class="dialog-actions">
+    <button id="closePhoneContacts" class="primary" type="button">Готово</button>
+  </div>
+</dialog>
+
 <div id="app" class="app hidden">
   <aside class="sidebar">
     <div class="side-head"><button id="menuToggle" class="menu-toggle" type="button" title="Меню">☰</button><button id="meAvatar" class="profile-avatar" type="button" title="Изменить аватар">С</button><input id="avatarInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div></div>
@@ -168,6 +222,7 @@ body.drawer-open{overflow:hidden}
       <button id="vibrationBtn" type="button"><span>📳 Вибрация</span><span>›</span></button>
       <button id="notifyBtn" type="button"><span>🔔 Уведомления</span><span>›</span></button>
       <button id="openRecoverySettings" type="button"><span>🔑 Код восстановления</span><span>›</span></button>
+      <button id="openPhoneContacts" type="button"><span>📱 Телефон и контакты</span><span>›</span></button>
       <div class="drawer-spacer"></div>
       <button id="logout" class="danger" type="button"><span>↪ Выйти</span><span>›</span></button>
     </div>
@@ -6128,6 +6183,208 @@ $('openRecoverySettings').onclick=()=>{
   $('recoverySetupError').textContent='';
   $('recoveryCurrentPassword').value='';
   $('recoverySetupDialog').showModal()
+};
+
+function nativeContactsPlugin(){
+  return window.Capacitor?.Plugins?.NativeContacts||null
+}
+
+let phoneAccountState=null;
+
+function renderPhoneAccountState(state){
+  phoneAccountState=state||{linked:false};
+  const box=$('phoneStatus');
+  box.replaceChildren();
+
+  const strong=document.createElement('strong');
+  const small=document.createElement('small');
+
+  if(phoneAccountState.linked){
+    strong.textContent='Номер привязан ·•••• '+(phoneAccountState.last4||'');
+    small.textContent='Этот номер участвует в поиске совпадений телефонной книги. SMS-подтверждение пока не подключено.';
+    $('phoneLinkBtn').textContent='Изменить номер';
+    $('phoneUnlinkBtn').classList.remove('hidden')
+  }else{
+    strong.textContent='Номер не привязан';
+    small.textContent='Привяжи свой номер, чтобы люди из телефонной книги могли находить тебя в «Своих».';
+    $('phoneLinkBtn').textContent='Привязать номер';
+    $('phoneUnlinkBtn').classList.add('hidden')
+  }
+
+  box.append(strong,small)
+}
+
+async function loadPhoneAccountState(){
+  const state=await api('/api/account/phone');
+  renderPhoneAccountState(state);
+  return state
+}
+
+function renderPhoneMatches(matches,localByHash){
+  const box=$('phoneMatchList');
+  box.replaceChildren();
+
+  if(!matches.length){
+    box.innerHTML='<div class="muted" style="padding:10px 2px">Пользователей «Своих» среди контактов пока не найдено.</div>';
+    return
+  }
+
+  for(const user of matches){
+    const local=localByHash.get(user.phone_hash)||null;
+    const button=document.createElement('button');
+    button.type='button';
+    button.className='phone-match';
+
+    const avatar=document.createElement('span');
+    avatar.className='avatar';
+    setAvatar(avatar,user);
+
+    const txt=document.createElement('span');
+    txt.className='txt';
+
+    const name=document.createElement('strong');
+    name.textContent=local?.name
+      ?local.name+' · '+user.display_name
+      :user.display_name;
+
+    const tag=document.createElement('small');
+    tag.textContent='@'+user.username+(local?.last4?' · •••• '+local.last4:'');
+
+    txt.append(name,tag);
+    button.append(avatar,txt);
+    button.onclick=()=>{
+      $('phoneContactsDialog').close();
+      openUser(user)
+    };
+    box.append(button)
+  }
+}
+
+$('openPhoneContacts').onclick=async()=>{
+  closeDrawer();
+  $('phoneLinkError').textContent='';
+  $('phoneSyncStatus').textContent='';
+  $('phoneMatchList').replaceChildren();
+  $('phoneNumberInput').value='';
+  $('phonePasswordInput').value='';
+  try{
+    await loadPhoneAccountState()
+  }catch(err){
+    $('phoneLinkError').textContent=err.message||'Не удалось загрузить настройки телефона'
+  }
+
+  const plugin=nativeContactsPlugin();
+  if(!plugin){
+    $('syncPhoneContactsBtn').disabled=true;
+    $('phoneSyncStatus').textContent='Синхронизация телефонной книги доступна в Android-приложении «Свои».'
+  }else{
+    $('syncPhoneContactsBtn').disabled=false
+  }
+
+  $('phoneContactsDialog').showModal()
+};
+
+$('closePhoneContacts').onclick=()=>$('phoneContactsDialog').close();
+
+$('phoneLinkForm').onsubmit=async event=>{
+  event.preventDefault();
+  const button=$('phoneLinkBtn');
+  $('phoneLinkError').textContent='';
+
+  const phone=$('phoneNumberInput').value.trim();
+  const password=$('phonePasswordInput').value;
+  if(!phone){
+    $('phoneLinkError').textContent='Укажи номер телефона';
+    return
+  }
+  if(!password){
+    $('phoneLinkError').textContent='Введи текущий пароль';
+    return
+  }
+
+  button.disabled=true;
+  try{
+    const state=await api('/api/account/phone',{
+      method:'POST',
+      body:{phone,current_password:password}
+    });
+    renderPhoneAccountState(state);
+    $('phoneNumberInput').value='';
+    $('phonePasswordInput').value='';
+    $('phoneLinkError').textContent='';
+    $('phoneSyncStatus').textContent='Номер привязан. Теперь можно синхронизировать телефонную книгу.'
+  }catch(err){
+    $('phoneLinkError').textContent=err.message||'Не удалось привязать номер'
+  }finally{
+    button.disabled=false
+  }
+};
+
+$('phoneUnlinkBtn').onclick=async()=>{
+  const password=$('phonePasswordInput').value;
+  if(!password){
+    $('phoneLinkError').textContent='Для отвязки введи текущий пароль';
+    $('phonePasswordInput').focus();
+    return
+  }
+  if(!confirm('Отвязать номер от аккаунта? Другие пользователи больше не смогут находить тебя по телефонной книге.'))return;
+
+  const button=$('phoneUnlinkBtn');
+  button.disabled=true;
+  $('phoneLinkError').textContent='';
+  try{
+    const state=await api('/api/account/phone',{
+      method:'DELETE',
+      body:{current_password:password}
+    });
+    renderPhoneAccountState(state);
+    $('phonePasswordInput').value='';
+    $('phoneSyncStatus').textContent='Номер отвязан.'
+  }catch(err){
+    $('phoneLinkError').textContent=err.message||'Не удалось отвязать номер'
+  }finally{
+    button.disabled=false
+  }
+};
+
+$('syncPhoneContactsBtn').onclick=async()=>{
+  const plugin=nativeContactsPlugin();
+  if(!plugin){
+    $('phoneSyncStatus').textContent='Эта функция доступна только в Android-приложении.';
+    return
+  }
+
+  const button=$('syncPhoneContactsBtn');
+  button.disabled=true;
+  $('phoneSyncStatus').textContent='Читаем телефонную книгу…';
+  $('phoneMatchList').replaceChildren();
+
+  try{
+    const nativeResult=await plugin.readHashedContacts();
+    const contacts=Array.isArray(nativeResult?.contacts)
+      ?nativeResult.contacts
+      :[];
+
+    const localByHash=new Map();
+    for(const item of contacts){
+      if(item?.hash)localByHash.set(item.hash,item)
+    }
+
+    $('phoneSyncStatus').textContent='Сопоставляем '+contacts.length+' номеров…';
+
+    const result=await api('/api/phone-contacts/sync',{
+      method:'POST',
+      body:{hashes:[...localByHash.keys()]}
+    });
+
+    await loadUsers();
+    renderPhoneMatches(result.users||[],localByHash);
+    $('phoneSyncStatus').textContent='Найдено пользователей: '+Number(result.matched||0)
+  }catch(err){
+    $('phoneSyncStatus').textContent=err.message||'Не удалось синхронизировать контакты'
+  }finally{
+    button.disabled=false
+  }
 };
 
 $('openBlacklist').onclick=async()=>{
