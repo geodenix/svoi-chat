@@ -3562,12 +3562,49 @@ async function ensurePushSubscription(registration){
     })
   }
   await api('/api/push/subscribe',{method:'POST',body:sub.toJSON()});
-  setDrawerButton($('notifyBtn'),'✅','Уведомления','Вкл');$('notifyBtn').title='Уведомления включены — нажми для теста';
+  setDrawerButton($('notifyBtn'),'✅','Уведомления','Вкл');
+  $('notifyBtn').title='Уведомления включены — нажми для теста';
   return sub
+}
+
+function nativePushPlugin(){
+  return window.Capacitor?.Plugins?.NativePush||null
+}
+
+async function ensureNativePushRegistration(){
+  const plugin=nativePushPlugin();
+  if(!plugin)return null;
+  const result=await plugin.register();
+  if(!result?.token)throw new Error('Android не вернул FCM-токен');
+  await api('/api/push/android/register',{
+    method:'POST',
+    body:{token:result.token}
+  });
+  localStorage.setItem('svoi_fcm_token',result.token);
+  if(result.permission){
+    setDrawerButton($('notifyBtn'),'✅','Уведомления','Android');
+    $('notifyBtn').title='Системные Android-уведомления включены'
+  }else{
+    setDrawerButton($('notifyBtn'),'🔔','Уведомления','Разрешить');
+    $('notifyBtn').title='Нажми и разреши уведомления Android'
+  }
+  return result
 }
 
 async function initPush(){
   const btn=$('notifyBtn');
+
+  if(nativePushPlugin()){
+    btn.classList.remove('hidden');
+    try{
+      await ensureNativePushRegistration()
+    }catch(err){
+      setDrawerButton(btn,'⚠️','Уведомления','Ошибка');
+      btn.title=err.message||'Не удалось подключить Android-уведомления'
+    }
+    return
+  }
+
   if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window)){
     btn.classList.add('hidden');return
   }
@@ -3584,6 +3621,22 @@ async function initPush(){
 
 $('notifyBtn').onclick=async()=>{
   try{
+    if(nativePushPlugin()){
+      const result=await ensureNativePushRegistration();
+      if(!result?.permission){
+        setTimeout(async()=>{
+          try{
+            const state=await nativePushPlugin()?.status?.();
+            if(state?.permission){
+              setDrawerButton($('notifyBtn'),'✅','Уведомления','Android');
+              $('notifyBtn').title='Системные Android-уведомления включены'
+            }
+          }catch{}
+        },1200)
+      }
+      return
+    }
+
     if(!('Notification' in window))throw new Error('Этот браузер не поддерживает уведомления');
     if(Notification.permission==='denied')throw new Error('Разреши уведомления для этого сайта в настройках браузера');
     const permission=Notification.permission==='granted'
@@ -3603,6 +3656,17 @@ $('notifyBtn').onclick=async()=>{
 };
 
 async function removePushSubscription(){
+  const fcmToken=localStorage.getItem('svoi_fcm_token')||'';
+  if(fcmToken){
+    try{
+      await api('/api/push/android/unregister',{
+        method:'POST',
+        body:{token:fcmToken}
+      })
+    }catch{}
+    localStorage.removeItem('svoi_fcm_token')
+  }
+
   if(!('serviceWorker' in navigator))return;
   try{
     const registration=await navigator.serviceWorker.ready;
