@@ -217,6 +217,7 @@ body.drawer-open{overflow:hidden}
     <button id="messageActionReply" type="button">↩️ Ответить</button>
     <button id="messageActionEdit" type="button">✏️ Редактировать</button>
     <button id="messageActionForward" type="button">↗️ Переслать</button>
+    <button id="messageActionCopy" type="button">📋 Копировать</button>
     <button id="messageActionSeen" type="button">👁 Кто просмотрел</button>
     <button id="messageActionDeleteMe" class="danger" type="button">🗑 Удалить у меня</button>
     <button id="messageActionDeleteAll" class="danger" type="button">🗑 Удалить для всех</button>
@@ -1911,6 +1912,47 @@ function openMessageActions(message){
   );
 
   $('messageActionsDialog').showModal()
+}
+
+function messageCopyText(message){
+  if(!message)return '';
+  const body=String(message.body||'').trim();
+  if(body)return body;
+  if(message.attachment?.url){
+    return new URL(message.attachment.url,location.origin).href
+  }
+  if(message.attachment?.name)return String(message.attachment.name);
+  return ''
+}
+
+async function copyMessageFromMenu(){
+  const source=messageActionSource;
+  if(!source)return;
+  const text=messageCopyText(source.message);
+  if(!text){
+    alert('В сообщении нечего копировать');
+    return
+  }
+
+  try{
+    if(navigator.clipboard?.writeText){
+      await navigator.clipboard.writeText(text)
+    }else{
+      const area=document.createElement('textarea');
+      area.value=text;
+      area.style.position='fixed';
+      area.style.opacity='0';
+      document.body.append(area);
+      area.focus();
+      area.select();
+      const ok=document.execCommand('copy');
+      area.remove();
+      if(!ok)throw new Error('Не удалось скопировать')
+    }
+    closeMessageActions()
+  }catch(err){
+    alert(err?.message||'Не удалось скопировать сообщение')
+  }
 }
 
 async function deleteMessageForMe(){
@@ -4789,6 +4831,7 @@ $('messageActionForward').onclick=()=>{
   closeMessageActions();
   openForwardDialog(message)
 };
+$('messageActionCopy').onclick=()=>copyMessageFromMenu();
 $('messageActionSeen').onclick=()=>openSeenBy();
 $('messageActionDeleteMe').onclick=()=>deleteMessageForMe();
 $('messageActionDeleteAll').onclick=()=>deleteMessageForAllFromMenu();
