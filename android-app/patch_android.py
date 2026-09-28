@@ -77,7 +77,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
-    protected void onResume() {
+    public void onResume() {
         super.onResume();
         if (updaterPrefs != null
                 && updaterPrefs.getBoolean(PREF_PENDING_INSTALL, false)
@@ -87,7 +87,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
-    protected void onDestroy() {
+    public void onDestroy() {
         if (downloadReceiver != null) {
             try {
                 unregisterReceiver(downloadReceiver);
