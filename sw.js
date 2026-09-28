@@ -1,4 +1,4 @@
-const CACHE_NAME = 'svoi-shell-v44';
+const CACHE_NAME = 'svoi-shell-v45';
 const SHELL = [
   '/',
   '/manifest.webmanifest',
@@ -84,29 +84,31 @@ self.addEventListener('push', event => {
       }
     } catch {}
 
-    if (data.silent) {
-      return;
-    }
-
     if (!data.force && windows.some(client => client.visibilityState === 'visible')) {
       return;
     }
 
     const tag = String(data.tag || '');
     const incomingCall = tag.startsWith('incoming-call-') || tag.startsWith('group-call-');
+    const silent = !!data.silent && !incomingCall;
 
-    await self.registration.showNotification(data.title || 'Свои', {
+    const options = {
       body: data.body || 'Новое сообщение',
       tag: data.tag || 'svoi',
-      renotify: true,
+      renotify: !silent,
       requireInteraction: incomingCall,
-      vibrate: incomingCall ? [500, 180, 500, 180, 900] : [180],
+      silent,
       icon: '/icon-192.svg',
       badge: '/icon-192.svg',
       data: {
         url: data.url || '/'
       }
-    });
+    };
+    if (!silent) {
+      options.vibrate = incomingCall ? [500, 180, 500, 180, 900] : [180];
+    }
+
+    await self.registration.showNotification(data.title || 'Свои', options);
   })());
 });
 
