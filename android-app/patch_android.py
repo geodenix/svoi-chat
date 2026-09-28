@@ -115,6 +115,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(NativeScreenSharePlugin.class);
+        registerPlugin(NativeProximityPlugin.class);
         super.onCreate(savedInstanceState);
 
         updaterPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -497,6 +498,121 @@ public class MainActivity extends BridgeActivity {
 }
 ''')
 
+
+
+proximity_plugin = Path(
+    "android/app/src/main/java/ru/svoi/mobile/NativeProximityPlugin.java"
+)
+proximity_plugin.write_text(r'''package ru.svoi.mobile;
+
+import android.content.Context;
+import android.os.PowerManager;
+
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+
+@CapacitorPlugin(name = "NativeProximity")
+public class NativeProximityPlugin extends Plugin {
+    private PowerManager.WakeLock proximityWakeLock;
+
+    private boolean proximitySupported() {
+        try {
+            PowerManager powerManager = (PowerManager)
+                getContext().getSystemService(Context.POWER_SERVICE);
+            return powerManager != null
+                && powerManager.isWakeLockLevelSupported(
+                    PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK
+                );
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private PowerManager.WakeLock wakeLock() {
+        if (proximityWakeLock == null && proximitySupported()) {
+            PowerManager powerManager = (PowerManager)
+                getContext().getSystemService(Context.POWER_SERVICE);
+            proximityWakeLock = powerManager.newWakeLock(
+                PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK,
+                "svoi:proximity-screen-off"
+            );
+            proximityWakeLock.setReferenceCounted(false);
+        }
+        return proximityWakeLock;
+    }
+
+    @PluginMethod
+    public void isAvailable(PluginCall call) {
+        JSObject result = new JSObject();
+        result.put("available", proximitySupported());
+        result.put(
+            "enabled",
+            proximityWakeLock != null && proximityWakeLock.isHeld()
+        );
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void enable(PluginCall call) {
+        PowerManager.WakeLock lock = wakeLock();
+        if (lock == null) {
+            call.reject("Датчик приближения недоступен");
+            return;
+        }
+
+        try {
+            if (!lock.isHeld()) {
+                lock.acquire();
+            }
+            JSObject result = new JSObject();
+            result.put("enabled", true);
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject(
+                error.getMessage() != null
+                    ? error.getMessage()
+                    : "Не удалось включить датчик приближения"
+            );
+        }
+    }
+
+    @PluginMethod
+    public void disable(PluginCall call) {
+        releaseWakeLock();
+        JSObject result = new JSObject();
+        result.put("enabled", false);
+        call.resolve(result);
+    }
+
+    private void releaseWakeLock() {
+        try {
+            if (proximityWakeLock != null && proximityWakeLock.isHeld()) {
+                proximityWakeLock.release(
+                    PowerManager.RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY
+                );
+            }
+        } catch (Exception ignored) {
+            try {
+                if (proximityWakeLock != null
+                        && proximityWakeLock.isHeld()) {
+                    proximityWakeLock.release();
+                }
+            } catch (Exception ignoredAgain) {
+            }
+        }
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        releaseWakeLock();
+        proximityWakeLock = null;
+        super.handleOnDestroy();
+    }
+}
+''')
 
 screen_service = Path(
     "android/app/src/main/java/ru/svoi/mobile/ScreenShareService.java"
