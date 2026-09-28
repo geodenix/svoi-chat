@@ -147,7 +147,7 @@ body.drawer-open{overflow:hidden}
     <button id="groupSpeakerBtn" type="button" title="Аудиовыход: обычный">🔈</button>
     <button id="groupCameraBtn" type="button" title="Камера">📷</button>
     <button id="groupSwitchCameraBtn" type="button" title="Сменить камеру">🔄</button>
-    <button id="groupScreenShareBtn" class="hidden" type="button" title="Демонстрация экрана">🖥️</button>
+    <button id="groupScreenShareBtn" type="button" title="Демонстрация экрана">🖥️</button>
     <button id="groupEndBtn" class="end" type="button" title="Выйти">☎</button>
   </div>
 </div>
@@ -176,7 +176,7 @@ body.drawer-open{overflow:hidden}
       <button id="privateSizeUp" class="round-call video-size-btn hidden" type="button" title="Увеличить видео">+</button>
       <button id="cameraCall" class="round-call" type="button" title="Камера">📷</button>
       <button id="switchCamera" class="round-call" type="button" title="Сменить камеру">🔄</button>
-      <button id="screenShareCall" class="round-call hidden" type="button" title="Демонстрация экрана">🖥️</button>
+      <button id="screenShareCall" class="round-call" type="button" title="Демонстрация экрана">🖥️</button>
       <button id="endCall" class="round-call end" type="button" title="Завершить">☎</button>
     </div>
   </div>
@@ -3384,7 +3384,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
     updateSpeakerButtons();
     $('groupCameraBtn').classList.toggle('off',!video);
     $('groupSwitchCameraBtn').classList.toggle('hidden',!video);
-    $('groupScreenShareBtn').classList.toggle('hidden',!screenShareSupported());
+    $('groupScreenShareBtn').classList.remove('hidden');
     $('groupScreenShareBtn').classList.remove('sharing');
     $('groupScreenShareBtn').textContent='🖥️';
     $('groupScreenShareBtn').title='Демонстрация экрана';
@@ -3504,11 +3504,15 @@ function updateGroupScreenShareControls(){
   const state=groupCallState;
   const button=$('groupScreenShareBtn');
   if(!button)return;
-  button.classList.toggle('hidden',!screenShareSupported());
+  button.classList.remove('hidden');
+  const supported=screenShareSupported();
   const sharing=!!state?.screenSharing;
   button.classList.toggle('sharing',sharing);
+  button.classList.toggle('off',!supported&&!sharing);
   button.textContent=sharing?'⏹️':'🖥️';
-  button.title=sharing?'Остановить демонстрацию экрана':'Демонстрация экрана';
+  button.title=sharing
+    ?'Остановить демонстрацию экрана'
+    :(supported?'Демонстрация экрана':'Демонстрация экрана — требуется поддержка устройства');
   if(state){
     $('groupCameraBtn').disabled=sharing;
     $('groupSwitchCameraBtn').classList.toggle('hidden',sharing||state.cameraOff)
@@ -3519,7 +3523,7 @@ async function toggleGroupScreenShare(){
   const state=groupCallState;
   if(!state)return;
   if(!screenShareSupported()){
-    alert('Этот браузер не поддерживает демонстрацию экрана');
+    alert('Кнопка демонстрации экрана доступна, но эта версия Android/браузера не даёт веб-приложению захватывать экран. Для полноценной демонстрации на таком устройстве нужен нативный Android-модуль MediaProjection.');
     return
   }
   const participant=state.room.localParticipant;
@@ -3775,11 +3779,15 @@ function updatePrivateVideoControls(){
 function updatePrivateScreenShareControls(){
   const button=$('screenShareCall');
   if(!button)return;
-  button.classList.toggle('hidden',!screenShareSupported());
+  button.classList.remove('hidden');
+  const supported=screenShareSupported();
   const sharing=!!currentCall?.screenSharing;
   button.classList.toggle('sharing',sharing);
+  button.classList.toggle('off',!supported&&!sharing);
   button.textContent=sharing?'⏹️':'🖥️';
-  button.title=sharing?'Остановить демонстрацию экрана':'Демонстрация экрана';
+  button.title=sharing
+    ?'Остановить демонстрацию экрана'
+    :(supported?'Демонстрация экрана':'Демонстрация экрана — требуется поддержка устройства');
   button.disabled=!!currentCall?.screenShareBusy
 }
 
@@ -3877,7 +3885,7 @@ async function startPrivateScreenShare(){
     return
   }
   if(!screenShareSupported()){
-    alert('Этот браузер не поддерживает демонстрацию экрана');
+    alert('Кнопка демонстрации экрана доступна, но эта версия Android/браузера не даёт веб-приложению захватывать экран. Для полноценной демонстрации на таком устройстве нужен нативный Android-модуль MediaProjection.');
     return
   }
 
@@ -4020,7 +4028,7 @@ function showCallUi(name,status,video,incoming=false){
   $('activeCallControls').classList.toggle('hidden',incoming);
   updateSpeakerButtons();
   $('cameraCall').classList.remove('hidden');
-  $('screenShareCall').classList.toggle('hidden',!screenShareSupported());
+  $('screenShareCall').classList.remove('hidden');
   updatePrivateVideoControls()
 }
 
