@@ -6,6 +6,7 @@ text = manifest.read_text()
 permissions = """    <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -24,6 +25,7 @@ else:
     extra_permissions = []
     for permission in [
         "android.permission.REQUEST_INSTALL_PACKAGES",
+        "android.permission.VIBRATE",
         "android.permission.WAKE_LOCK",
         "android.permission.READ_CONTACTS",
         "android.permission.FOREGROUND_SERVICE",
@@ -196,6 +198,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(NativeScreenSharePlugin.class);
         registerPlugin(NativeProximityPlugin.class);
         registerPlugin(NativeContactsPlugin.class);
+        registerPlugin(NativeVibrationPlugin.class);
         super.onCreate(savedInstanceState);
 
         updaterPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -826,6 +829,119 @@ public class NativeContactsPlugin extends Plugin {
         } catch (Exception ignored) {
             return null;
         }
+    }
+}
+''')
+
+vibration_plugin = Path(
+    "android/app/src/main/java/ru/svoi/mobile/NativeVibrationPlugin.java"
+)
+vibration_plugin.write_text(r'''package ru.svoi.mobile;
+
+import android.content.Context;
+import android.os.Build;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.os.VibratorManager;
+
+import com.getcapacitor.JSArray;
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+
+@CapacitorPlugin(name = "NativeVibration")
+public class NativeVibrationPlugin extends Plugin {
+    private Vibrator vibrator() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                VibratorManager manager = (VibratorManager)
+                    getContext().getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
+                return manager == null ? null : manager.getDefaultVibrator();
+            }
+            return (Vibrator) getContext().getSystemService(Context.VIBRATOR_SERVICE);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    @PluginMethod
+    public void isAvailable(PluginCall call) {
+        Vibrator vibrator = vibrator();
+        JSObject result = new JSObject();
+        result.put("available", vibrator != null && vibrator.hasVibrator());
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void vibrate(PluginCall call) {
+        Vibrator vibrator = vibrator();
+        if (vibrator == null || !vibrator.hasVibrator()) {
+            call.reject("Вибрация недоступна");
+            return;
+        }
+
+        try {
+            JSArray input = call.getArray("pattern");
+            if (input == null || input.length() == 0) {
+                call.reject("Не задан шаблон вибрации");
+                return;
+            }
+
+            long[] pattern = new long[input.length()];
+            for (int i = 0; i < input.length(); i++) {
+                pattern[i] = Math.max(0L, input.getLong(i));
+            }
+
+            if (pattern.length == 1) {
+                long duration = Math.max(1L, pattern[0]);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(
+                        VibrationEffect.createOneShot(
+                            duration,
+                            VibrationEffect.DEFAULT_AMPLITUDE
+                        )
+                    );
+                } else {
+                    vibrator.vibrate(duration);
+                }
+            } else {
+                // Web Vibration API patterns start with vibration duration.
+                // Android waveforms start with delay, so prepend a zero delay.
+                long[] waveform = new long[pattern.length + 1];
+                waveform[0] = 0L;
+                System.arraycopy(pattern, 0, waveform, 1, pattern.length);
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(
+                        VibrationEffect.createWaveform(waveform, -1)
+                    );
+                } else {
+                    vibrator.vibrate(waveform, -1);
+                }
+            }
+
+            call.resolve();
+        } catch (Exception error) {
+            call.reject(
+                error.getMessage() != null
+                    ? error.getMessage()
+                    : "Не удалось включить вибрацию"
+            );
+        }
+    }
+
+    @PluginMethod
+    public void cancel(PluginCall call) {
+        Vibrator vibrator = vibrator();
+        if (vibrator != null) {
+            try {
+                vibrator.cancel();
+            } catch (Exception ignored) {
+            }
+        }
+        call.resolve();
     }
 }
 ''')
