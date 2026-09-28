@@ -4763,6 +4763,38 @@ async def broadcast_presence(
         await push(peer_id, payload)
 
 
+async def finish_answered_call_after_disconnect_grace(
+    call_id: str,
+    user_id: int,
+    delay_seconds: float = 12.0,
+):
+    await asyncio.sleep(delay_seconds)
+
+    call = active_calls.get(call_id)
+    if not call or not call.get("answered"):
+        return
+    if user_id not in (call.get("caller_id"), call.get("callee_id")):
+        return
+    if connections.get(user_id):
+        return
+
+    finish_call_history(call_id, "completed")
+    peer_id = (
+        call["callee_id"]
+        if user_id == call["caller_id"]
+        else call["caller_id"]
+    )
+    await push(
+        peer_id,
+        {
+            "type": "call_end",
+            "from_user_id": user_id,
+            "call_id": call_id,
+        },
+    )
+    active_calls.pop(call_id, None)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     conn = connect_db()
@@ -5043,10 +5075,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     continue
                 if user_id == target_id:
                     continue
-                if signal_type == "call_video_offer":
+
+                requested_video = bool(data.get("video", False))
+                reconnect = bool(data.get("reconnect", False))
+
+                if signal_type == "call_video_offer" and requested_video:
                     call["video"] = True
                     mark_call_video(call_id)
-                payload["video"] = True
+
+                if reconnect and not requested_video:
+                    payload["video"] = bool(call.get("video", False))
+                else:
+                    payload["video"] = requested_video
+
+                payload["reconnect"] = reconnect
                 await push(target_id, payload)
                 continue
 
@@ -5133,22 +5175,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 and user_id in (call["caller_id"], call["callee_id"])
             ]
             for call in connected:
-                finish_call_history(call["call_id"], "completed")
-                peer_id = (
-                    call["callee_id"]
-                    if user_id == call["caller_id"]
-                    else call["caller_id"]
+                asyncio.create_task(
+                    finish_answered_call_after_disconnect_grace(
+                        call["call_id"],
+                        user_id,
+                    )
                 )
-                await push(
-                    peer_id,
-                    {
-                        "type": "call_end",
-                        "from_user_id": user_id,
-                        "from_name": display_name,
-                        "call_id": call["call_id"],
-                    },
-                )
-                active_calls.pop(call["call_id"], None)
 
 
 @app.get("/manifest.webmanifest")
