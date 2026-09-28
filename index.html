@@ -6134,8 +6134,10 @@ async function requestIncomingMediaPermission(){
 
 $('mediaPermissionBtn').onclick=requestIncomingMediaPermission;
 
-async function acceptIncomingCall(){
-  if(!pendingCall||acceptingCall)return;
+async function acceptIncomingCall(options={}){
+  if(!pendingCall||acceptingCall)return false;
+  const nativeResume=!!options.nativeResume;
+  const suppressFailureAlert=!!options.suppressFailureAlert;
   stopRingtone();
   acceptingCall=true;
   const data=pendingCall;
@@ -6154,7 +6156,7 @@ async function acceptIncomingCall(){
     preparedMediaStream=null;
     if(!pendingCall||pendingCall.call_id!==data.call_id){
       stream.getTracks().forEach(t=>t.stop());
-      return
+      return currentCall?.callId===data.call_id
     }
     const pc=await createPeer(
       data.from_user_id,
@@ -6187,13 +6189,37 @@ async function acceptIncomingCall(){
       updateMiniCallBar();
       updateEarModeButton()
     }
+    return true
   }catch(err){
+    if(nativeResume){
+      const failed=currentCall?.callId===data.call_id?currentCall:null;
+      if(failed){
+        clearPrivateRecovery(failed);
+        try{failed.pc.onicecandidate=null;failed.pc.ontrack=null;failed.pc.close()}catch{}
+        try{failed.localStream?.getTracks().forEach(t=>t.stop())}catch{}
+        if(currentCall===failed)currentCall=null
+      }
+      if(preparedMediaStream){
+        try{preparedMediaStream.getTracks().forEach(t=>t.stop())}catch{}
+        preparedMediaStream=null
+      }
+      pendingCall=data;
+      $('incomingActions').classList.add('hidden');
+      $('activeCallControls').classList.add('hidden');
+      $('callStatus').textContent='Подключаем звонок…';
+      if(!suppressFailureAlert){
+        alert(err?.message||'Не удалось принять звонок')
+      }
+      return false
+    }
+
     try{wsSend({type:'call_reject',to_user_id:data.from_user_id,call_id:data.call_id})}catch{}
     finishCall(false);
     const message=err.name==='NotAllowedError'
       ?'Нужен доступ к микрофону и камере'
       :(err.message||'Не удалось принять звонок');
-    alert(message)
+    alert(message);
+    return false
   }finally{
     acceptingCall=false;
     $('acceptCall').disabled=false;$('rejectCall').disabled=false
@@ -6430,14 +6456,36 @@ async function handleCallSignal(data){
   }
   if(data.type==='call_answer'){
     if(!currentCall||currentCall.callId!==data.call_id)return;
+    const call=currentCall;
     stopOutgoingTone();
-    currentCall.answered=true;
+    call.answered=true;
     updateMiniCallBar();
     updateEarModeButton();
+
+    // Cold-start Android acceptance can deliver the same answer more than
+    // once through reconnect/restore paths. A duplicate answer in stable
+    // signaling state is harmless and must not terminate the call.
+    if(
+      call.pc.signalingState==='stable'
+      && call.pc.remoteDescription?.type==='answer'
+    ){
+      $('callStatus').textContent=call.pc.connectionState==='connected'
+        ?'Соединено'
+        :'Соединение…';
+      return
+    }
+
     try{
-      await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-      await flushPendingIce();$('callStatus').textContent='Соединение…'
-    }catch{finishCall(false)}
+      if(call.pc.signalingState==='have-local-offer'){
+        await call.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        await flushPendingIce()
+      }
+      $('callStatus').textContent='Соединение…'
+    }catch(err){
+      if(currentCall!==call)return;
+      $('callStatus').textContent='Восстанавливаем связь…';
+      schedulePrivateCallRecovery(call,900)
+    }
   }
 }
 
@@ -6675,73 +6723,131 @@ function clearPendingNativeCallAction(){
   try{sessionStorage.removeItem('svoi_pending_native_call')}catch{}
 }
 
+let nativeAcceptRestoreCallId=null;
+
 async function restoreIncomingCallAction(action){
   if(!action?.callId)return;
   const callId=String(action.callId);
   const nativeSystemControls=!!(action.nativeRing||action.nativeAccept);
 
-  if(nativeSystemControls){
-    $('incomingActions')?.classList.add('hidden');
-  }
-
-  await waitForAppForeground();
-  await waitForSocketOpen(10000);
-
-  let data=null;
-  try{
-    data=await api('/api/calls/pending/'+encodeURIComponent(callId))
-  }catch(err){
-    if(
-      err?.status===404
-      && pendingCall?.call_id===callId
-    ){
-      data=pendingCall
-    }else{
-      throw err
-    }
-  }
-
-  if(data&&pendingCall?.call_id!==callId&&currentCall?.callId!==callId){
-    incomingCall(
-      data,
-      nativeSystemControls,
-      nativeSystemControls
-    )
-  }else if(nativeSystemControls&&pendingCall?.call_id===callId){
-    $('incomingActions')?.classList.add('hidden');
-    if(data?.from_avatar_url){
-      pendingCall.from_avatar_url=data.from_avatar_url
-    }
-    setCallVisual(
-      data?.from_name||pendingCall?.from_name||$('callName')?.textContent,
-      data?.from_avatar_url||pendingCall?.from_avatar_url||null
-    )
-  }
-
   if(action.nativeAccept){
-    const started=Date.now();
-    while(
-      !pendingCall
-      && !currentCall
-      && Date.now()-started<4000
-    ){
-      await new Promise(resolve=>setTimeout(resolve,100))
-    }
-
-    if(currentCall?.callId===callId){
-      clearPendingNativeCallAction();
-      return
-    }
-    if(!pendingCall||pendingCall.call_id!==callId){
-      throw new Error('Входящий звонок ещё не готов')
-    }
-
-    await new Promise(resolve=>setTimeout(resolve,350));
-    await acceptIncomingCall()
+    if(nativeAcceptRestoreCallId===callId)return;
+    nativeAcceptRestoreCallId=callId
   }
 
-  clearPendingNativeCallAction();
-  history.replaceState({},'',location.pathname)
+  try{
+    if(nativeSystemControls){
+      $('incomingActions')?.classList.add('hidden');
+    }
+
+    await waitForAppForeground();
+    await waitForSocketOpen(12000);
+
+    let data=null;
+    try{
+      data=await api('/api/calls/pending/'+encodeURIComponent(callId))
+    }catch(err){
+      if(
+        err?.status===404
+        && pendingCall?.call_id===callId
+      ){
+        data=pendingCall
+      }else if(currentCall?.callId===callId){
+        clearPendingNativeCallAction();
+        history.replaceState({},'',location.pathname);
+        return
+      }else{
+        throw err
+      }
+    }
+
+    if(data&&pendingCall?.call_id!==callId&&currentCall?.callId!==callId){
+      incomingCall(
+        data,
+        nativeSystemControls,
+        nativeSystemControls
+      )
+    }else if(nativeSystemControls&&pendingCall?.call_id===callId){
+      $('incomingActions')?.classList.add('hidden');
+      if(data?.from_avatar_url){
+        pendingCall.from_avatar_url=data.from_avatar_url
+      }
+      setCallVisual(
+        data?.from_name||pendingCall?.from_name||$('callName')?.textContent,
+        data?.from_avatar_url||pendingCall?.from_avatar_url||null
+      )
+    }
+
+    if(action.nativeAccept){
+      const readyStarted=Date.now();
+      while(
+        !pendingCall
+        && !currentCall
+        && Date.now()-readyStarted<5000
+      ){
+        await new Promise(resolve=>setTimeout(resolve,120))
+      }
+
+      if(currentCall?.callId===callId){
+        clearPendingNativeCallAction();
+        history.replaceState({},'',location.pathname);
+        return
+      }
+      if(!pendingCall||pendingCall.call_id!==callId){
+        throw new Error('Входящий звонок ещё не готов')
+      }
+
+      // A cold Android WebView can report itself visible slightly before
+      // microphone/WebRTC is fully ready. Give the Activity a moment and
+      // retry transient failures instead of rejecting the call immediately.
+      await new Promise(resolve=>setTimeout(resolve,750));
+
+      let accepted=false;
+      let lastError=null;
+      for(let attempt=0;attempt<3&&!accepted;attempt++){
+        try{
+          accepted=await acceptIncomingCall({
+            nativeResume:true,
+            suppressFailureAlert:true
+          })
+        }catch(err){
+          lastError=err
+        }
+        if(accepted)break;
+
+        if(currentCall?.callId===callId){
+          accepted=true;
+          break
+        }
+
+        if(!pendingCall||pendingCall.call_id!==callId){
+          try{
+            const refreshed=await api(
+              '/api/calls/pending/'+encodeURIComponent(callId)
+            );
+            incomingCall(refreshed,true,true)
+          }catch(err){
+            lastError=err;
+            break
+          }
+        }
+
+        $('callStatus').textContent='Подключаем звонок…';
+        await new Promise(resolve=>setTimeout(resolve,650+attempt*350))
+      }
+
+      if(!accepted&&currentCall?.callId!==callId){
+        throw lastError||new Error('Не удалось подключить звонок')
+      }
+    }
+
+    clearPendingNativeCallAction();
+    history.replaceState({},'',location.pathname)
+  }finally{
+    if(action.nativeAccept&&nativeAcceptRestoreCallId===callId){
+      nativeAcceptRestoreCallId=null
+    }
+  }
 }
 
 window.handleNativeCallAction=async path=>{
