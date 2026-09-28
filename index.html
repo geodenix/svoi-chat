@@ -33,6 +33,10 @@
 .admin-service strong,.admin-user-copy{min-width:0;flex:1}.admin-user-copy strong,.admin-user-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.admin-user-copy small{color:#8fa3be;margin-top:2px}
 .admin-service-state{font-size:11px;font-weight:800;padding:4px 8px;border-radius:999px;background:#35445a;color:#d5deeb}.admin-service-state.active{background:#214f39;color:#aef0c8}.admin-service-state.bad{background:#65313a;color:#ffd1d6}
 .admin-user-online{width:9px;height:9px;border-radius:50%;background:#55667e;flex:0 0 9px}.admin-user-online.on{background:#45d78e}
+.edit-message-dialog{width:min(92vw,520px)}
+.edit-message-dialog textarea{width:100%;min-height:130px;max-height:48dvh;resize:vertical;border:1px solid #354b68;background:#0f1d30;color:#fff;border-radius:14px;padding:12px 13px;margin:12px 0;line-height:1.4}
+.edit-message-dialog .edit-hint{font-size:12px;color:#8fa3be;margin-top:4px}
+.edited-label{font-size:10px;color:#9db1ca;white-space:nowrap}
 .menu-toggle{width:44px;height:44px;border:0;border-radius:13px;background:#17283f;color:#fff;font-size:24px;display:grid;place-items:center;flex:0 0 44px}
 .drawer-backdrop{position:fixed;inset:0;z-index:1600;background:#0008;opacity:0;pointer-events:none;transition:opacity .2s ease}
 .drawer-backdrop.open{opacity:1;pointer-events:auto}
@@ -196,6 +200,22 @@ body.drawer-open{overflow:hidden}
   </div>
 </dialog>
 
+<dialog id="editMessageDialog" class="edit-message-dialog">
+  <div class="chat-menu-head">
+    <div>
+      <h2>Редактировать сообщение</h2>
+      <small class="muted">После сохранения появится отметка «изменено»</small>
+    </div>
+    <button id="closeEditMessage" class="chat-menu-close" type="button" aria-label="Закрыть">×</button>
+  </div>
+  <textarea id="editMessageText" maxlength="4000" placeholder="Текст сообщения"></textarea>
+  <div id="editMessageError" class="error"></div>
+  <div class="dialog-actions">
+    <button id="cancelEditMessage" type="button">Отмена</button>
+    <button id="saveEditMessage" class="primary" type="button">Сохранить</button>
+  </div>
+</dialog>
+
 <dialog id="forwardDialog" class="forward-dialog">
   <div class="chat-menu-head">
     <div>
@@ -317,7 +337,7 @@ const $=id=>document.getElementById(id);
 let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],callHistory=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false,foundUser=null;
 let chatBackgroundRequest=0,currentChatBackgroundUrl='';
 let currentMessages=[],typingStopTimer=null,lastTypingSentAt=0;
-let forwardSource=null,replySource=null;
+let forwardSource=null,replySource=null,editSource=null;
 const incomingTyping=new Map();
 let messageRecorder=null,messageRecordStream=null,messageRecordChunks=[],messageRecordKind=null,messageRecordTimer=null,messageRecordStartedAt=0,messageRecordBlob=null,messageRecordMime='',messageRecordTarget=null,messageRecordAction=null,messageRecordObjectUrl='';
 let messageRecordFacing='user';
@@ -1314,7 +1334,17 @@ function formatMediaSeconds(value){
 function replaceMessageNode(message){
   currentMessages=currentMessages.map(item=>Number(item.id)===Number(message.id)?message:item);
   const node=document.querySelector('.bubble[data-message-id="'+message.id+'"]');
-  if(node)node.replaceWith(msgNode(message))
+  if(node)node.replaceWith(msgNode(message));
+
+  for(const item of currentMessages){
+    if(Number(item.reply_to_message_id)!==Number(message.id))continue;
+    const replyNode=document.querySelector('.bubble[data-message-id="'+item.id+'"]');
+    if(replyNode)replyNode.replaceWith(msgNode(item))
+  }
+
+  if($('messageSearchDialog')?.open){
+    performMessageSearch($('messageSearchInput').value)
+  }
 }
 
 function applyGroupMessageDeleted(groupId,messageId,deletedAt){
@@ -1562,6 +1592,77 @@ function performMessageSearch(query){
   }
 }
 
+function openEditMessage(message){
+  if(
+    !active
+    || !message
+    || message.deleted
+    || Number(message.sender_id)!==Number(me?.id)
+  )return;
+
+  editSource={
+    type:active.type,
+    chat_id:Number(active.data.id),
+    message_id:Number(message.id)
+  };
+  $('editMessageText').value=message.body||'';
+  $('editMessageError').textContent='';
+  $('editMessageDialog').showModal();
+  setTimeout(()=>{
+    $('editMessageText').focus();
+    $('editMessageText').setSelectionRange(
+      $('editMessageText').value.length,
+      $('editMessageText').value.length
+    )
+  },0)
+}
+
+function closeEditMessageDialog(){
+  editSource=null;
+  $('editMessageError').textContent='';
+  if($('editMessageDialog').open)$('editMessageDialog').close()
+}
+
+async function saveEditedMessage(){
+  if(!editSource)return;
+  const source={...editSource};
+  const message=currentMessages.find(
+    item=>Number(item.id)===source.message_id
+  );
+  const body=$('editMessageText').value.trim();
+
+  if(!body&&!message?.attachment){
+    $('editMessageError').textContent='Сообщение не может быть пустым';
+    return
+  }
+
+  const button=$('saveEditMessage');
+  button.disabled=true;
+  $('editMessageError').textContent='';
+  try{
+    const endpoint=source.type==='group'
+      ?'/api/groups/'+source.chat_id+'/messages/'+source.message_id
+      :'/api/messages/'+source.message_id;
+    const updated=await api(endpoint,{
+      method:'PATCH',
+      body:{body}
+    });
+
+    if(
+      active
+      && active.type===source.type
+      && Number(active.data.id)===source.chat_id
+    ){
+      replaceMessageNode(updated)
+    }
+    closeEditMessageDialog()
+  }catch(err){
+    $('editMessageError').textContent=err.message||'Не удалось изменить сообщение'
+  }finally{
+    button.disabled=false
+  }
+}
+
 function renderForwardTargets(){
   const box=$('forwardList');
   box.replaceChildren();
@@ -1780,6 +1881,17 @@ function msgNode(m){
   }
   const meta=document.createElement('div');meta.className='meta';
   if(!m.deleted){
+    if(Number(m.sender_id)===Number(me?.id)){
+      const edit=document.createElement('button');
+      edit.className='message-action';
+      edit.type='button';
+      edit.textContent='✎';
+      edit.title='Редактировать';
+      edit.setAttribute('aria-label','Редактировать сообщение');
+      edit.onclick=event=>{event.stopPropagation();openEditMessage(m)};
+      meta.append(edit)
+    }
+
     const reply=document.createElement('button');
     reply.className='message-action';
     reply.type='button';
@@ -1815,6 +1927,13 @@ function msgNode(m){
       del.onclick=event=>{event.stopPropagation();deleteGroupMessageForAll(m)};
       meta.append(del)
     }
+  }
+  if(m.edited_at&&!m.deleted){
+    const edited=document.createElement('span');
+    edited.className='edited-label';
+    edited.textContent='изменено';
+    edited.title='Изменено '+new Date(m.edited_at).toLocaleString('ru-RU');
+    meta.append(edited)
   }
   const t=document.createElement('time');t.textContent=new Date(m.created_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});meta.append(t);
   const label=receiptLabel(m);
@@ -3825,6 +3944,19 @@ function connectWs(){
       }
       loadUsers().catch(()=>{})
     }
+    if(data.type==='message_edited'){
+      const m=data.message;
+      if(
+        active?.type==='user'
+        && (
+          Number(m.sender_id)===Number(active.data.id)
+          || Number(m.recipient_id)===Number(active.data.id)
+        )
+      ){
+        replaceMessageNode(m)
+      }
+      return
+    }
     if(data.type==='read_receipt'){
       if(active?.type==='user'&&data.reader_id===active.data.id){
         for(const id of data.message_ids||[]){
@@ -3843,6 +3975,16 @@ function connectWs(){
       }
       if(active?.type==='group'&&m.group_id===active.data.id)appendMessage(m);
       loadGroups().catch(()=>{})
+    }
+    if(data.type==='group_message_edited'){
+      const m=data.message;
+      if(
+        active?.type==='group'
+        && Number(active.data.id)===Number(data.group_id)
+      ){
+        replaceMessageNode(m)
+      }
+      return
     }
     if(data.type==='group_message_deleted'){
       applyGroupMessageDeleted(
@@ -3935,6 +4077,23 @@ function connectWs(){
   };
   socket.onclose=()=>{if(currentCall||pendingCall)finishCall(false);clearTimeout(retry);if(token)retry=setTimeout(connectWs,2500)}
 }
+
+$('closeEditMessage').onclick=closeEditMessageDialog;
+$('cancelEditMessage').onclick=closeEditMessageDialog;
+$('saveEditMessage').onclick=()=>saveEditedMessage();
+$('editMessageText').addEventListener('keydown',event=>{
+  if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){
+    event.preventDefault();
+    saveEditedMessage()
+  }
+});
+$('editMessageDialog').addEventListener('click',event=>{
+  if(event.target===$('editMessageDialog'))closeEditMessageDialog()
+});
+$('editMessageDialog').addEventListener('close',()=>{
+  editSource=null;
+  $('editMessageError').textContent=''
+});
 
 $('closeForwardDialog').onclick=()=>{
   forwardSource=null;
