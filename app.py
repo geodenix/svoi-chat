@@ -2483,6 +2483,7 @@ async def forward_message(
         "has_mentions": bool(mention_ids),
         "can_delete": True,
         "can_restore": False,
+        "show_deleted_notice": False,
     }
     members = conn.execute(
         "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
@@ -2941,6 +2942,8 @@ def get_group_messages(
     is_admin = bool(group["is_admin"])
     for row in reversed(rows):
         deleted = bool(row["deleted_at"])
+        if deleted and not is_admin:
+            continue
         item = {
             "id": row["id"],
             "group_id": row["group_id"],
@@ -2960,6 +2963,7 @@ def get_group_messages(
                 and (is_admin or row["sender_id"] == user["id"])
             ),
             "can_restore": deleted and is_admin,
+            "show_deleted_notice": deleted and is_admin,
             "attachment": None if deleted else attachment_json(row),
         }
         result.append(item)
@@ -3020,6 +3024,7 @@ async def send_group_message(
                 "has_mentions": bool(existing["has_mentions"]) and not deleted,
                 "can_delete": not deleted,
                 "can_restore": False,
+                "show_deleted_notice": False,
             }
     if data.reply_to_message_id is not None:
         reply_row = conn.execute(
@@ -3270,23 +3275,27 @@ async def delete_group_message(
     conn.commit()
 
     members = conn.execute(
-        "SELECT user_id FROM group_members WHERE group_id=?",
+        "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
         (group_id,),
     ).fetchall()
-    event = {
-        "type": "group_message_deleted",
-        "group_id": group_id,
-        "message_id": message_id,
-        "deleted_at": deleted_at,
-    }
     for member in members:
-        await push(int(member["user_id"]), event)
+        await push(
+            int(member["user_id"]),
+            {
+                "type": "group_message_deleted",
+                "group_id": group_id,
+                "message_id": message_id,
+                "deleted_at": deleted_at,
+                "show_deleted_notice": bool(member["is_admin"]),
+            },
+        )
 
     return {
         "ok": True,
         "group_id": group_id,
         "message_id": message_id,
         "deleted_at": deleted_at,
+        "show_deleted_notice": bool(group["is_admin"]),
     }
 
 
@@ -3356,6 +3365,7 @@ async def restore_group_message(
         "has_mentions": bool(row["has_mentions"]),
         "can_delete": True,
         "can_restore": False,
+        "show_deleted_notice": False,
     }
 
     members = conn.execute(
