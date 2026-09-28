@@ -3333,7 +3333,7 @@ async def restore_group_message(
            JOIN users u ON u.id=gm.sender_id
            LEFT JOIN uploads up ON up.id=gm.attachment_id
            WHERE gm.id=? AND gm.group_id=?""",
-        (message_id, group_id),
+        (user["id"], message_id, group_id),
     ).fetchone()
     if not row:
         raise HTTPException(404, "Сообщение не найдено")
