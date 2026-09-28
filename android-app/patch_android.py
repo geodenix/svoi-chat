@@ -281,6 +281,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(NativeScreenSharePlugin.class);
         registerPlugin(NativeProximityPlugin.class);
+        registerPlugin(NativeAudioRoutePlugin.class);
         registerPlugin(NativeContactsPlugin.class);
         registerPlugin(NativeVibrationPlugin.class);
         registerPlugin(NativeBadgePlugin.class);
@@ -1620,6 +1621,205 @@ public class NativeVibrationPlugin extends Plugin {
             }
         }
         call.resolve();
+    }
+}
+''')
+
+audio_route_plugin = Path(
+    "android/app/src/main/java/ru/svoi/mobile/NativeAudioRoutePlugin.java"
+)
+audio_route_plugin.write_text(r'''package ru.svoi.mobile;
+
+import android.content.Context;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
+import android.os.Build;
+
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+
+import java.util.List;
+
+@CapacitorPlugin(name = "NativeAudioRoute")
+public class NativeAudioRoutePlugin extends Plugin {
+    private Integer previousMode = null;
+    private Boolean previousSpeakerphone = null;
+
+    private AudioManager audioManager() {
+        return (AudioManager)
+            getContext().getSystemService(Context.AUDIO_SERVICE);
+    }
+
+    private void rememberState(AudioManager manager) {
+        if (previousMode == null) {
+            previousMode = manager.getMode();
+        }
+        if (previousSpeakerphone == null) {
+            previousSpeakerphone = manager.isSpeakerphoneOn();
+        }
+    }
+
+    private AudioDeviceInfo findCommunicationDevice(
+        AudioManager manager,
+        int wantedType
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return null;
+        }
+
+        List<AudioDeviceInfo> devices =
+            manager.getAvailableCommunicationDevices();
+
+        for (AudioDeviceInfo device : devices) {
+            if (device.getType() == wantedType) {
+                return device;
+            }
+        }
+        return null;
+    }
+
+    private boolean routeSpeaker(AudioManager manager) {
+        manager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AudioDeviceInfo speaker = findCommunicationDevice(
+                manager,
+                AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            );
+            if (speaker != null && manager.setCommunicationDevice(speaker)) {
+                return true;
+            }
+        }
+
+        manager.setSpeakerphoneOn(true);
+        return manager.isSpeakerphoneOn();
+    }
+
+    private boolean routeEarpiece(AudioManager manager) {
+        manager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AudioDeviceInfo earpiece = findCommunicationDevice(
+                manager,
+                AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+            );
+            if (earpiece != null && manager.setCommunicationDevice(earpiece)) {
+                return true;
+            }
+            manager.clearCommunicationDevice();
+        }
+
+        manager.setSpeakerphoneOn(false);
+        return !manager.isSpeakerphoneOn();
+    }
+
+    @PluginMethod
+    public void setSpeaker(PluginCall call) {
+        AudioManager manager = audioManager();
+        if (manager == null) {
+            call.reject("Аудиосистема Android недоступна");
+            return;
+        }
+
+        boolean enabled = call.getBoolean("enabled", false);
+        rememberState(manager);
+
+        try {
+            boolean applied = enabled
+                ? routeSpeaker(manager)
+                : routeEarpiece(manager);
+
+            JSObject result = new JSObject();
+            result.put("speaker", enabled);
+            result.put("applied", applied);
+            result.put("mode", manager.getMode());
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject(
+                error.getMessage() != null
+                    ? error.getMessage()
+                    : "Не удалось переключить аудиовыход"
+            );
+        }
+    }
+
+    @PluginMethod
+    public void status(PluginCall call) {
+        AudioManager manager = audioManager();
+        if (manager == null) {
+            call.reject("Аудиосистема Android недоступна");
+            return;
+        }
+
+        JSObject result = new JSObject();
+        boolean speaker = manager.isSpeakerphoneOn();
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AudioDeviceInfo current = manager.getCommunicationDevice();
+            if (current != null) {
+                speaker = current.getType()
+                    == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER;
+                result.put("deviceType", current.getType());
+                result.put("deviceName", String.valueOf(current.getProductName()));
+            }
+        }
+
+        result.put("speaker", speaker);
+        result.put("mode", manager.getMode());
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void reset(PluginCall call) {
+        AudioManager manager = audioManager();
+        if (manager != null) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    manager.clearCommunicationDevice();
+                }
+                if (previousSpeakerphone != null) {
+                    manager.setSpeakerphoneOn(previousSpeakerphone);
+                } else {
+                    manager.setSpeakerphoneOn(false);
+                }
+                if (previousMode != null) {
+                    manager.setMode(previousMode);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        previousMode = null;
+        previousSpeakerphone = null;
+
+        JSObject result = new JSObject();
+        result.put("reset", true);
+        call.resolve(result);
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        AudioManager manager = audioManager();
+        if (manager != null) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    manager.clearCommunicationDevice();
+                }
+                if (previousSpeakerphone != null) {
+                    manager.setSpeakerphoneOn(previousSpeakerphone);
+                }
+                if (previousMode != null) {
+                    manager.setMode(previousMode);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        previousMode = null;
+        previousSpeakerphone = null;
+        super.handleOnDestroy();
     }
 }
 ''')
