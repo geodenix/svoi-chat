@@ -10,8 +10,6 @@ import shutil
 import sqlite3
 import subprocess
 import time
-import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Set
@@ -63,14 +61,6 @@ SERVER_ADMIN_IDS = {
     for value in os.getenv("SVOI_SERVER_ADMIN_IDS", "").split(",")
     if value.strip().isdigit()
 }
-SMS_RU_API_ID = os.getenv("SMS_RU_API_ID", "").strip()
-SMS_RU_FROM = os.getenv("SMS_RU_FROM", "").strip()
-SMS_RU_TEST = os.getenv("SMS_RU_TEST", "0").strip() == "1"
-SMS_CODE_TTL_SECONDS = 10 * 60
-SMS_RESEND_COOLDOWN_SECONDS = 60
-SMS_MAX_REQUESTS_24H = 10
-SMS_MAX_VERIFY_ATTEMPTS = 5
-
 APP_STARTED_AT = time.time()
 
 app = FastAPI(title="Свои", version="0.1.0")
@@ -468,62 +458,6 @@ def phone_lookup_hash(value: str) -> tuple[str, str]:
     return digest, digits[-4:]
 
 
-def send_phone_verification_sms(phone_digits: str, code: str) -> None:
-    if not SMS_RU_API_ID:
-        raise HTTPException(
-            503,
-            "SMS-подтверждение пока не настроено на сервере",
-        )
-
-    payload = {
-        "api_id": SMS_RU_API_ID,
-        "to": phone_digits,
-        "msg": (
-            f"Код подтверждения Свои: {code}. "
-            "Никому не сообщайте этот код."
-        ),
-        "json": "1",
-    }
-    if SMS_RU_FROM:
-        payload["from"] = SMS_RU_FROM
-    if SMS_RU_TEST:
-        payload["test"] = "1"
-
-    request = urllib.request.Request(
-        "https://sms.ru/sms/send",
-        data=urllib.parse.urlencode(payload).encode("utf-8"),
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "Svoi-Messenger/1.0",
-        },
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=12) as response:
-            raw = response.read().decode("utf-8", "replace")
-        result = json.loads(raw)
-    except Exception as error:
-        raise HTTPException(
-            502,
-            "Не удалось связаться с SMS-сервисом",
-        ) from error
-
-    if int(result.get("status_code", 0) or 0) != 100:
-        raise HTTPException(
-            502,
-            "SMS-сервис отклонил отправку кода",
-        )
-
-    sms_info = (result.get("sms") or {}).get(phone_digits) or {}
-    if int(sms_info.get("status_code", 0) or 0) != 100:
-        message = str(
-            sms_info.get("status_text")
-            or "SMS не принято к отправке"
-        )
-        raise HTTPException(502, message)
-
-
 def make_session(conn, user_id: int) -> str:
     token = secrets.token_urlsafe(32)
     conn.execute(
@@ -674,17 +608,9 @@ class PasswordRecoverIn(BaseModel):
     new_password: str = Field(min_length=6, max_length=128)
 
 
-class PhoneSmsRequestIn(BaseModel):
+class PhoneLinkIn(BaseModel):
     phone: str = Field(min_length=8, max_length=40)
     current_password: str = Field(min_length=6, max_length=128)
-
-
-class PhoneSmsVerifyIn(BaseModel):
-    code: str = Field(
-        min_length=6,
-        max_length=6,
-        pattern=r"^[0-9]{6}$",
-    )
 
 
 class PhoneUnlinkIn(BaseModel):
@@ -980,9 +906,10 @@ def account_phone(
     }
 
 
+@app.post("/api/account/phone/link")
 @app.post("/api/account/phone/request")
-def request_phone_verification(
-    data: PhoneSmsRequestIn,
+def link_account_phone(
+    data: PhoneLinkIn,
     user=Depends(current_user),
     conn=Depends(db),
 ):
@@ -1006,190 +933,50 @@ def request_phone_verification(
         """SELECT id
            FROM users
            WHERE phone_hash=?
-             AND phone_verified_at IS NOT NULL
              AND id<>?""",
         (phone_hash, user["id"]),
     ).fetchone()
     if owner:
         raise HTTPException(
             409,
-            "Этот номер уже подтверждён в другом аккаунте",
+            "Этот номер уже привязан к другому аккаунту",
         )
 
-    now = datetime.now(timezone.utc)
-
-    cooldown_cutoff = (
-        now - timedelta(seconds=SMS_RESEND_COOLDOWN_SECONDS)
-    ).isoformat()
-    recent = conn.execute(
-        """SELECT id
-           FROM phone_verifications
-           WHERE user_id=?
-             AND sent_at>=?
-           ORDER BY id DESC
-           LIMIT 1""",
-        (user["id"], cooldown_cutoff),
-    ).fetchone()
-    if recent:
-        raise HTTPException(
-            429,
-            "Подожди минуту перед повторной отправкой кода",
-        )
-
-    day_cutoff = (now - timedelta(hours=24)).isoformat()
-    requests_24h = int(
+    linked_at = now_iso()
+    try:
         conn.execute(
-            """SELECT COUNT(*)
-               FROM phone_verifications
-               WHERE user_id=? AND sent_at>=?""",
-            (user["id"], day_cutoff),
-        ).fetchone()[0]
-    )
-    if requests_24h >= SMS_MAX_REQUESTS_24H:
-        raise HTTPException(
-            429,
-            "Достигнут лимит SMS-кодов. Попробуй позже.",
-        )
-
-    code = f"{secrets.randbelow(1_000_000):06d}"
-    code_hash, code_salt = hash_password(code)
-    sent_at = now.isoformat()
-    expires_at = (
-        now + timedelta(seconds=SMS_CODE_TTL_SECONDS)
-    ).isoformat()
-
-    send_phone_verification_sms(phone_digits, code)
-
-    conn.execute(
-        """INSERT INTO phone_verifications(
-             user_id,phone_hash,phone_last4,
-             code_hash,code_salt,expires_at,sent_at,attempts
-           ) VALUES(?,?,?,?,?,?,?,0)""",
-        (
-            user["id"],
-            phone_hash,
-            last4,
-            code_hash,
-            code_salt,
-            expires_at,
-            sent_at,
-        ),
-    )
-    conn.commit()
-
-    return {
-        "sent": True,
-        "last4": last4,
-        "expires_in": SMS_CODE_TTL_SECONDS,
-        "resend_after": SMS_RESEND_COOLDOWN_SECONDS,
-    }
-
-
-@app.post("/api/account/phone/verify")
-def verify_phone_code(
-    data: PhoneSmsVerifyIn,
-    user=Depends(current_user),
-    conn=Depends(db),
-):
-    now = datetime.now(timezone.utc)
-    row = conn.execute(
-        """SELECT *
-           FROM phone_verifications
-           WHERE user_id=?
-             AND used_at IS NULL
-           ORDER BY id DESC
-           LIMIT 1""",
-        (user["id"],),
-    ).fetchone()
-
-    if not row:
-        raise HTTPException(400, "Сначала запроси SMS-код")
-
-    expires_at = datetime.fromisoformat(
-        str(row["expires_at"]).replace("Z", "+00:00")
-    )
-    if expires_at < now:
-        raise HTTPException(
-            410,
-            "Срок действия кода истёк. Запроси новый.",
-        )
-
-    attempts = int(row["attempts"] or 0)
-    if attempts >= SMS_MAX_VERIFY_ATTEMPTS:
-        raise HTTPException(
-            429,
-            "Слишком много неверных попыток. Запроси новый код.",
-        )
-
-    if not verify_password(
-        data.code,
-        row["code_hash"],
-        row["code_salt"],
-    ):
-        conn.execute(
-            """UPDATE phone_verifications
-               SET attempts=attempts+1
+            """UPDATE users
+               SET phone_hash=?,
+                   phone_last4=?,
+                   phone_linked_at=?,
+                   phone_verified_at=?
                WHERE id=?""",
-            (row["id"],),
+            (
+                phone_hash,
+                last4,
+                linked_at,
+                linked_at,
+                user["id"],
+            ),
         )
-        conn.commit()
-        remaining = max(
-            0,
-            SMS_MAX_VERIFY_ATTEMPTS - attempts - 1,
-        )
-        raise HTTPException(
-            401,
-            f"Неверный код. Осталось попыток: {remaining}",
-        )
-
-    owner = conn.execute(
-        """SELECT id
-           FROM users
-           WHERE phone_hash=?
-             AND phone_verified_at IS NOT NULL
-             AND id<>?""",
-        (row["phone_hash"], user["id"]),
-    ).fetchone()
-    if owner:
+    except sqlite3.IntegrityError as error:
         raise HTTPException(
             409,
-            "Этот номер уже подтверждён в другом аккаунте",
-        )
+            "Этот номер уже привязан к другому аккаунту",
+        ) from error
 
-    verified_at = now.isoformat()
     conn.execute(
-        """UPDATE users
-           SET phone_hash=?,
-               phone_last4=?,
-               phone_linked_at=?,
-               phone_verified_at=?
-           WHERE id=?""",
-        (
-            row["phone_hash"],
-            row["phone_last4"],
-            verified_at,
-            verified_at,
-            user["id"],
-        ),
-    )
-    conn.execute(
-        "UPDATE phone_verifications SET used_at=? WHERE id=?",
-        (verified_at, row["id"]),
-    )
-    conn.execute(
-        """UPDATE phone_verifications
-           SET used_at=COALESCE(used_at,?)
-           WHERE user_id=? AND id<>? AND used_at IS NULL""",
-        (verified_at, user["id"], row["id"]),
+        "DELETE FROM phone_verifications WHERE user_id=?",
+        (user["id"],),
     )
     conn.commit()
 
     return {
         "linked": True,
         "verified": True,
-        "last4": row["phone_last4"],
-        "linked_at": verified_at,
-        "verified_at": verified_at,
+        "last4": last4,
+        "linked_at": linked_at,
+        "verified_at": linked_at,
     }
 
 
