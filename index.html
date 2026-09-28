@@ -516,10 +516,46 @@ function updateSoundButton(){
   button.title=soundsEnabled?'Звуки включены':'Звуки выключены'
 }
 
+function nativeVibrationPlugin(){
+  return window.Capacitor?.Plugins?.NativeVibration||null
+}
+
+function vibrationSupported(){
+  return !!nativeVibrationPlugin()||typeof navigator.vibrate==='function'
+}
+
+function webVibrate(pattern){
+  if(typeof navigator.vibrate!=='function')return false;
+  try{return navigator.vibrate(pattern)!==false}catch{return false}
+}
+
+function performVibration(pattern){
+  if(!vibrationEnabled)return;
+  const normalized=Array.isArray(pattern)?pattern:[pattern];
+  const plugin=nativeVibrationPlugin();
+  if(plugin){
+    plugin.vibrate({pattern:normalized}).catch(()=>{
+      webVibrate(pattern)
+    });
+    return
+  }
+  webVibrate(pattern)
+}
+
+function stopVibration(){
+  const plugin=nativeVibrationPlugin();
+  if(plugin){
+    plugin.cancel().catch(()=>{})
+  }
+  if(typeof navigator.vibrate==='function'){
+    try{navigator.vibrate(0)}catch{}
+  }
+}
+
 function updateVibrationButton(){
   const button=$('vibrationBtn');
   if(!button)return;
-  const supported=typeof navigator.vibrate==='function';
+  const supported=vibrationSupported();
   setDrawerButton(
     button,
     !supported?'—':(vibrationEnabled?'📳':'📴'),
@@ -527,7 +563,7 @@ function updateVibrationButton(){
     !supported?'Нет':(vibrationEnabled?'Вкл':'Выкл')
   );
   button.title=!supported
-    ?'Вибрация не поддерживается браузером'
+    ?'Вибрация недоступна на этом устройстве'
     :(vibrationEnabled?'Вибрация включена':'Вибрация выключена');
   button.disabled=!supported
 }
@@ -621,18 +657,15 @@ function stopOutgoingTone(){
 }
 
 function vibrateMessage(){
-  if(!vibrationEnabled||!navigator.vibrate)return;
-  try{navigator.vibrate(90)}catch{}
+  performVibration(90)
 }
 
 function vibrateIncomingCall(){
-  if(!vibrationEnabled||!navigator.vibrate)return;
-  try{navigator.vibrate([650,220,650,900])}catch{}
+  performVibration([650,220,650,900])
 }
 
 function vibrateGroupInvite(){
-  if(!vibrationEnabled||!navigator.vibrate)return;
-  try{navigator.vibrate([180,120,260])}catch{}
+  performVibration([180,120,260])
 }
 
 async function startRingtone(){
@@ -650,9 +683,7 @@ function stopRingtone(){
     clearInterval(ringtoneTimer);
     ringtoneTimer=null
   }
-  if(navigator.vibrate){
-    try{navigator.vibrate(0)}catch{}
-  }
+  stopVibration()
 }
 
 document.addEventListener('pointerdown',()=>{unlockAudio().catch(()=>{})},{passive:true});
@@ -763,13 +794,13 @@ $('soundBtn').onclick=async()=>{
 };
 
 $('vibrationBtn').onclick=()=>{
-  if(typeof navigator.vibrate!=='function')return;
+  if(!vibrationSupported())return;
   vibrationEnabled=!vibrationEnabled;
   localStorage.setItem('svoi_vibration',vibrationEnabled?'1':'0');
   if(vibrationEnabled){
-    try{navigator.vibrate([90,70,140])}catch{}
+    performVibration([90,70,140])
   }else{
-    try{navigator.vibrate(0)}catch{}
+    stopVibration()
   }
   updateVibrationButton()
 };
