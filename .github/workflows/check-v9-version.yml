@@ -1,0 +1,28 @@
+name: Check v9 APK version
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/check-v9-version.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install build tools
+        run: sdkmanager "build-tools;36.0.0"
+      - name: Download published APK
+        run: |
+          curl -L --fail --retry 3             -o /tmp/svoi.apk             "https://github.com/geodenix/svoi-chat/releases/download/android-v9/svoi.apk"
+      - name: Read APK version
+        run: |
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging /tmp/svoi.apk | head -n 3
