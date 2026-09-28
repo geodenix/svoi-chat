@@ -170,6 +170,30 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_group_message_mentions_user
       ON group_message_mentions(user_id, message_id);
+    CREATE TABLE IF NOT EXISTS message_hidden_by_user (
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      hidden_at TEXT NOT NULL,
+      PRIMARY KEY(message_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_hidden_user
+      ON message_hidden_by_user(user_id, message_id);
+    CREATE TABLE IF NOT EXISTS group_message_hidden_by_user (
+      message_id INTEGER NOT NULL REFERENCES group_messages(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      hidden_at TEXT NOT NULL,
+      PRIMARY KEY(message_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_message_hidden_user
+      ON group_message_hidden_by_user(user_id, message_id);
+    CREATE TABLE IF NOT EXISTS group_message_reads (
+      message_id INTEGER NOT NULL REFERENCES group_messages(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      read_at TEXT NOT NULL,
+      PRIMARY KEY(message_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_message_reads_message
+      ON group_message_reads(message_id, read_at);
     CREATE TABLE IF NOT EXISTS uploads (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -2091,10 +2115,16 @@ async def history(
                   up.size AS attachment_size
            FROM messages m
            LEFT JOIN uploads up ON up.id=m.attachment_id
-           WHERE (m.sender_id=? AND m.recipient_id=?)
-              OR (m.sender_id=? AND m.recipient_id=?)
+           WHERE (
+                (m.sender_id=? AND m.recipient_id=?)
+                OR (m.sender_id=? AND m.recipient_id=?)
+           )
+             AND NOT EXISTS(
+               SELECT 1 FROM message_hidden_by_user mh
+               WHERE mh.message_id=m.id AND mh.user_id=?
+             )
            ORDER BY m.id DESC LIMIT ?""",
-        (user["id"], other_id, other_id, user["id"], limit),
+        (user["id"], other_id, other_id, user["id"], user["id"], limit),
     ).fetchall()
     result = []
     for row in reversed(rows):
@@ -2323,6 +2353,95 @@ async def edit_message(
     await push(int(row["recipient_id"]), event)
     await push(int(user["id"]), event)
     return message
+
+
+@app.delete("/api/messages/{message_id}/me")
+def delete_message_for_me(
+    message_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    row = conn.execute(
+        """SELECT id FROM messages
+           WHERE id=? AND (sender_id=? OR recipient_id=?)""",
+        (message_id, user["id"], user["id"]),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Сообщение не найдено")
+    conn.execute(
+        """INSERT OR REPLACE INTO message_hidden_by_user(
+             message_id,user_id,hidden_at
+           ) VALUES(?,?,?)""",
+        (message_id, user["id"], now_iso()),
+    )
+    conn.commit()
+    return {"ok": True, "message_id": message_id}
+
+
+@app.delete("/api/messages/{message_id}/all")
+async def delete_message_for_all(
+    message_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    row = conn.execute(
+        """SELECT id,sender_id,recipient_id FROM messages
+           WHERE id=?""",
+        (message_id,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Сообщение не найдено")
+    if int(row["sender_id"]) != int(user["id"]):
+        raise HTTPException(403, "Удалить для всех можно только своё сообщение")
+
+    recipient_id = int(row["recipient_id"])
+    conn.execute("DELETE FROM messages WHERE id=?", (message_id,))
+    conn.commit()
+
+    event = {
+        "type": "message_deleted_all",
+        "message_id": message_id,
+    }
+    await push(recipient_id, event)
+    await push(int(user["id"]), event)
+    return {"ok": True, "message_id": message_id}
+
+
+@app.get("/api/messages/{message_id}/seen-by")
+def private_message_seen_by(
+    message_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    row = conn.execute(
+        """SELECT m.id,m.sender_id,m.recipient_id,m.read_at,
+                  u.id AS viewer_id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name
+           FROM messages m
+           JOIN users u ON u.id=m.recipient_id
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE m.id=? AND (m.sender_id=? OR m.recipient_id=?)""",
+        (message_id, user["id"], user["id"]),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Сообщение не найдено")
+
+    viewers = []
+    if row["read_at"]:
+        viewers.append(
+            {
+                **user_json(
+                    {
+                        "id": row["viewer_id"],
+                        "username": row["username"],
+                        "display_name": row["display_name"],
+                        "avatar_stored_name": row["avatar_stored_name"],
+                    }
+                ),
+                "read_at": row["read_at"],
+            }
+        )
+    return {"message_id": message_id, "viewers": viewers}
 
 
 @app.post("/api/messages/forward")
@@ -2935,9 +3054,28 @@ def get_group_messages(
            JOIN users u ON u.id=gm.sender_id
            LEFT JOIN uploads up ON up.id=gm.attachment_id
            WHERE gm.group_id=?
+             AND NOT EXISTS(
+               SELECT 1 FROM group_message_hidden_by_user gh
+               WHERE gh.message_id=gm.id AND gh.user_id=?
+             )
            ORDER BY gm.id DESC LIMIT ?""",
-        (user["id"], group_id, limit),
+        (user["id"], group_id, user["id"], limit),
     ).fetchall()
+    visible_read_ids = [
+        int(row["id"])
+        for row in rows
+        if not row["deleted_at"] and int(row["sender_id"]) != int(user["id"])
+    ]
+    if visible_read_ids:
+        read_at = now_iso()
+        conn.executemany(
+            """INSERT OR IGNORE INTO group_message_reads(
+                 message_id,user_id,read_at
+               ) VALUES(?,?,?)""",
+            [(message_id, user["id"], read_at) for message_id in visible_read_ids],
+        )
+        conn.commit()
+
     result = []
     is_admin = bool(group["is_admin"])
     for row in reversed(rows):
@@ -3237,6 +3375,97 @@ async def edit_group_message(
         **base,
         "mentioned_me": int(user["id"]) in mention_ids,
         "can_delete": True,
+    }
+
+
+@app.delete("/api/groups/{group_id}/messages/{message_id}/me")
+def delete_group_message_for_me(
+    group_id: int,
+    message_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+    row = conn.execute(
+        "SELECT id FROM group_messages WHERE id=? AND group_id=?",
+        (message_id, group_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Сообщение не найдено")
+    conn.execute(
+        """INSERT OR REPLACE INTO group_message_hidden_by_user(
+             message_id,user_id,hidden_at
+           ) VALUES(?,?,?)""",
+        (message_id, user["id"], now_iso()),
+    )
+    conn.commit()
+    return {"ok": True, "message_id": message_id}
+
+
+@app.post("/api/groups/{group_id}/messages/{message_id}/read")
+def mark_group_message_read(
+    group_id: int,
+    message_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+    row = conn.execute(
+        """SELECT id,sender_id,deleted_at FROM group_messages
+           WHERE id=? AND group_id=?""",
+        (message_id, group_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Сообщение не найдено")
+    if not row["deleted_at"] and int(row["sender_id"]) != int(user["id"]):
+        conn.execute(
+            """INSERT OR IGNORE INTO group_message_reads(
+                 message_id,user_id,read_at
+               ) VALUES(?,?,?)""",
+            (message_id, user["id"], now_iso()),
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@app.get("/api/groups/{group_id}/messages/{message_id}/seen-by")
+def group_message_seen_by(
+    group_id: int,
+    message_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+    message = conn.execute(
+        "SELECT id,sender_id FROM group_messages WHERE id=? AND group_id=?",
+        (message_id, group_id),
+    ).fetchone()
+    if not message:
+        raise HTTPException(404, "Сообщение не найдено")
+
+    rows = conn.execute(
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name,
+                  gmr.read_at
+           FROM group_message_reads gmr
+           JOIN users u ON u.id=gmr.user_id
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE gmr.message_id=? AND gmr.user_id<>?
+           ORDER BY gmr.read_at""",
+        (message_id, message["sender_id"]),
+    ).fetchall()
+    return {
+        "message_id": message_id,
+        "viewers": [
+            {**user_json(row), "read_at": row["read_at"]}
+            for row in rows
+        ],
     }
 
 
