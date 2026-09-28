@@ -53,26 +53,41 @@ jobs:
         run: |
           set -euo pipefail
 
+          EXISTING_TAG=""
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION_CODE="$MANUAL_VERSION_CODE"
             VERSION_NAME="$MANUAL_VERSION_NAME"
           else
-            LATEST_CODE="$(
-              gh release list \
-                --repo "${{ github.repository }}" \
-                --limit 100 \
-                --json tagName \
-                --jq '.[].tagName' \
-              | sed -n 's/^android-v\([0-9][0-9]*\)$/\1/p' \
-              | sort -n \
+            git fetch --tags --force >/dev/null 2>&1 || true
+            EXISTING_TAG="$(
+              git tag --points-at "$GITHUB_SHA" --list 'android-v*' \
+              | sed -n 's/^android-v\([0-9][0-9]*\)$/android-v\1/p' \
+              | sort -t v -k 2,2n \
               | tail -n 1
             )"
 
-            if [ -z "$LATEST_CODE" ]; then
-              LATEST_CODE=1
+            if [ -n "$EXISTING_TAG" ]; then
+              VERSION_CODE="${EXISTING_TAG#android-v}"
+            else
+              LATEST_CODE="$(
+                gh release list \
+                  --repo "${{ github.repository }}" \
+                  --limit 100 \
+                  --json tagName \
+                  --jq '.[].tagName' \
+                | sed -n 's/^android-v\([0-9][0-9]*\)$/\1/p' \
+                | sort -n \
+                | tail -n 1
+              )"
+
+              if [ -z "$LATEST_CODE" ]; then
+                LATEST_CODE=1
+              fi
+
+              VERSION_CODE=$((LATEST_CODE + 1))
             fi
 
-            VERSION_CODE=$((LATEST_CODE + 1))
             PATCH=$((VERSION_CODE - 2))
             if [ "$PATCH" -lt 0 ]; then
               PATCH=0
@@ -99,8 +114,12 @@ jobs:
 
           TAG="android-v$VERSION_CODE"
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "::error::Release $TAG already exists"
-            exit 1
+            if [ "$EXISTING_TAG" = "$TAG" ]; then
+              echo "Release $TAG already belongs to this commit; duplicate run will reuse it."
+            else
+              echo "::error::Release $TAG already exists"
+              exit 1
+            fi
           fi
 
           printf 'SVOI_VERSION_CODE=%s\n' "$VERSION_CODE" >> "$GITHUB_ENV"
@@ -219,8 +238,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if gh release view "$SVOI_RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $SVOI_RELEASE_TAG already exists for this commit; skipping duplicate publication."
+            exit 0
+          fi
+
           gh release create "$SVOI_RELEASE_TAG" svoi.apk \
             --repo "${{ github.repository }}" \
             --title "Свои Android $SVOI_VERSION_NAME" \
-            --notes "Автоматическая Android-сборка $SVOI_VERSION_NAME (versionCode $SVOI_VERSION_CODE)." \
+            --notes "Автоматическая Android-сборка $SVOI_VERSION_NAME (versionCode $SVOI_VERSION_CODE). Commit: ${GITHUB_SHA}." \
             --latest

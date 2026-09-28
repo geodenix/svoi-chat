@@ -725,6 +725,18 @@ public class MainActivity extends BridgeActivity {
             return;
         }
 
+        int savedVersionCode = updaterPrefs.getInt(
+            PREF_DOWNLOAD_VERSION_CODE,
+            -1
+        );
+        if (
+            savedVersionCode > 0
+            && savedVersionCode <= currentVersionCode()
+        ) {
+            clearSavedDownloadState();
+            return;
+        }
+
         DownloadManager manager =
             (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
         DownloadManager.Query query =
