@@ -33,6 +33,15 @@
 .admin-service strong,.admin-user-copy{min-width:0;flex:1}.admin-user-copy strong,.admin-user-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.admin-user-copy small{color:#8fa3be;margin-top:2px}
 .admin-service-state{font-size:11px;font-weight:800;padding:4px 8px;border-radius:999px;background:#35445a;color:#d5deeb}.admin-service-state.active{background:#214f39;color:#aef0c8}.admin-service-state.bad{background:#65313a;color:#ffd1d6}
 .admin-user-online{width:9px;height:9px;border-radius:50%;background:#55667e;flex:0 0 9px}.admin-user-online.on{background:#45d78e}
+.menu-toggle{width:44px;height:44px;border:0;border-radius:13px;background:#17283f;color:#fff;font-size:24px;display:grid;place-items:center;flex:0 0 44px}
+.drawer-backdrop{position:fixed;inset:0;z-index:1600;background:#0008;opacity:0;pointer-events:none;transition:opacity .2s ease}
+.drawer-backdrop.open{opacity:1;pointer-events:auto}
+.side-drawer{position:absolute;left:0;top:0;bottom:0;width:min(86vw,340px);background:#0e1b2d;border-right:1px solid #2b405c;box-shadow:16px 0 45px #0008;transform:translateX(-105%);transition:transform .22s ease;display:flex;flex-direction:column;padding:calc(14px + var(--safe-top)) 14px calc(14px + var(--safe-bottom))}
+.drawer-backdrop.open .side-drawer{transform:translateX(0)}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 2px 14px;border-bottom:1px solid #26364d}.drawer-head strong{font-size:20px}.drawer-close{width:42px;height:42px;border:0;border-radius:12px;background:#203552;color:#fff;font-size:22px}
+.drawer-menu{overflow:auto;display:grid;gap:9px;padding-top:14px}.drawer-menu button{width:100%;border:1px solid #31527a;background:#142a46;color:#fff;border-radius:13px;padding:13px 14px;font-weight:700;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}.drawer-menu button.danger{background:#5f2c38;border-color:#77404c}.drawer-menu .install-box,.drawer-menu .calls-nav{padding:0}.drawer-menu .install-app,.drawer-menu .calls-nav-btn{margin:0}
+.drawer-section{font-size:11px;color:#8196b2;text-transform:uppercase;letter-spacing:.08em;margin:8px 4px 0}.drawer-spacer{height:2px;background:#26364d;margin:4px 0}
+body.drawer-open{overflow:hidden}
 @media(max-width:560px){.admin-grid{grid-template-columns:1fr 1fr}.admin-card strong{font-size:18px}.admin-body{padding:10px}}
 </style></head>
 <body>
@@ -50,12 +59,8 @@
 
 <div id="app" class="app hidden">
   <aside class="sidebar">
-    <div class="side-head"><button id="meAvatar" class="profile-avatar" type="button" title="Изменить аватар">С</button><input id="avatarInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div><button id="soundBtn" class="logout" type="button" title="Звуки включены">🔊</button><button id="vibrationBtn" class="logout" type="button" title="Вибрация включена">📳</button><button id="notifyBtn" class="logout" type="button" title="Включить уведомления">🔔</button><button id="logout" class="logout">Выйти</button></div>
+    <div class="side-head"><button id="menuToggle" class="menu-toggle" type="button" title="Меню">☰</button><button id="meAvatar" class="profile-avatar" type="button" title="Изменить аватар">С</button><input id="avatarInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><div class="me"><strong id="meName"></strong><small id="meUser" class="muted"></small></div></div>
     <div class="scroll">
-      <div id="installBox" class="install-box"><button id="installBtn" class="install-app" type="button">📲 Установить «Свои»</button></div>
-      <div class="calls-nav"><button id="openCalls" class="calls-nav-btn" type="button"><span>📞 Звонки</span><span>›</span></button></div>
-      <div class="calls-nav"><button id="openBlacklist" class="calls-nav-btn" type="button"><span>🚫 Чёрный список</span><span>›</span></button></div>
-      <div id="adminNav" class="calls-nav hidden"><button id="openAdmin" class="calls-nav-btn" type="button"><span>🛡 Админ-панель</span><span>›</span></button></div>
       <div class="section-head"><span>Группы</span><button id="newGroup" class="new-group">+ Новая</button></div>
       <div id="groups" class="list"></div>
       <div class="section-head"><span>Личные чаты</span></div>
@@ -93,6 +98,28 @@
     </div>
     <form id="composer" class="composer hidden"><button id="attach" class="attach" type="button" aria-label="Прикрепить файл">📎</button><input id="fileInput" type="file" hidden><button id="voiceRecordBtn" class="record-btn" type="button" title="Голосовое сообщение">🎙</button><button id="videoCircleBtn" class="record-btn" type="button" title="Видеокружок">◉</button><textarea id="text" placeholder="Сообщение…" maxlength="4000" rows="1"></textarea><button id="send" class="send" disabled>↑</button></form>
   </main>
+</div>
+
+<div id="drawerBackdrop" class="drawer-backdrop" aria-hidden="true">
+  <aside id="sideDrawer" class="side-drawer" aria-label="Меню">
+    <div class="drawer-head">
+      <strong>Свои</strong>
+      <button id="drawerClose" class="drawer-close" type="button" aria-label="Закрыть">×</button>
+    </div>
+    <div class="drawer-menu">
+      <div class="drawer-section">Навигация</div>
+      <div class="calls-nav"><button id="openCalls" class="calls-nav-btn" type="button"><span>📞 Звонки</span><span>›</span></button></div>
+      <div class="calls-nav"><button id="openBlacklist" class="calls-nav-btn" type="button"><span>🚫 Чёрный список</span><span>›</span></button></div>
+      <div id="adminNav" class="calls-nav hidden"><button id="openAdmin" class="calls-nav-btn" type="button"><span>🛡 Админ-панель</span><span>›</span></button></div>
+      <div class="drawer-section">Приложение</div>
+      <div id="installBox" class="install-box"><button id="installBtn" class="install-app" type="button"><span>📲 Установить «Свои»</span><span>›</span></button></div>
+      <button id="soundBtn" type="button"><span>🔊 Звуки</span><span>›</span></button>
+      <button id="vibrationBtn" type="button"><span>📳 Вибрация</span><span>›</span></button>
+      <button id="notifyBtn" type="button"><span>🔔 Уведомления</span><span>›</span></button>
+      <div class="drawer-spacer"></div>
+      <button id="logout" class="danger" type="button"><span>↪ Выйти</span><span>›</span></button>
+    </div>
+  </aside>
 </div>
 
 <div id="groupCallOverlay" class="group-call-overlay hidden">
@@ -307,10 +334,18 @@ const outboxDeliveries=new Map();
 let privateParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_private_video_size')||1)));
 let groupParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_group_video_size')||1)));
 
+function setDrawerButton(button,icon,label,value){
+  if(!button)return;
+  button.replaceChildren();
+  const left=document.createElement('span');left.textContent=icon+' '+label;
+  const right=document.createElement('span');right.textContent=value;
+  button.append(left,right)
+}
+
 function updateSoundButton(){
   const button=$('soundBtn');
   if(!button)return;
-  button.textContent=soundsEnabled?'🔊':'🔇';
+  setDrawerButton(button,soundsEnabled?'🔊':'🔇','Звуки',soundsEnabled?'Вкл':'Выкл');
   button.title=soundsEnabled?'Звуки включены':'Звуки выключены'
 }
 
@@ -318,7 +353,12 @@ function updateVibrationButton(){
   const button=$('vibrationBtn');
   if(!button)return;
   const supported=typeof navigator.vibrate==='function';
-  button.textContent=!supported?'—':(vibrationEnabled?'📳':'📴');
+  setDrawerButton(
+    button,
+    !supported?'—':(vibrationEnabled?'📳':'📴'),
+    'Вибрация',
+    !supported?'Нет':(vibrationEnabled?'Вкл':'Выкл')
+  );
   button.title=!supported
     ?'Вибрация не поддерживается браузером'
     :(vibrationEnabled?'Вибрация включена':'Вибрация выключена');
@@ -4207,7 +4247,29 @@ $('groupMembersDialog').addEventListener('click',event=>{
   if(event.target===$('groupMembersDialog'))$('groupMembersDialog').close()
 });
 
+function openDrawer(){
+  $('drawerBackdrop').classList.add('open');
+  $('drawerBackdrop').setAttribute('aria-hidden','false');
+  document.body.classList.add('drawer-open')
+}
+
+function closeDrawer(){
+  $('drawerBackdrop').classList.remove('open');
+  $('drawerBackdrop').setAttribute('aria-hidden','true');
+  document.body.classList.remove('drawer-open')
+}
+
+$('menuToggle').onclick=openDrawer;
+$('drawerClose').onclick=closeDrawer;
+$('drawerBackdrop').addEventListener('click',event=>{
+  if(event.target===$('drawerBackdrop'))closeDrawer()
+});
+document.addEventListener('keydown',event=>{
+  if(event.key==='Escape'&&$('drawerBackdrop').classList.contains('open'))closeDrawer()
+});
+
 $('openBlacklist').onclick=async()=>{
+  closeDrawer();
   $('blacklistDialog').showModal();
   try{await renderBlacklist()}catch(err){
     $('blacklistList').innerHTML='<div class="error" style="padding:12px">'+(err.message||'Не удалось загрузить чёрный список')+'</div>'
@@ -4219,6 +4281,7 @@ $('blacklistDialog').addEventListener('click',event=>{
 });
 
 $('openCalls').onclick=async()=>{
+  closeDrawer();
   try{await loadCallHistory()}catch{}
   $('callsDialog').showModal()
 };
@@ -4228,6 +4291,7 @@ $('callsDialog').addEventListener('click',event=>{
 });
 
 $('openAdmin').onclick=async()=>{
+  closeDrawer();
   if(!me?.is_server_admin)return;
   $('adminDialog').showModal();
   await loadAdminPanel();
@@ -4285,7 +4349,7 @@ $('avatarInput').onchange=async()=>{
   finally{$('meAvatar').disabled=false}
 };
 
-$('logout').onclick=async()=>{if(messageRecorder||messageRecordBlob)cancelMessageRecording();if(groupCallState)leaveGroupCall(true);if(currentCall||pendingCall)finishCall(true);await removePushSubscription();try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
+$('logout').onclick=async()=>{closeDrawer();if(messageRecorder||messageRecordBlob)cancelMessageRecording();if(groupCallState)leaveGroupCall(true);if(currentCall||pendingCall)finishCall(true);await removePushSubscription();try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
 $('back').onclick=()=>{stopOwnTyping();clearReplySource();$('app').classList.remove('chat-open')};
 
 if(token)enter();else showAuth();
