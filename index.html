@@ -1123,10 +1123,13 @@ async function updateAppBadge(){
 
 function isChatMuted(chatType,chatId){
   const id=Number(chatId);
-  if(chatType==='group'){
-    return !!groups.find(group=>Number(group.id)===id)?.muted
-  }
-  return !!users.find(user=>Number(user.id)===id)?.muted
+  const item=chatType==='group'
+    ?groups.find(group=>Number(group.id)===id)
+    :users.find(user=>Number(user.id)===id);
+  if(!item?.muted)return false;
+  if(!item.muted_until)return true;
+  const until=new Date(item.muted_until);
+  return Number.isNaN(until.getTime())||until.getTime()>Date.now()
 }
 
 function muteStatusText(item){
@@ -5934,10 +5937,34 @@ function connectWs(){
       if(active?.type==='user'&&(m.sender_id===active.data.id||m.recipient_id===active.data.id)){
         appendMessage(m);
         if(m.sender_id===active.data.id){
-          api('/api/messages/'+active.data.id).then(renderMessages).catch(()=>{})
+          const activeUserId=Number(active.data.id);
+          api('/api/messages/'+activeUserId).then(items=>{
+            if(active?.type==='user'&&Number(active.data.id)===activeUserId){
+              renderMessages(items);
+              active.data={...active.data,unread_count:0};
+              users=users.map(item=>
+                Number(item.id)===activeUserId
+                  ?{...item,unread_count:0}
+                  :item
+              );
+              renderUsers();
+              updateAppBadge().catch(()=>{})
+            }
+          }).catch(()=>{})
         }
       }
-      loadUsers().catch(()=>{})
+      loadUsers().then(()=>{
+        if(active?.type==='user'&&Number(active.data.id)===Number(m.sender_id)){
+          active.data={...active.data,unread_count:0};
+          users=users.map(item=>
+            Number(item.id)===Number(m.sender_id)
+              ?{...item,unread_count:0}
+              :item
+          );
+          renderUsers();
+          updateAppBadge().catch(()=>{})
+        }
+      }).catch(()=>{})
     }
     if(data.type==='message_edited'){
       const m=data.message;
@@ -5980,10 +6007,32 @@ function connectWs(){
           api(
             '/api/groups/'+m.group_id+'/messages/'+m.id+'/read',
             {method:'POST'}
-          ).catch(()=>{})
+          ).then(()=>{
+            if(active?.type==='group'&&Number(active.data.id)===Number(m.group_id)){
+              active.data={...active.data,unread_count:0};
+              groups=groups.map(item=>
+                Number(item.id)===Number(m.group_id)
+                  ?{...item,unread_count:0}
+                  :item
+              );
+              renderGroups();
+              updateAppBadge().catch(()=>{})
+            }
+          }).catch(()=>{})
         }
       }
-      loadGroups().catch(()=>{})
+      loadGroups().then(()=>{
+        if(active?.type==='group'&&Number(active.data.id)===Number(m.group_id)){
+          active.data={...active.data,unread_count:0};
+          groups=groups.map(item=>
+            Number(item.id)===Number(m.group_id)
+              ?{...item,unread_count:0}
+              :item
+          );
+          renderGroups();
+          updateAppBadge().catch(()=>{})
+        }
+      }).catch(()=>{})
     }
     if(data.type==='group_message_edited'){
       const m=data.message;
