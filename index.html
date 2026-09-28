@@ -143,13 +143,24 @@ body.drawer-open{overflow:hidden}
     </div>
     <div id="phoneLinkError" class="error"></div>
     <div class="phone-actions">
-      <button id="phoneLinkBtn" class="primary" type="submit">Привязать номер</button>
+      <button id="phoneLinkBtn" class="primary" type="submit">Отправить SMS-код</button>
       <button id="phoneUnlinkBtn" class="danger hidden" type="button">Отвязать номер</button>
     </div>
   </form>
 
+  <form id="phoneVerifyForm" class="phone-link-grid hidden" style="margin-top:12px">
+    <div class="field">
+      <label>Код из SMS</label>
+      <input id="phoneCodeInput" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="000000">
+    </div>
+    <div id="phoneVerifyError" class="error"></div>
+    <div class="phone-actions">
+      <button id="phoneVerifyBtn" class="primary" type="submit">Подтвердить номер</button>
+    </div>
+  </form>
+
   <div class="phone-sync-note">
-    Телефонная книга читается только на устройстве. На сервер отправляются хэши номеров, а не сами номера. SMS-подтверждение номера добавим отдельным этапом.
+    Номер привязывается только после подтверждения 6-значным кодом из SMS. Телефонная книга читается только на устройстве, а на сервер отправляются хэши номеров, а не сами номера.
   </div>
 
   <div class="phone-actions">
@@ -6200,15 +6211,16 @@ function renderPhoneAccountState(state){
   const strong=document.createElement('strong');
   const small=document.createElement('small');
 
-  if(phoneAccountState.linked){
-    strong.textContent='Номер привязан ·•••• '+(phoneAccountState.last4||'');
-    small.textContent='Этот номер участвует в поиске совпадений телефонной книги. SMS-подтверждение пока не подключено.';
-    $('phoneLinkBtn').textContent='Изменить номер';
-    $('phoneUnlinkBtn').classList.remove('hidden')
+  if(phoneAccountState.linked&&phoneAccountState.verified){
+    strong.textContent='Номер подтверждён ·•••• '+(phoneAccountState.last4||'');
+    small.textContent='Номер подтверждён по SMS и участвует в поиске совпадений телефонной книги.';
+    $('phoneLinkBtn').textContent='Изменить номер по SMS';
+    $('phoneUnlinkBtn').classList.remove('hidden');
+    $('phoneVerifyForm').classList.add('hidden')
   }else{
     strong.textContent='Номер не привязан';
-    small.textContent='Привяжи свой номер, чтобы люди из телефонной книги могли находить тебя в «Своих».';
-    $('phoneLinkBtn').textContent='Привязать номер';
+    small.textContent='Укажи номер и подтверди его кодом из SMS.';
+    $('phoneLinkBtn').textContent='Отправить SMS-код';
     $('phoneUnlinkBtn').classList.add('hidden')
   }
 
@@ -6268,6 +6280,9 @@ $('openPhoneContacts').onclick=async()=>{
   $('phoneMatchList').replaceChildren();
   $('phoneNumberInput').value='';
   $('phonePasswordInput').value='';
+  $('phoneCodeInput').value='';
+  $('phoneVerifyError').textContent='';
+  $('phoneVerifyForm').classList.add('hidden');
   try{
     await loadPhoneAccountState()
   }catch(err){
@@ -6291,6 +6306,7 @@ $('phoneLinkForm').onsubmit=async event=>{
   event.preventDefault();
   const button=$('phoneLinkBtn');
   $('phoneLinkError').textContent='';
+  $('phoneVerifyError').textContent='';
 
   const phone=$('phoneNumberInput').value.trim();
   const password=$('phonePasswordInput').value;
@@ -6305,17 +6321,50 @@ $('phoneLinkForm').onsubmit=async event=>{
 
   button.disabled=true;
   try{
-    const state=await api('/api/account/phone',{
+    const result=await api('/api/account/phone/request',{
       method:'POST',
       body:{phone,current_password:password}
     });
+    $('phoneVerifyForm').classList.remove('hidden');
+    $('phoneCodeInput').value='';
+    $('phoneCodeInput').focus();
+    $('phonePasswordInput').value='';
+    $('phoneSyncStatus').textContent=
+      'Код отправлен на номер •••• '+(result.last4||'')+
+      '. Он действует 10 минут.'
+  }catch(err){
+    $('phoneLinkError').textContent=err.message||'Не удалось отправить SMS-код'
+  }finally{
+    button.disabled=false
+  }
+};
+
+$('phoneVerifyForm').onsubmit=async event=>{
+  event.preventDefault();
+  const button=$('phoneVerifyBtn');
+  const code=$('phoneCodeInput').value.trim();
+  $('phoneVerifyError').textContent='';
+
+  if(!/^[0-9]{6}$/.test(code)){
+    $('phoneVerifyError').textContent='Введи 6 цифр из SMS';
+    return
+  }
+
+  button.disabled=true;
+  try{
+    const state=await api('/api/account/phone/verify',{
+      method:'POST',
+      body:{code}
+    });
     renderPhoneAccountState(state);
+    $('phoneCodeInput').value='';
     $('phoneNumberInput').value='';
     $('phonePasswordInput').value='';
-    $('phoneLinkError').textContent='';
-    $('phoneSyncStatus').textContent='Номер привязан. Теперь можно синхронизировать телефонную книгу.'
+    $('phoneVerifyForm').classList.add('hidden');
+    $('phoneSyncStatus').textContent=
+      'Номер подтверждён по SMS. Теперь можно синхронизировать телефонную книгу.'
   }catch(err){
-    $('phoneLinkError').textContent=err.message||'Не удалось привязать номер'
+    $('phoneVerifyError').textContent=err.message||'Не удалось подтвердить код'
   }finally{
     button.disabled=false
   }
