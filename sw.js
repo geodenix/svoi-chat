@@ -75,6 +75,19 @@ self.addEventListener('push', event => {
       includeUncontrolled: true
     });
 
+    const unreadCount = Math.max(0, Number(data.unread_count) || 0);
+    try {
+      if (unreadCount > 0 && typeof navigator.setAppBadge === 'function') {
+        await navigator.setAppBadge(unreadCount);
+      } else if (unreadCount === 0 && typeof navigator.clearAppBadge === 'function') {
+        await navigator.clearAppBadge();
+      }
+    } catch {}
+
+    if (data.silent) {
+      return;
+    }
+
     if (!data.force && windows.some(client => client.visibilityState === 'visible')) {
       return;
     }
