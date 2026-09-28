@@ -133,6 +133,7 @@ def init_db():
       recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
       created_at TEXT NOT NULL,
+      edited_at TEXT,
       client_message_id TEXT,
       reply_to_message_id INTEGER
     );
@@ -156,6 +157,7 @@ def init_db():
       sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
       created_at TEXT NOT NULL,
+      edited_at TEXT,
       client_message_id TEXT,
       reply_to_message_id INTEGER
     );
@@ -227,6 +229,10 @@ def init_db():
         if "reply_to_message_id" not in columns:
             conn.execute(
                 f"ALTER TABLE {table} ADD COLUMN reply_to_message_id INTEGER"
+            )
+        if "edited_at" not in columns:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN edited_at TEXT"
             )
         if table == "messages":
             if "delivered_at" not in columns:
@@ -490,6 +496,10 @@ class GroupMessageIn(BaseModel):
     attachment_id: int | None = None
     client_message_id: str | None = Field(default=None, max_length=80)
     reply_to_message_id: int | None = None
+
+
+class EditMessageIn(BaseModel):
+    body: str = Field(default="", max_length=4000)
 
 
 class ForwardMessageIn(BaseModel):
@@ -1877,7 +1887,7 @@ async def history(
             },
         )
     rows = conn.execute(
-        """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
+        """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,m.edited_at,
                   m.delivered_at,m.read_at,m.forwarded,m.reply_to_message_id,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
@@ -1899,6 +1909,7 @@ async def history(
             "recipient_id": row["recipient_id"],
             "body": row["body"],
             "created_at": row["created_at"],
+            "edited_at": row["edited_at"],
             "delivered_at": row["delivered_at"],
             "read_at": row["read_at"],
             "forwarded": bool(row["forwarded"]),
@@ -1933,7 +1944,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         raise HTTPException(403, "Личное общение с этим пользователем недоступно")
     if data.client_message_id:
         existing = conn.execute(
-            """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
+            """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,m.edited_at,
                       m.delivered_at,m.read_at,m.forwarded,m.reply_to_message_id,
                       up.id AS attachment_id,
                       up.stored_name AS attachment_stored_name,
@@ -1954,6 +1965,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
                 "recipient_id": existing["recipient_id"],
                 "body": existing["body"],
                 "created_at": existing["created_at"],
+                "edited_at": existing["edited_at"],
                 "delivered_at": existing["delivered_at"],
                 "read_at": existing["read_at"],
                 "forwarded": bool(existing["forwarded"]),
@@ -2024,6 +2036,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         "recipient_id": data.recipient_id,
         "body": body,
         "created_at": created,
+        "edited_at": None,
         "delivered_at": None,
         "read_at": None,
         "forwarded": False,
@@ -2060,6 +2073,61 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         f"user-{user['id']}",
     )
     return msg
+
+
+@app.patch("/api/messages/{message_id}")
+async def edit_message(
+    message_id: int,
+    data: EditMessageIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    row = conn.execute(
+        """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,m.edited_at,
+                  m.delivered_at,m.read_at,m.forwarded,m.reply_to_message_id,
+                  up.id AS attachment_id,
+                  up.stored_name AS attachment_stored_name,
+                  up.original_name AS attachment_name,
+                  up.mime_type AS attachment_mime,
+                  up.size AS attachment_size
+           FROM messages m
+           LEFT JOIN uploads up ON up.id=m.attachment_id
+           WHERE m.id=?""",
+        (message_id,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Сообщение не найдено")
+    if int(row["sender_id"]) != int(user["id"]):
+        raise HTTPException(403, "Редактировать можно только свои сообщения")
+
+    body = data.body.strip()
+    if not body and row["attachment_id"] is None:
+        raise HTTPException(400, "Сообщение не может быть пустым")
+
+    edited_at = now_iso()
+    conn.execute(
+        "UPDATE messages SET body=?, edited_at=? WHERE id=? AND sender_id=?",
+        (body, edited_at, message_id, user["id"]),
+    )
+    conn.commit()
+
+    message = {
+        "id": row["id"],
+        "sender_id": row["sender_id"],
+        "recipient_id": row["recipient_id"],
+        "body": body,
+        "created_at": row["created_at"],
+        "edited_at": edited_at,
+        "delivered_at": row["delivered_at"],
+        "read_at": row["read_at"],
+        "forwarded": bool(row["forwarded"]),
+        "reply_to_message_id": row["reply_to_message_id"],
+        "attachment": attachment_json(row),
+    }
+    event = {"type": "message_edited", "message": message}
+    await push(int(row["recipient_id"]), event)
+    await push(int(user["id"]), event)
+    return message
 
 
 @app.post("/api/messages/forward")
@@ -2211,6 +2279,7 @@ async def forward_message(
         "sender_name": user["display_name"],
         "body": body,
         "created_at": created,
+        "edited_at": None,
         "attachment": attachment,
         "deleted": False,
         "deleted_at": None,
@@ -2650,7 +2719,7 @@ def get_group_messages(
     if not group:
         raise HTTPException(404, "Группа не найдена")
     rows = conn.execute(
-        """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
+        """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,gm.edited_at,
                   gm.deleted_at,gm.deleted_by,gm.forwarded,gm.reply_to_message_id,
                   EXISTS(
                     SELECT 1 FROM group_message_mentions gmm
@@ -2684,6 +2753,7 @@ def get_group_messages(
             "sender_name": row["sender_name"],
             "body": "" if deleted else row["body"],
             "created_at": row["created_at"],
+            "edited_at": row["edited_at"],
             "deleted": deleted,
             "deleted_at": row["deleted_at"],
             "forwarded": bool(row["forwarded"]),
@@ -2712,7 +2782,7 @@ async def send_group_message(
         raise HTTPException(404, "Группа не найдена")
     if data.client_message_id:
         existing = conn.execute(
-            """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
+            """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,gm.edited_at,
                       gm.deleted_at,gm.forwarded,gm.reply_to_message_id,
                       EXISTS(
                         SELECT 1 FROM group_message_mentions gmm
@@ -2745,6 +2815,7 @@ async def send_group_message(
                 "sender_name": existing["sender_name"],
                 "body": "" if deleted else existing["body"],
                 "created_at": existing["created_at"],
+                "edited_at": existing["edited_at"],
                 "attachment": None if deleted else attachment_json(existing),
                 "deleted": deleted,
                 "deleted_at": existing["deleted_at"],
@@ -2869,6 +2940,106 @@ async def send_group_message(
     return msg
 
 
+@app.patch("/api/groups/{group_id}/messages/{message_id}")
+async def edit_group_message(
+    group_id: int,
+    message_id: int,
+    data: EditMessageIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+
+    row = conn.execute(
+        """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,gm.edited_at,
+                  gm.deleted_at,gm.forwarded,gm.reply_to_message_id,
+                  u.display_name AS sender_name,
+                  up.id AS attachment_id,
+                  up.stored_name AS attachment_stored_name,
+                  up.original_name AS attachment_name,
+                  up.mime_type AS attachment_mime,
+                  up.size AS attachment_size
+           FROM group_messages gm
+           JOIN users u ON u.id=gm.sender_id
+           LEFT JOIN uploads up ON up.id=gm.attachment_id
+           WHERE gm.id=? AND gm.group_id=?""",
+        (message_id, group_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Сообщение не найдено")
+    if int(row["sender_id"]) != int(user["id"]):
+        raise HTTPException(403, "Редактировать можно только свои сообщения")
+    if row["deleted_at"]:
+        raise HTTPException(409, "Удалённое сообщение нельзя редактировать")
+
+    body = data.body.strip()
+    if not body and row["attachment_id"] is None:
+        raise HTTPException(400, "Сообщение не может быть пустым")
+
+    edited_at = now_iso()
+    conn.execute(
+        """UPDATE group_messages
+           SET body=?, edited_at=?
+           WHERE id=? AND group_id=? AND sender_id=?""",
+        (body, edited_at, message_id, group_id, user["id"]),
+    )
+    conn.execute(
+        "DELETE FROM group_message_mentions WHERE message_id=?",
+        (message_id,),
+    )
+    mention_ids = resolve_group_mentions(conn, group_id, body)
+    store_group_mentions(conn, message_id, mention_ids)
+    conn.commit()
+
+    base = {
+        "id": row["id"],
+        "group_id": row["group_id"],
+        "sender_id": row["sender_id"],
+        "sender_name": row["sender_name"],
+        "body": body,
+        "created_at": row["created_at"],
+        "edited_at": edited_at,
+        "attachment": attachment_json(row),
+        "deleted": False,
+        "deleted_at": None,
+        "forwarded": bool(row["forwarded"]),
+        "reply_to_message_id": row["reply_to_message_id"],
+        "has_mentions": bool(mention_ids),
+        "can_restore": False,
+    }
+
+    members = conn.execute(
+        "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
+        (group_id,),
+    ).fetchall()
+    for member in members:
+        member_id = int(member["user_id"])
+        payload = {
+            **base,
+            "mentioned_me": member_id in mention_ids,
+            "can_delete": (
+                bool(member["is_admin"])
+                or member_id == int(row["sender_id"])
+            ),
+        }
+        await push(
+            member_id,
+            {
+                "type": "group_message_edited",
+                "group_id": group_id,
+                "message": payload,
+            },
+        )
+
+    return {
+        **base,
+        "mentioned_me": int(user["id"]) in mention_ids,
+        "can_delete": True,
+    }
+
+
 @app.delete("/api/groups/{group_id}/messages/{message_id}")
 async def delete_group_message(
     group_id: int,
@@ -2938,8 +3109,8 @@ async def restore_group_message(
         raise HTTPException(403, "Восстанавливать сообщения может только администратор")
 
     row = conn.execute(
-        """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,
-                  gm.deleted_at,gm.deleted_by,gm.forwarded,
+        """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,gm.edited_at,
+                  gm.deleted_at,gm.deleted_by,gm.forwarded,gm.reply_to_message_id,
                   EXISTS(
                     SELECT 1 FROM group_message_mentions gmm
                     WHERE gmm.message_id=gm.id AND gmm.user_id=?
@@ -2980,10 +3151,12 @@ async def restore_group_message(
         "sender_name": row["sender_name"],
         "body": row["body"],
         "created_at": row["created_at"],
+        "edited_at": row["edited_at"],
         "attachment": attachment_json(row),
         "deleted": False,
         "deleted_at": None,
         "forwarded": bool(row["forwarded"]),
+        "reply_to_message_id": row["reply_to_message_id"],
         "mentioned_me": bool(row["mentioned_me"]),
         "has_mentions": bool(row["has_mentions"]),
         "can_delete": True,
