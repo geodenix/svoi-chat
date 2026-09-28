@@ -1244,7 +1244,11 @@ public class NativeScreenSharePlugin extends Plugin {
                 new MediaProjection.Callback() {
                     @Override
                     public void onStop() {
-                        mainHandler.post(() -> stopAllInternal(true));
+                        mainHandler.post(() -> {
+                            if (captureActive) {
+                                stopAllInternal(true);
+                            }
+                        });
                     }
                 }
             );
