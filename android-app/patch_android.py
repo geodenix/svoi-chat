@@ -307,7 +307,7 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
 
         updaterPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        handlePushIntent(getIntent());
+        handlePushIntent(getIntent(), false);
         registerDownloadReceiver();
         resumePendingUpdate();
         checkForUpdates();
@@ -317,10 +317,10 @@ public class MainActivity extends BridgeActivity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        handlePushIntent(intent);
+        handlePushIntent(intent, true);
     }
 
-    private void handlePushIntent(Intent intent) {
+    private void handlePushIntent(Intent intent, boolean fromNewIntent) {
         if (intent == null) {
             return;
         }
@@ -353,8 +353,33 @@ public class MainActivity extends BridgeActivity {
 
         if (path != null && path.startsWith("/") && bridge != null) {
             final String targetUrl = APP_URL + path;
+            final String actionPath = path;
             bridge.getWebView().post(() -> {
-                bridge.getWebView().loadUrl(targetUrl);
+                String currentUrl = bridge.getWebView().getUrl();
+                boolean appAlreadyLoaded = fromNewIntent
+                    && currentUrl != null
+                    && currentUrl.startsWith(APP_URL);
+
+                if (appAlreadyLoaded && openActiveCall) {
+                    String js =
+                        "window.handleNativeCallAction"
+                        + " ? window.handleNativeCallAction("
+                        + JSONObject.quote(actionPath)
+                        + ")"
+                        + " : false";
+                    bridge.getWebView().evaluateJavascript(
+                        js,
+                        result -> {
+                            if ("false".equals(result)
+                                    || "null".equals(result)) {
+                                bridge.getWebView().loadUrl(targetUrl);
+                            }
+                        }
+                    );
+                } else {
+                    bridge.getWebView().loadUrl(targetUrl);
+                }
+
                 if (openActiveCall) {
                     bridge.getWebView().requestFocus();
                 }
