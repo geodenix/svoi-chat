@@ -6315,28 +6315,168 @@ function waitForSocketOpen(timeoutMs=6000){
   })
 }
 
-async function resumeIncomingCallFromUrl(){
+async function waitForAppForeground(timeoutMs=10000){
+  if(document.visibilityState==='visible'){
+    await new Promise(resolve=>setTimeout(resolve,250));
+    return
+  }
+  await new Promise((resolve,reject)=>{
+    const started=Date.now();
+    const onChange=()=>{
+      if(document.visibilityState==='visible'){
+        cleanup();
+        setTimeout(resolve,250)
+      }
+    };
+    const timer=setInterval(()=>{
+      if(document.visibilityState==='visible'){
+        cleanup();
+        setTimeout(resolve,250)
+      }else if(Date.now()-started>=timeoutMs){
+        cleanup();
+        reject(new Error('Приложение ещё не готово к звонку'))
+      }
+    },120);
+    const cleanup=()=>{
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange',onChange)
+    };
+    document.addEventListener('visibilitychange',onChange)
+  })
+}
+
+function incomingActionFromLocation(){
   const params=new URLSearchParams(location.search);
   const callId=params.get('incoming_call');
-  if(!callId)return;
-  const nativeRing=params.get('native_ring')==='1';
-  const nativeAccept=params.get('native_accept')==='1';
+  if(!callId)return null;
+  return {
+    callId,
+    nativeRing:params.get('native_ring')==='1',
+    nativeAccept:params.get('native_accept')==='1'
+  }
+}
 
-  history.replaceState({},'',location.pathname);
+function savePendingNativeCallAction(action){
+  if(!action?.callId)return;
+  try{
+    sessionStorage.setItem(
+      'svoi_pending_native_call',
+      JSON.stringify({...action,savedAt:Date.now()})
+    )
+  }catch{}
+}
+
+function readPendingNativeCallAction(){
+  try{
+    const raw=sessionStorage.getItem('svoi_pending_native_call');
+    if(!raw)return null;
+    const action=JSON.parse(raw);
+    if(!action?.callId||Date.now()-Number(action.savedAt||0)>60000){
+      sessionStorage.removeItem('svoi_pending_native_call');
+      return null
+    }
+    return action
+  }catch{return null}
+}
+
+function clearPendingNativeCallAction(){
+  try{sessionStorage.removeItem('svoi_pending_native_call')}catch{}
+}
+
+async function restoreIncomingCallAction(action){
+  if(!action?.callId)return;
+  const callId=String(action.callId);
+
+  await waitForAppForeground();
+  await waitForSocketOpen(10000);
+
+  let data=null;
+  try{
+    data=await api('/api/calls/pending/'+encodeURIComponent(callId))
+  }catch(err){
+    if(
+      err?.status===404
+      && pendingCall?.call_id===callId
+    ){
+      data=pendingCall
+    }else{
+      throw err
+    }
+  }
+
+  if(data&&pendingCall?.call_id!==callId&&currentCall?.callId!==callId){
+    incomingCall(data,action.nativeRing||action.nativeAccept)
+  }
+
+  if(action.nativeAccept){
+    const started=Date.now();
+    while(
+      !pendingCall
+      && !currentCall
+      && Date.now()-started<4000
+    ){
+      await new Promise(resolve=>setTimeout(resolve,100))
+    }
+
+    if(currentCall?.callId===callId){
+      clearPendingNativeCallAction();
+      return
+    }
+    if(!pendingCall||pendingCall.call_id!==callId){
+      throw new Error('Входящий звонок ещё не готов')
+    }
+
+    await new Promise(resolve=>setTimeout(resolve,350));
+    await acceptIncomingCall()
+  }
+
+  clearPendingNativeCallAction();
+  history.replaceState({},'',location.pathname)
+}
+
+window.handleNativeCallAction=async path=>{
+  try{
+    const url=new URL(String(path||''),location.origin);
+    const action={
+      callId:url.searchParams.get('incoming_call'),
+      nativeRing:url.searchParams.get('native_ring')==='1',
+      nativeAccept:url.searchParams.get('native_accept')==='1'
+    };
+    if(!action.callId)return false;
+    savePendingNativeCallAction(action);
+    await restoreIncomingCallAction(action);
+    return true
+  }catch(err){
+    console.warn('native call action failed',err);
+    return false
+  }
+};
+
+async function resumeIncomingCallFromUrl(){
+  const fromUrl=incomingActionFromLocation();
+  const saved=readPendingNativeCallAction();
+  const action=fromUrl||saved;
+  if(!action)return;
+
+  savePendingNativeCallAction(action);
 
   try{
-    const data=await api('/api/calls/pending/'+encodeURIComponent(callId));
-    await waitForSocketOpen();
-    incomingCall(data,nativeRing||nativeAccept);
-    if(nativeAccept){
-      setTimeout(()=>acceptIncomingCall().catch(()=>{}),80)
-    }
+    await restoreIncomingCallAction(action)
   }catch(err){
     if(err?.status===404){
-      clearNativeCallNotification(callId);
+      clearNativeCallNotification(action.callId);
+      clearPendingNativeCallAction();
+      history.replaceState({},'',location.pathname);
       alert('Этот звонок уже завершён')
     }else{
-      alert(err.message||'Не удалось восстановить входящий звонок')
+      // Do not discard the action during a cold start. enter() or the
+      // WebSocket reconnect can retry it once the app is fully ready.
+      setTimeout(()=>{
+        const retry=readPendingNativeCallAction();
+        if(retry&&token){
+          restoreIncomingCallAction(retry).catch(()=>{})
+        }
+      },1200)
     }
   }
 }
@@ -6344,6 +6484,12 @@ async function resumeIncomingCallFromUrl(){
 function connectWs(){
   if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';
   socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));
+  socket.onopen=()=>{
+    const action=readPendingNativeCallAction();
+    if(action){
+      restoreIncomingCallAction(action).catch(()=>{})
+    }
+  };
   socket.onmessage=e=>{
     const data=JSON.parse(e.data);
     if(['call_offer','call_answer','call_video_offer','call_video_answer','call_screen_state','ice_candidate','call_reject','call_end','call_unavailable','native_screen_offer','native_screen_answer','native_screen_stop'].includes(data.type)){
