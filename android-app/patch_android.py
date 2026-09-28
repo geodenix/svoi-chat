@@ -285,6 +285,8 @@ public class MainActivity extends BridgeActivity {
     private static final String PREFS = "svoi_updater";
     private static final String PREF_DOWNLOAD_ID = "download_id";
     private static final String PREF_PENDING_INSTALL = "pending_install";
+    private static final String PREF_DOWNLOAD_VERSION_CODE = "download_version_code";
+    private static final String PREF_DOWNLOAD_VERSION_NAME = "download_version_name";
 
     private SharedPreferences updaterPrefs;
     private BroadcastReceiver downloadReceiver;
@@ -451,6 +453,58 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
+    private int savedDownloadStatus() {
+        long id = updaterPrefs.getLong(PREF_DOWNLOAD_ID, -1);
+        if (id < 0) {
+            return -1;
+        }
+
+        DownloadManager manager =
+            (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+        DownloadManager.Query query =
+            new DownloadManager.Query().setFilterById(id);
+
+        try (Cursor cursor = manager.query(query)) {
+            if (cursor == null || !cursor.moveToFirst()) {
+                return -1;
+            }
+            int statusIndex = cursor.getColumnIndex(
+                DownloadManager.COLUMN_STATUS
+            );
+            if (statusIndex < 0) {
+                return -1;
+            }
+            return cursor.getInt(statusIndex);
+        } catch (Exception ignored) {
+            return -1;
+        }
+    }
+
+    private boolean hasCurrentDownloadForVersion(int versionCode) {
+        int savedVersion = updaterPrefs.getInt(
+            PREF_DOWNLOAD_VERSION_CODE,
+            -1
+        );
+        if (savedVersion != versionCode) {
+            return false;
+        }
+
+        int status = savedDownloadStatus();
+        return status == DownloadManager.STATUS_PENDING
+            || status == DownloadManager.STATUS_RUNNING
+            || status == DownloadManager.STATUS_PAUSED
+            || status == DownloadManager.STATUS_SUCCESSFUL;
+    }
+
+    private void clearSavedDownloadState() {
+        updaterPrefs.edit()
+            .remove(PREF_DOWNLOAD_ID)
+            .remove(PREF_PENDING_INSTALL)
+            .remove(PREF_DOWNLOAD_VERSION_CODE)
+            .remove(PREF_DOWNLOAD_VERSION_NAME)
+            .apply();
+    }
+
     private void checkForUpdates() {
         long now = System.currentTimeMillis();
         if (updateCheckRunning || now - lastUpdateCheckAt < 10000L) {
@@ -506,10 +560,11 @@ public class MainActivity extends BridgeActivity {
 
                 int installedCode = currentVersionCode();
                 if (latestCode <= installedCode) {
-                    updaterPrefs.edit()
-                        .remove(PREF_DOWNLOAD_ID)
-                        .remove(PREF_PENDING_INSTALL)
-                        .apply();
+                    clearSavedDownloadState();
+                    return;
+                }
+
+                if (hasCurrentDownloadForVersion(latestCode)) {
                     return;
                 }
 
@@ -621,6 +676,8 @@ public class MainActivity extends BridgeActivity {
             updaterPrefs.edit()
                 .putLong(PREF_DOWNLOAD_ID, id)
                 .putBoolean(PREF_PENDING_INSTALL, false)
+                .putInt(PREF_DOWNLOAD_VERSION_CODE, versionCode)
+                .putString(PREF_DOWNLOAD_VERSION_NAME, versionName)
                 .apply();
 
             Toast.makeText(
@@ -650,6 +707,7 @@ public class MainActivity extends BridgeActivity {
 
         try (Cursor cursor = manager.query(query)) {
             if (cursor == null || !cursor.moveToFirst()) {
+                clearSavedDownloadState();
                 return;
             }
 
@@ -662,15 +720,50 @@ public class MainActivity extends BridgeActivity {
 
             int status = cursor.getInt(statusIndex);
             if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                installDownloadedUpdate();
+                boolean installerAlreadyShown = updaterPrefs.getBoolean(
+                    PREF_PENDING_INSTALL,
+                    false
+                );
+                if (installerAlreadyShown) {
+                    showDownloadedUpdateDialog();
+                } else {
+                    installDownloadedUpdate();
+                }
             } else if (status == DownloadManager.STATUS_FAILED) {
-                updaterPrefs.edit()
-                    .remove(PREF_DOWNLOAD_ID)
-                    .remove(PREF_PENDING_INSTALL)
-                    .apply();
+                clearSavedDownloadState();
             }
         } catch (Exception ignored) {
         }
+    }
+
+    private void showDownloadedUpdateDialog() {
+        if (isFinishing() || isDestroyed() || updateDialogShowing) {
+            return;
+        }
+
+        String versionName = updaterPrefs.getString(
+            PREF_DOWNLOAD_VERSION_NAME,
+            "новая версия"
+        );
+
+        updateDialogShowing = true;
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("Обновление уже скачано")
+            .setMessage(
+                "Версия " + versionName +
+                " уже загружена. Повторно скачивать её не нужно."
+            )
+            .setNegativeButton("Позже", null)
+            .setPositiveButton(
+                "Установить",
+                (dialogInterface, which) -> installDownloadedUpdate()
+            )
+            .create();
+
+        dialog.setOnDismissListener(ignored -> {
+            updateDialogShowing = false;
+        });
+        dialog.show();
     }
 
     private void installDownloadedUpdate() {
@@ -709,12 +802,11 @@ public class MainActivity extends BridgeActivity {
         }
 
         try {
-            // Clear the completed download before opening Android's
-            // installer. Otherwise every app restart sees the same
-            // successful DownloadManager item and opens the installer again.
+            // Keep the completed download recorded until the new
+            // app version is actually installed. This prevents the updater
+            // from offering the same APK for download again after reopening.
             updaterPrefs.edit()
-                .remove(PREF_DOWNLOAD_ID)
-                .remove(PREF_PENDING_INSTALL)
+                .putBoolean(PREF_PENDING_INSTALL, true)
                 .apply();
 
             Intent install = new Intent(Intent.ACTION_VIEW);
@@ -785,7 +877,7 @@ public class MainActivity extends BridgeActivity {
             // could not be opened for some reason.
             updaterPrefs.edit()
                 .putLong(PREF_DOWNLOAD_ID, id)
-                .putBoolean(PREF_PENDING_INSTALL, false)
+                .putBoolean(PREF_PENDING_INSTALL, true)
                 .apply();
 
             Toast.makeText(
