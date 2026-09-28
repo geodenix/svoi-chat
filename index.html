@@ -717,7 +717,7 @@ async function enter(){
     await Promise.all([loadUsers(),loadGroups(),loadCallHistory()]);
     connectWs();
     flushOutbox().catch(()=>{});
-    initPush().catch(err=>{$('notifyBtn').textContent='⚠️';$('notifyBtn').title=err.message||'Ошибка push'});
+    initPush().catch(err=>{setDrawerButton($('notifyBtn'),'⚠️','Уведомления','Ошибка');$('notifyBtn').title=err.message||'Ошибка push'});
     resumeIncomingCallFromUrl().catch(()=>{});
     resumeGroupCallFromUrl().catch(()=>{})
   }catch(err){
@@ -2489,7 +2489,7 @@ async function ensurePushSubscription(registration){
     })
   }
   await api('/api/push/subscribe',{method:'POST',body:sub.toJSON()});
-  $('notifyBtn').textContent='✅';$('notifyBtn').title='Уведомления включены — нажми для теста';
+  setDrawerButton($('notifyBtn'),'✅','Уведомления','Вкл');$('notifyBtn').title='Уведомления включены — нажми для теста';
   return sub
 }
 
@@ -2503,9 +2503,9 @@ async function initPush(){
   if(Notification.permission==='granted'){
     await ensurePushSubscription(registration)
   }else if(Notification.permission==='denied'){
-    btn.textContent='🔕';btn.title='Уведомления запрещены в настройках браузера'
+    setDrawerButton(btn,'🔕','Уведомления','Запрещены');btn.title='Уведомления запрещены в настройках браузера'
   }else{
-    btn.textContent='🔔';btn.title='Включить уведомления'
+    setDrawerButton(btn,'🔔','Уведомления','Выкл');btn.title='Включить уведомления'
   }
 }
 
@@ -2520,10 +2520,10 @@ $('notifyBtn').onclick=async()=>{
     const registration=await navigator.serviceWorker.ready;
     await ensurePushSubscription(registration);
     const result=await api('/api/push/test',{method:'POST'});
-    $('notifyBtn').textContent='✅';
+    setDrawerButton($('notifyBtn'),'✅','Уведомления','Вкл');
     $('notifyBtn').title='Тестовый push отправлен. Подписок: '+result.attempted
   }catch(err){
-    $('notifyBtn').textContent='⚠️';
+    setDrawerButton($('notifyBtn'),'⚠️','Уведомления','Ошибка');
     $('notifyBtn').title='Ошибка push';
     alert(err.message)
   }
