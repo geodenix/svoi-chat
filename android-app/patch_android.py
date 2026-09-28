@@ -2644,7 +2644,7 @@ public class NativeScreenSharePlugin extends Plugin {
                                 @Override
                                 public void onSetSuccess() {
                                     state.localDescriptionSet = true;
-                                    maybeResolveOffer(state);
+                                    resolveOffer(state);
                                 }
 
                                 @Override
@@ -2701,6 +2701,15 @@ public class NativeScreenSharePlugin extends Plugin {
             new SimpleSdpObserver() {
                 @Override
                 public void onSetSuccess() {
+                    state.remoteDescriptionSet = true;
+                    for (IceCandidate candidate :
+                            new ArrayList<>(state.pendingRemoteIce)) {
+                        try {
+                            state.pc.addIceCandidate(candidate);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    state.pendingRemoteIce.clear();
                     call.resolve();
                 }
 
@@ -2714,6 +2723,45 @@ public class NativeScreenSharePlugin extends Plugin {
                 sdp
             )
         );
+    }
+
+    @PluginMethod
+    public void addIceCandidate(PluginCall call) {
+        String peerKey = call.getString("peerKey");
+        String candidateSdp = call.getString("candidate");
+        String sdpMid = call.getString("sdpMid");
+        Integer sdpMLineIndex = call.getInt("sdpMLineIndex");
+
+        PeerState state = peers.get(peerKey);
+        if (state == null || state.pc == null) {
+            call.reject("Соединение демонстрации не найдено");
+            return;
+        }
+        if (candidateSdp == null || candidateSdp.isEmpty()) {
+            call.reject("ICE candidate is required");
+            return;
+        }
+
+        IceCandidate candidate = new IceCandidate(
+            sdpMid,
+            sdpMLineIndex != null ? sdpMLineIndex : 0,
+            candidateSdp
+        );
+
+        try {
+            if (state.remoteDescriptionSet) {
+                state.pc.addIceCandidate(candidate);
+            } else {
+                state.pendingRemoteIce.add(candidate);
+            }
+            call.resolve();
+        } catch (Exception error) {
+            call.reject(
+                error.getMessage() != null
+                    ? error.getMessage()
+                    : "Не удалось добавить ICE-кандидат"
+            );
+        }
     }
 
     @PluginMethod
@@ -2872,7 +2920,17 @@ public class NativeScreenSharePlugin extends Plugin {
             }
 
             @Override
-            public void onIceCandidate(IceCandidate candidate) {}
+            public void onIceCandidate(IceCandidate candidate) {
+                if (candidate == null) {
+                    return;
+                }
+                JSObject event = new JSObject();
+                event.put("peerKey", state.peerKey);
+                event.put("sdpMid", candidate.sdpMid);
+                event.put("sdpMLineIndex", candidate.sdpMLineIndex);
+                event.put("candidate", candidate.sdp);
+                notifyListeners("iceCandidate", event);
+            }
 
             @Override
             public void onIceCandidatesRemoved(
@@ -3030,6 +3088,8 @@ public class NativeScreenSharePlugin extends Plugin {
         PeerConnection pc;
         PluginCall pendingOfferCall;
         boolean localDescriptionSet = false;
+        boolean remoteDescriptionSet = false;
+        final List<IceCandidate> pendingRemoteIce = new ArrayList<>();
 
         PeerState(String peerKey) {
             this.peerKey = peerKey;

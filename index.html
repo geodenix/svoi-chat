@@ -3878,6 +3878,7 @@ function updateSpeakerButtons(){
 }
 
 let nativeScreenListenerReady=false;
+let nativeScreenIceListenerReady=false;
 
 function nativeScreenPlugin(){
   return window.Capacitor?.Plugins?.NativeScreenShare||null
@@ -3926,6 +3927,7 @@ function closeNativePrivateScreenReceiver(call,restoreMain=true){
   if(call){
     call.nativeScreenReceiver=null;
     call.nativeScreenRemoteStream=null;
+    call.nativeScreenPendingIce=[];
     call.remoteScreenSharing=false
   }
   if(restoreMain&&currentCall===call){
@@ -3953,6 +3955,28 @@ async function acceptNativePrivateScreenOffer(data){
   const pc=new RTCPeerConnection(await getRtcConfig());
   call.nativeScreenReceiver=pc;
   call.remoteScreenSharing=true;
+  if(!Array.isArray(call.nativeScreenPendingIce)){
+    call.nativeScreenPendingIce=[]
+  }
+  let answerSent=false;
+  const localIceQueue=[];
+
+  pc.onicecandidate=event=>{
+    const candidate=event.candidate?.toJSON?.();
+    if(!candidate)return;
+    if(!answerSent){
+      localIceQueue.push(candidate);
+      return
+    }
+    try{
+      wsSend({
+        type:'native_screen_ice',
+        to_user_id:data.from_user_id,
+        call_id:data.call_id,
+        candidate
+      })
+    }catch{}
+  };
   exitEarMode();
   $('callStatus').textContent='Подключаем демонстрацию экрана…';
 
@@ -3993,9 +4017,11 @@ async function acceptNativePrivateScreenOffer(data){
 
   try{
     await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    for(const candidate of call.nativeScreenPendingIce.splice(0)){
+      try{await pc.addIceCandidate(new RTCIceCandidate(candidate))}catch{}
+    }
     const answer=await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    await waitForIceGatheringComplete(pc);
     await waitForSocketOpen();
     wsSend({
       type:'native_screen_answer',
@@ -4004,7 +4030,16 @@ async function acceptNativePrivateScreenOffer(data){
       sdp:pc.localDescription.toJSON
         ?pc.localDescription.toJSON()
         :pc.localDescription
-    })
+    });
+    answerSent=true;
+    for(const candidate of localIceQueue.splice(0)){
+      wsSend({
+        type:'native_screen_ice',
+        to_user_id:data.from_user_id,
+        call_id:data.call_id,
+        candidate
+      })
+    }
   }catch(err){
     closeNativePrivateScreenReceiver(call,true);
     alert(err?.message||'Не удалось принять демонстрацию экрана')
@@ -4044,14 +4079,26 @@ async function startNativePrivateScreenShare(call){
 
   const rtc=await getRtcConfig();
   const peerKey='private-'+call.callId+'-'+call.peerId;
-  const offer=await plugin.createOffer({
-    peerKey,
-    iceServers:rtc.iceServers||[]
-  });
-
   call.nativeScreenPeerKey=peerKey;
   call.nativeScreenSharing=true;
   call.screenSharing=true;
+  call.nativeScreenOfferSent=false;
+  call.nativeScreenLocalIceQueue=[];
+
+  let offer;
+  try{
+    offer=await plugin.createOffer({
+      peerKey,
+      iceServers:rtc.iceServers||[]
+    })
+  }catch(err){
+    call.nativeScreenPeerKey=null;
+    call.nativeScreenSharing=false;
+    call.screenSharing=false;
+    call.nativeScreenOfferSent=false;
+    call.nativeScreenLocalIceQueue=[];
+    throw err
+  }
 
   await waitForSocketOpen();
   wsSend({
@@ -4060,6 +4107,15 @@ async function startNativePrivateScreenShare(call){
     call_id:call.callId,
     sdp:{type:'offer',sdp:offer.sdp}
   });
+  call.nativeScreenOfferSent=true;
+  for(const candidate of call.nativeScreenLocalIceQueue.splice(0)){
+    wsSend({
+      type:'native_screen_ice',
+      to_user_id:call.peerId,
+      call_id:call.callId,
+      candidate
+    })
+  }
   wsSend({
     type:'call_screen_state',
     to_user_id:call.peerId,
@@ -4087,6 +4143,8 @@ async function stopNativePrivateScreenShare(call,notifyPeer=true){
     call.nativeScreenPeerKey=null;
     call.nativeScreenSharing=false;
     call.screenSharing=false;
+    call.nativeScreenOfferSent=false;
+    call.nativeScreenLocalIceQueue=[];
     call.screenShareTransitionUntil=Date.now()+5000;
 
     const camera=localVideoTrack();
@@ -4129,76 +4187,117 @@ async function stopNativePrivateScreenShare(call,notifyPeer=true){
 }
 
 function ensureNativeScreenStoppedListener(){
-  if(nativeScreenListenerReady)return;
   const plugin=nativeScreenPlugin();
   if(!plugin?.addListener)return;
-  nativeScreenListenerReady=true;
-  Promise.resolve(
-    plugin.addListener('captureStopped',()=>{
-      const call=currentCall;
-      if(call?.nativeScreenSharing){
-        call.nativeScreenSharing=false;
-        call.screenSharing=false;
-        call.nativeScreenPeerKey=null;
-        const camera=localVideoTrack();
-        if(
-          call.screenRestoreCamera
-          && !call.cameraOff
-          && camera
-          && camera.readyState==='live'
-        ){
-          camera.enabled=true
-        }
-        call.screenRestoreCamera=false;
-        startNativeCallService(
-          call.peerName||$('callName').textContent||'Звонок',
-          !!camera?.enabled,
-          false
-        ).catch(()=>{});
-        try{
-          wsSend({
-            type:'native_screen_stop',
-            to_user_id:call.peerId,
-            call_id:call.callId
-          });
-          wsSend({
-            type:'call_screen_state',
-            to_user_id:call.peerId,
-            call_id:call.callId,
-            sharing:false
-          })
-        }catch{}
-        restorePrivateLocalPreview(call);
-        $('callStatus').textContent='Соединено';
-        updatePrivateVideoControls()
-      }
 
-      const state=groupCallState;
-      if(state?.nativeScreenSharing){
-        const peerIds=[...(state.nativeScreenPeerKeys?.keys?.()||[])];
-        state.nativeScreenSharing=false;
-        state.screenSharing=false;
-        state.nativeScreenPeerKeys=new Map();
-        for(const userId of peerIds){
+  if(!nativeScreenListenerReady){
+    nativeScreenListenerReady=true;
+    Promise.resolve(
+      plugin.addListener('captureStopped',()=>{
+        const call=currentCall;
+        if(call?.nativeScreenSharing){
+          call.nativeScreenSharing=false;
+          call.screenSharing=false;
+          call.nativeScreenPeerKey=null;
+          const camera=localVideoTrack();
+          if(
+            call.screenRestoreCamera
+            && !call.cameraOff
+            && camera
+            && camera.readyState==='live'
+          ){
+            camera.enabled=true
+          }
+          call.screenRestoreCamera=false;
+          startNativeCallService(
+            call.peerName||$('callName').textContent||'Звонок',
+            !!camera?.enabled,
+            false
+          ).catch(()=>{});
           try{
             wsSend({
               type:'native_screen_stop',
-              to_user_id:userId,
-              call_id:'group-'+state.groupId,
-              group_id:state.groupId
+              to_user_id:call.peerId,
+              call_id:call.callId
+            });
+            wsSend({
+              type:'call_screen_state',
+              to_user_id:call.peerId,
+              call_id:call.callId,
+              sharing:false
             })
           }catch{}
+          restorePrivateLocalPreview(call);
+          $('callStatus').textContent='Соединено';
+          updatePrivateVideoControls()
         }
-        if(state.screenRestoreCamera&&!state.cameraOff){
-          state.room.localParticipant.setCameraEnabled(true).catch(()=>{})
+  
+        const state=groupCallState;
+        if(state?.nativeScreenSharing){
+          const peerIds=[...(state.nativeScreenPeerKeys?.keys?.()||[])];
+          state.nativeScreenSharing=false;
+          state.screenSharing=false;
+          state.nativeScreenPeerKeys=new Map();
+          for(const userId of peerIds){
+            try{
+              wsSend({
+                type:'native_screen_stop',
+                to_user_id:userId,
+                call_id:'group-'+state.groupId,
+                group_id:state.groupId
+              })
+            }catch{}
+          }
+          if(state.screenRestoreCamera&&!state.cameraOff){
+            state.room.localParticipant.setCameraEnabled(true).catch(()=>{})
+          }
+          state.screenRestoreCamera=false;
+          renderGroupLocalTracks().catch(()=>{});
+          updateGroupScreenShareControls();
+          refreshGroupCount()
         }
-        state.screenRestoreCamera=false;
-        renderGroupLocalTracks().catch(()=>{});
-        updateGroupScreenShareControls();
-        refreshGroupCount()
-      }
-    })
-  ).catch(()=>{nativeScreenListenerReady=false})
+      })
+    ).catch(()=>{nativeScreenListenerReady=false})
+  }
+
+  if(!nativeScreenIceListenerReady){
+    nativeScreenIceListenerReady=true;
+    Promise.resolve(
+      plugin.addListener('iceCandidate',event=>{
+        const call=currentCall;
+        const peerKey=String(event?.peerKey||'');
+        if(
+          !call?.nativeScreenSharing
+          || !call.nativeScreenPeerKey
+          || call.nativeScreenPeerKey!==peerKey
+          || !event?.candidate
+        )return;
+
+        const candidate={
+          candidate:String(event.candidate),
+          sdpMid:event.sdpMid==null?null:String(event.sdpMid),
+          sdpMLineIndex:Number(event.sdpMLineIndex||0)
+        };
+
+        if(!call.nativeScreenOfferSent){
+          if(!Array.isArray(call.nativeScreenLocalIceQueue)){
+            call.nativeScreenLocalIceQueue=[]
+          }
+          call.nativeScreenLocalIceQueue.push(candidate);
+          return
+        }
+
+        try{
+          wsSend({
+            type:'native_screen_ice',
+            to_user_id:call.peerId,
+            call_id:call.callId,
+            candidate
+          })
+        }catch{}
+      })
+    ).catch(()=>{nativeScreenIceListenerReady=false})
+  }
 }
 
 function groupParticipantUserId(participant){
@@ -6025,6 +6124,44 @@ async function handleCallSignal(data){
     }
     return
   }
+  if(data.type==='native_screen_ice'){
+    if(data.group_id)return;
+    const call=currentCall;
+    if(!call||call.callId!==data.call_id||!data.candidate)return;
+
+    if(call.nativeScreenReceiver){
+      if(call.nativeScreenReceiver.remoteDescription){
+        try{
+          await call.nativeScreenReceiver.addIceCandidate(
+            new RTCIceCandidate(data.candidate)
+          )
+        }catch{}
+      }else{
+        if(!Array.isArray(call.nativeScreenPendingIce)){
+          call.nativeScreenPendingIce=[]
+        }
+        call.nativeScreenPendingIce.push(data.candidate)
+      }
+      return
+    }
+
+    if(
+      call.nativeScreenSharing
+      && call.nativeScreenPeerKey
+      && nativeScreenPlugin()?.addIceCandidate
+    ){
+      try{
+        await nativeScreenPlugin().addIceCandidate({
+          peerKey:call.nativeScreenPeerKey,
+          candidate:data.candidate.candidate,
+          sdpMid:data.candidate.sdpMid,
+          sdpMLineIndex:Number(data.candidate.sdpMLineIndex||0)
+        })
+      }catch{}
+    }
+    return
+  }
+
   if(data.type==='native_screen_stop'){
     if(data.group_id){
       if(
@@ -6492,7 +6629,7 @@ function connectWs(){
   };
   socket.onmessage=e=>{
     const data=JSON.parse(e.data);
-    if(['call_offer','call_answer','call_video_offer','call_video_answer','call_screen_state','ice_candidate','call_reject','call_end','call_unavailable','native_screen_offer','native_screen_answer','native_screen_stop'].includes(data.type)){
+    if(['call_offer','call_answer','call_video_offer','call_video_answer','call_screen_state','ice_candidate','call_reject','call_end','call_unavailable','native_screen_offer','native_screen_answer','native_screen_ice','native_screen_stop'].includes(data.type)){
       handleCallSignal(data);return
     }
     if(data.type==='group_call_invite'){

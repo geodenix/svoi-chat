@@ -4679,6 +4679,7 @@ CALL_SIGNAL_TYPES = {
     "call_end",
     "native_screen_offer",
     "native_screen_answer",
+    "native_screen_ice",
     "native_screen_stop",
 }
 
@@ -4984,7 +4985,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     "call_video_answer",
                 }:
                     payload["video"] = bool(data.get("video", False))
-            elif signal_type == "ice_candidate":
+            elif signal_type in {"ice_candidate", "native_screen_ice"}:
                 candidate = data.get("candidate")
                 if not isinstance(candidate, dict):
                     continue
@@ -4993,6 +4994,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             if signal_type in {
                 "native_screen_offer",
                 "native_screen_answer",
+                "native_screen_ice",
                 "native_screen_stop",
             }:
                 group_id_raw = data.get("group_id")
