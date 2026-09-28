@@ -4463,10 +4463,18 @@ async function syncNativeProximity(){
 function updateEarModeButton(){
   const button=$('earModeBtn');
   if(!button)return;
+
+  const nativeAutomatic=!!nativeProximityPlugin();
   const available=canUseEarMode();
-  button.classList.toggle('hidden',!available);
-  button.disabled=!available;
-  button.title='Режим у уха';
+
+  // В нативном Android датчик приближения работает автоматически.
+  // В браузере/PWA оставляем ручную кнопку режима у уха.
+  button.classList.toggle('hidden',nativeAutomatic||!available);
+  button.disabled=nativeAutomatic||!available;
+  button.title=nativeAutomatic
+    ?'Датчик приближения работает автоматически'
+    :'Режим у уха';
+
   syncNativeProximity().catch(()=>{})
 }
 
