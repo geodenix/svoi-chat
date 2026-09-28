@@ -2816,12 +2816,26 @@ function ensureGroupTile(participant,isLocal=false){
   return tile
 }
 
-function attachGroupTrack(track,participant,isLocal=false){
+function isScreenPublication(publication,track=null){
+  const source=String(publication?.source||track?.source||'').toLowerCase();
+  return source.includes('screen')
+}
+
+function attachGroupTrack(track,participant,isLocal=false,publication=null){
   const tile=ensureGroupTile(participant,isLocal);
   if(track.kind===LivekitClient.Track.Kind.Video){
+    const screen=isScreenPublication(publication,track);
+    tile.dataset.screenSharing=screen?'1':'0';
     tile.querySelector('.tile-avatar')?.classList.add('hidden');
+    const name=tile.querySelector('.tile-name');
+    if(name){
+      name.textContent=(participant.name||participant.identity||'Участник')
+        +(isLocal?' · вы':'')
+        +(screen?' · экран':'')
+    }
     const element=track.attach();
     element.autoplay=true;element.playsInline=true;
+    element.dataset.screenShare=screen?'1':'0';
     if(isLocal)element.muted=true;
     for(const old of tile.querySelectorAll('video'))old.remove();
     tile.prepend(element)
@@ -2833,8 +2847,20 @@ function attachGroupTrack(track,participant,isLocal=false){
   }
 }
 
-function detachGroupTrack(track){
+function detachGroupTrack(track,participant=null,publication=null){
   try{track.detach().forEach(el=>el.remove())}catch{}
+  if(!participant)return;
+  const tile=$(groupTileId(participant.identity));
+  if(!tile)return;
+  if(track.kind===LivekitClient.Track.Kind.Video){
+    const stillHasVideo=!!tile.querySelector('video');
+    tile.querySelector('.tile-avatar')?.classList.toggle('hidden',stillHasVideo);
+    if(isScreenPublication(publication,track)){
+      tile.dataset.screenSharing='0';
+      const name=tile.querySelector('.tile-name');
+      if(name)name.textContent=(participant.name||participant.identity||'Участник')
+    }
+  }
 }
 
 function refreshGroupCount(){
@@ -2893,6 +2919,13 @@ async function recoverGroupCall(state){
     );
 
     await state.room.localParticipant.setMicrophoneEnabled(!state.muted);
+    if(state.screenSharing){
+      state.screenSharing=false;
+      state.screenRestoreCamera=false;
+      $('groupScreenShareBtn').classList.remove('sharing');
+      $('groupScreenShareBtn').textContent='🖥️';
+      $('groupScreenShareBtn').title='Демонстрация экрана'
+    }
     await state.room.localParticipant.setCameraEnabled(!state.cameraOff);
     if(!state.cameraOff){
       let track=null;
@@ -2920,13 +2953,18 @@ async function renderGroupLocalTracks(){
   if(!groupCallState?.room)return;
   const p=groupCallState.room.localParticipant;
   const tile=ensureGroupTile(p,true);
-  let hasVideo=false;
-  for(const pub of p.videoTrackPublications.values()){
-    if(pub.track){
-      attachGroupTrack(pub.track,p,true);hasVideo=true;break
-    }
+  const publications=[...p.videoTrackPublications.values()]
+    .filter(pub=>pub.track)
+    .sort((a,b)=>Number(isScreenPublication(b,b.track))-Number(isScreenPublication(a,a.track)));
+  const pub=publications[0]||null;
+  if(pub?.track)attachGroupTrack(pub.track,p,true,pub);
+  const hasVideo=!!pub?.track;
+  tile.querySelector('.tile-avatar')?.classList.toggle('hidden',hasVideo);
+  if(!hasVideo){
+    tile.dataset.screenSharing='0';
+    const name=tile.querySelector('.tile-name');
+    if(name)name.textContent=(p.name||p.identity||'Вы')+' · вы'
   }
-  tile.querySelector('.tile-avatar')?.classList.toggle('hidden',hasVideo)
 }
 
 async function joinGroupCall(groupId,video=false,invite=false){
@@ -2960,6 +2998,8 @@ async function joinGroupCall(groupId,video=false,invite=false){
       muted:false,
       cameraOff:!video,
       facing:'user',
+      screenSharing:false,
+      screenRestoreCamera:false,
       reconnectAttempts:0,
       recovering:false,
       needsRecovery:false,
@@ -2974,13 +3014,17 @@ async function joinGroupCall(groupId,video=false,invite=false){
     updateSpeakerButtons();
     $('groupCameraBtn').classList.toggle('off',!video);
     $('groupSwitchCameraBtn').classList.toggle('hidden',!video);
+    $('groupScreenShareBtn').classList.toggle('hidden',!screenShareSupported());
+    $('groupScreenShareBtn').classList.remove('sharing');
+    $('groupScreenShareBtn').textContent='🖥️';
+    $('groupScreenShareBtn').title='Демонстрация экрана';
 
     room
-      .on(LivekitClient.RoomEvent.TrackSubscribed,(track,_publication,participant)=>{
-        attachGroupTrack(track,participant,false);refreshGroupCount()
+      .on(LivekitClient.RoomEvent.TrackSubscribed,(track,publication,participant)=>{
+        attachGroupTrack(track,participant,false,publication);refreshGroupCount()
       })
-      .on(LivekitClient.RoomEvent.TrackUnsubscribed,(track)=>{
-        detachGroupTrack(track)
+      .on(LivekitClient.RoomEvent.TrackUnsubscribed,(track,publication,participant)=>{
+        detachGroupTrack(track,participant,publication)
       })
       .on(LivekitClient.RoomEvent.ParticipantConnected,(participant)=>{
         ensureGroupTile(participant,false);refreshGroupCount()
@@ -3044,9 +3088,14 @@ function leaveGroupCall(disconnect=true){
   const state=groupCallState;
   if(state)state.manualLeave=true;
   groupCallState=null;
+  if(state?.screenSharing){
+    try{state.room.localParticipant.setScreenShareEnabled(false).catch(()=>{})}catch{}
+  }
   if(state&&disconnect){
     try{state.room.disconnect()}catch{}
   }
+  $('groupScreenShareBtn').classList.remove('sharing');
+  $('groupScreenShareBtn').textContent='🖥️';
   $('groupCallGrid').replaceChildren();
   $('groupCallOverlay').classList.add('hidden')
 }
@@ -3081,6 +3130,75 @@ $('groupMuteBtn').onclick=async()=>{
 
 $('groupSpeakerBtn').onclick=()=>chooseSpeakerOutput();
 
+function updateGroupScreenShareControls(){
+  const state=groupCallState;
+  const button=$('groupScreenShareBtn');
+  if(!button)return;
+  button.classList.toggle('hidden',!screenShareSupported());
+  const sharing=!!state?.screenSharing;
+  button.classList.toggle('sharing',sharing);
+  button.textContent=sharing?'⏹️':'🖥️';
+  button.title=sharing?'Остановить демонстрацию экрана':'Демонстрация экрана';
+  if(state){
+    $('groupCameraBtn').disabled=sharing;
+    $('groupSwitchCameraBtn').classList.toggle('hidden',sharing||state.cameraOff)
+  }
+}
+
+async function toggleGroupScreenShare(){
+  const state=groupCallState;
+  if(!state)return;
+  if(!screenShareSupported()){
+    alert('Этот браузер не поддерживает демонстрацию экрана');
+    return
+  }
+  const participant=state.room.localParticipant;
+  const button=$('groupScreenShareBtn');
+  button.disabled=true;
+
+  if(state.screenSharing){
+    try{
+      await participant.setScreenShareEnabled(false);
+      state.screenSharing=false;
+      if(state.screenRestoreCamera&&!state.cameraOff){
+        await participant.setCameraEnabled(true)
+      }
+      state.screenRestoreCamera=false;
+      await renderGroupLocalTracks();
+      refreshGroupCount()
+    }catch(err){
+      alert(screenShareErrorMessage(err))
+    }finally{
+      button.disabled=false;
+      updateGroupScreenShareControls()
+    }
+    return
+  }
+
+  const restoreCamera=!state.cameraOff;
+  state.screenRestoreCamera=restoreCamera;
+  try{
+    if(restoreCamera)await participant.setCameraEnabled(false);
+    await participant.setScreenShareEnabled(true);
+    state.screenSharing=true;
+    await renderGroupLocalTracks();
+    setGroupCallStatus('Демонстрация экрана включена')
+  }catch(err){
+    state.screenSharing=false;
+    if(restoreCamera&&!state.cameraOff){
+      try{await participant.setCameraEnabled(true)}catch{}
+    }
+    state.screenRestoreCamera=false;
+    await renderGroupLocalTracks().catch(()=>{});
+    alert(screenShareErrorMessage(err))
+  }finally{
+    button.disabled=false;
+    updateGroupScreenShareControls()
+  }
+}
+
+$('groupScreenShareBtn').onclick=()=>toggleGroupScreenShare();
+
 $('groupCameraBtn').onclick=async()=>{
   if(!groupCallState)return;
   try{
@@ -3089,7 +3207,8 @@ $('groupCameraBtn').onclick=async()=>{
     $('groupCameraBtn').classList.toggle('off',groupCallState.cameraOff);
     $('groupCameraBtn').textContent=groupCallState.cameraOff?'🚫':'📷';
     $('groupSwitchCameraBtn').classList.toggle('hidden',groupCallState.cameraOff);
-    await renderGroupLocalTracks()
+    await renderGroupLocalTracks();
+    updateGroupScreenShareControls()
   }catch(err){alert(err.message||'Не удалось изменить камеру')}
 };
 
