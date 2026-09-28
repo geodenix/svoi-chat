@@ -6,7 +6,9 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,6 +51,17 @@ LIVEKIT_WS_URL = os.getenv(
     "LIVEKIT_WS_URL",
     "wss://epl-gruz.duckdns.org",
 ).strip()
+SERVER_ADMIN_USERNAMES = {
+    value.strip().lower()
+    for value in os.getenv("SVOI_SERVER_ADMINS", "").split(",")
+    if value.strip()
+}
+SERVER_ADMIN_IDS = {
+    int(value.strip())
+    for value in os.getenv("SVOI_SERVER_ADMIN_IDS", "").split(",")
+    if value.strip().isdigit()
+}
+APP_STARTED_AT = time.time()
 
 app = FastAPI(title="Свои", version="0.1.0")
 connections: Dict[int, Set[WebSocket]] = {}
@@ -375,6 +388,71 @@ def current_user(
     return row
 
 
+def is_server_admin(user) -> bool:
+    try:
+        user_id = int(user["id"])
+        username = str(user["username"]).strip().lower()
+    except Exception:
+        return False
+    return (
+        user_id in SERVER_ADMIN_IDS
+        or username in SERVER_ADMIN_USERNAMES
+    )
+
+
+def require_server_admin(user=Depends(current_user)):
+    if not is_server_admin(user):
+        raise HTTPException(403, "Доступ только для администратора сервера")
+    return user
+
+
+def _memory_snapshot() -> dict:
+    values = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, raw = line.split(":", 1)
+            parts = raw.strip().split()
+            if parts:
+                values[key] = int(parts[0]) * 1024
+    except Exception:
+        pass
+
+    total = int(values.get("MemTotal", 0))
+    available = int(values.get("MemAvailable", 0))
+    used = max(0, total - available) if total else 0
+    return {
+        "total": total,
+        "used": used,
+        "available": available,
+        "percent": round((used * 100 / total), 1) if total else None,
+    }
+
+
+def _process_rss_bytes() -> int:
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return 0
+
+
+def _service_state(name: str) -> str:
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", name],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        state = (result.stdout or result.stderr or "unknown").strip()
+        return state or "unknown"
+    except Exception:
+        return "unknown"
+
+
 class RegisterIn(BaseModel):
     username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
     display_name: str = Field(min_length=1, max_length=60)
@@ -502,7 +580,172 @@ def logout(
 
 @app.get("/api/me")
 def me(user=Depends(current_user)):
-    return user_json(user)
+    data = user_json(user)
+    data["is_server_admin"] = is_server_admin(user)
+    return data
+
+
+@app.get("/api/admin/overview")
+def admin_overview(
+    user=Depends(require_server_admin),
+    conn=Depends(db),
+):
+    now = datetime.now(timezone.utc)
+    since_24h = (now - timedelta(hours=24)).isoformat()
+
+    total_users = int(
+        conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    )
+    total_groups = int(
+        conn.execute("SELECT COUNT(*) FROM chat_groups").fetchone()[0]
+    )
+    private_messages = int(
+        conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    )
+    group_messages = int(
+        conn.execute("SELECT COUNT(*) FROM group_messages").fetchone()[0]
+    )
+    uploads_row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(size),0) FROM uploads"
+    ).fetchone()
+    active_sessions = int(
+        conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    )
+
+    registrations_24h = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM users WHERE created_at>=?",
+            (since_24h,),
+        ).fetchone()[0]
+    )
+    private_24h = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE created_at>=?",
+            (since_24h,),
+        ).fetchone()[0]
+    )
+    group_24h = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM group_messages WHERE created_at>=?",
+            (since_24h,),
+        ).fetchone()[0]
+    )
+    calls_24h = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM call_history WHERE started_at>=?",
+            (since_24h,),
+        ).fetchone()[0]
+    )
+
+    memory = _memory_snapshot()
+    try:
+        disk_usage = shutil.disk_usage(DATA_DIR)
+        disk = {
+            "total": int(disk_usage.total),
+            "used": int(disk_usage.used),
+            "free": int(disk_usage.free),
+            "percent": round(
+                disk_usage.used * 100 / disk_usage.total,
+                1,
+            ) if disk_usage.total else None,
+        }
+    except Exception:
+        disk = {
+            "total": 0,
+            "used": 0,
+            "free": 0,
+            "percent": None,
+        }
+
+    try:
+        load_1m, load_5m, load_15m = os.getloadavg()
+    except Exception:
+        load_1m = load_5m = load_15m = 0.0
+
+    service_names = (
+        "svoi-chat",
+        "livekit",
+        "coturn",
+        "caddy",
+        "svoi-watchdog.timer",
+    )
+    services = {
+        name: _service_state(name)
+        for name in service_names
+    }
+
+    online_users = sum(
+        1 for sockets in connections.values() if sockets
+    )
+    websocket_connections = sum(
+        len(sockets) for sockets in connections.values()
+    )
+
+    return {
+        "generated_at": now.isoformat(),
+        "app_uptime_seconds": max(0, int(time.time() - APP_STARTED_AT)),
+        "online_users": online_users,
+        "websocket_connections": websocket_connections,
+        "active_calls": len(active_calls),
+        "counts": {
+            "users": total_users,
+            "groups": total_groups,
+            "private_messages": private_messages,
+            "group_messages": group_messages,
+            "uploads": int(uploads_row[0]),
+            "uploads_bytes": int(uploads_row[1] or 0),
+            "sessions": active_sessions,
+        },
+        "activity_24h": {
+            "registrations": registrations_24h,
+            "private_messages": private_24h,
+            "group_messages": group_24h,
+            "calls": calls_24h,
+        },
+        "resources": {
+            "cpu_count": int(os.cpu_count() or 1),
+            "load_1m": round(float(load_1m), 2),
+            "load_5m": round(float(load_5m), 2),
+            "load_15m": round(float(load_15m), 2),
+            "memory": memory,
+            "disk": disk,
+            "database_bytes": (
+                DB_PATH.stat().st_size if DB_PATH.is_file() else 0
+            ),
+            "process_rss_bytes": _process_rss_bytes(),
+        },
+        "services": services,
+    }
+
+
+@app.get("/api/admin/users")
+def admin_users(
+    limit: int = Query(50, ge=1, le=200),
+    user=Depends(require_server_admin),
+    conn=Depends(db),
+):
+    rows = conn.execute(
+        """SELECT u.id,u.username,u.display_name,u.created_at,u.last_seen_at,
+                  COUNT(s.token_hash) AS session_count
+           FROM users u
+           LEFT JOIN sessions s ON s.user_id=u.id
+           GROUP BY u.id
+           ORDER BY u.id DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "username": row["username"],
+            "display_name": row["display_name"],
+            "created_at": row["created_at"],
+            "last_seen_at": row["last_seen_at"],
+            "online": bool(connections.get(int(row["id"]))),
+            "session_count": int(row["session_count"] or 0),
+        }
+        for row in rows
+    ]
 
 
 @app.get("/api/turn")
