@@ -1089,7 +1089,60 @@ function setGroupAvatar(el,group){
     el.textContent='#'
   }
 }
-function showAuth(){me=null;active=null;foundUser=null;if(adminRefreshTimer){clearInterval(adminRefreshTimer);adminRefreshTimer=null}if(socket)socket.close();$('auth').classList.remove('hidden');$('app').classList.add('hidden')}
+function nativeBadgePlugin(){
+  return window.Capacitor?.Plugins?.NativeBadge||null
+}
+
+function totalUnreadCount(){
+  return [...users,...groups].reduce(
+    (sum,item)=>sum+Math.max(0,Number(item?.unread_count)||0),
+    0
+  )
+}
+
+async function updateAppBadge(){
+  const count=totalUnreadCount();
+  document.title=count>0?'('+count+') Свои':'Свои';
+
+  const plugin=nativeBadgePlugin();
+  if(plugin){
+    try{
+      await plugin.setBadge({count});
+      return
+    }catch{}
+  }
+
+  try{
+    if(count>0&&typeof navigator.setAppBadge==='function'){
+      await navigator.setAppBadge(count)
+    }else if(count===0&&typeof navigator.clearAppBadge==='function'){
+      await navigator.clearAppBadge()
+    }
+  }catch{}
+}
+
+function isChatMuted(chatType,chatId){
+  const id=Number(chatId);
+  if(chatType==='group'){
+    return !!groups.find(group=>Number(group.id)===id)?.muted
+  }
+  return !!users.find(user=>Number(user.id)===id)?.muted
+}
+
+function muteStatusText(item){
+  if(!item?.muted)return 'Уведомления включены';
+  if(!item.muted_until)return 'Без звука · навсегда';
+  const until=new Date(item.muted_until);
+  if(Number.isNaN(until.getTime()))return 'Без звука';
+  return 'Без звука до '+until.toLocaleString('ru-RU',{
+    day:'2-digit',
+    month:'2-digit',
+    hour:'2-digit',
+    minute:'2-digit'
+  })
+}
+
+function showAuth(){me=null;active=null;foundUser=null;if(adminRefreshTimer){clearInterval(adminRefreshTimer);adminRefreshTimer=null}if(socket)socket.close();$('auth').classList.remove('hidden');$('app').classList.add('hidden');document.title='Свои';updateAppBadge().catch(()=>{})}
 
 async function enter(){
   try{
@@ -1111,8 +1164,8 @@ async function enter(){
   }
 }
 
-async function loadUsers(){users=await api('/api/users');renderUsers();if(active?.type==='user'){active.data=users.find(u=>u.id===active.data.id)||active.data;updateHead()}}
-async function loadGroups(){groups=await api('/api/groups');renderGroups();if(active?.type==='group'){active.data=groups.find(g=>g.id===active.data.id)||active.data;updateHead()}}
+async function loadUsers(){users=await api('/api/users');renderUsers();if(active?.type==='user'){active.data=users.find(u=>u.id===active.data.id)||active.data;updateHead()}updateAppBadge().catch(()=>{})}
+async function loadGroups(){groups=await api('/api/groups');renderGroups();if(active?.type==='group'){active.data=groups.find(g=>g.id===active.data.id)||active.data;updateHead()}updateAppBadge().catch(()=>{})}
 
 async function loadCallHistory(){
   callHistory=await api('/api/calls/history?limit=100');
@@ -1529,16 +1582,33 @@ $('userSearchForm').onsubmit=async e=>{
   }
 };
 
+function renderUnreadBadge(container,item){
+  const mute=container.querySelector('.chat-mute-icon');
+  const badge=container.querySelector('.unread-badge');
+  if(mute){
+    mute.classList.toggle('hidden',!item.muted);
+    mute.title=muteStatusText(item)
+  }
+  if(badge){
+    const count=Math.max(0,Number(item.unread_count)||0);
+    badge.classList.toggle('hidden',count===0);
+    badge.textContent=count>99?'99+':String(count)
+  }
+}
+
 function renderUsers(){
   const box=$('users');box.replaceChildren();
   if(!users.length){box.innerHTML='<div class="muted" style="padding:12px">Контактов и личных диалогов пока нет. Найди человека по @тегу.</div>';return}
   for(const u of users){
-    const b=document.createElement('button');b.className='item'+(active?.type==='user'&&active.data.id===u.id?' active':'');
-    b.innerHTML='<span class="avatar"></span><span class="txt"><strong></strong><small class="muted"></small></span><span class="dot '+(u.online?'on':'')+'"></span>';
+    const b=document.createElement('button');
+    b.className='item'+(active?.type==='user'&&active.data.id===u.id?' active':'');
+    b.innerHTML='<span class="avatar"></span><span class="txt"><strong></strong><small class="muted"></small></span><span class="chat-badges"><span class="chat-mute-icon hidden">🔕</span><span class="unread-badge hidden"></span></span><span class="dot '+(u.online?'on':'')+'"></span>';
     setAvatar(b.querySelector('.avatar'),u);
     b.querySelector('strong').textContent=u.display_name;
     b.querySelector('small').textContent='@'+u.username+' · '+(u.blocked_by_me?'🚫 заблокирован':formatLastSeen(u));
-    b.onclick=()=>openUser(u);box.append(b)
+    renderUnreadBadge(b,u);
+    b.onclick=()=>openUser(u);
+    box.append(b)
   }
 }
 
@@ -1546,10 +1616,15 @@ function renderGroups(){
   const box=$('groups');box.replaceChildren();
   if(!groups.length){box.innerHTML='<div class="muted" style="padding:12px">Групп пока нет.</div>';return}
   for(const g of groups){
-    const b=document.createElement('button');b.className='item'+(active?.type==='group'&&active.data.id===g.id?' active':'');
-    b.innerHTML='<span class="avatar group-avatar">#</span><span class="txt"><strong></strong><small class="muted">'+g.member_count+' участников</small></span>';
+    const b=document.createElement('button');
+    b.className='item'+(active?.type==='group'&&active.data.id===g.id?' active':'');
+    b.innerHTML='<span class="avatar group-avatar">#</span><span class="txt"><strong></strong><small class="muted"></small></span><span class="chat-badges"><span class="chat-mute-icon hidden">🔕</span><span class="unread-badge hidden"></span></span>';
     setGroupAvatar(b.querySelector('.avatar'),g);
-    b.querySelector('strong').textContent=g.name;b.onclick=()=>openGroup(g);box.append(b)
+    b.querySelector('strong').textContent=g.name;
+    b.querySelector('small').textContent=g.member_count+' участников';
+    renderUnreadBadge(b,g);
+    b.onclick=()=>openGroup(g);
+    box.append(b)
   }
 }
 
@@ -1621,7 +1696,12 @@ async function openUser(u){
   if($('groupMembersDialog').open)$('groupMembersDialog').close();
   if($('groupRenameDialog').open)$('groupRenameDialog').close();
   active={type:'user',data:u};$('app').classList.add('chat-open');$('chatHead').classList.remove('hidden');$('composer').classList.remove('hidden');
-  updateHead();renderUsers();renderGroups();restoreCurrentDraft();loadCurrentChatBackground().catch(()=>{});const msgs=await api('/api/messages/'+u.id);renderMessages(msgs);$('text').focus()
+  updateHead();renderUsers();renderGroups();restoreCurrentDraft();loadCurrentChatBackground().catch(()=>{});
+  const msgs=await api('/api/messages/'+u.id);
+  active.data={...active.data,unread_count:0};
+  users=users.map(item=>Number(item.id)===Number(u.id)?{...item,unread_count:0}:item);
+  renderUsers();updateAppBadge().catch(()=>{});
+  renderMessages(msgs);$('text').focus()
 }
 
 async function openGroup(g){
@@ -1632,7 +1712,12 @@ async function openGroup(g){
   if($('groupMembersDialog').open)$('groupMembersDialog').close();
   if($('groupRenameDialog').open)$('groupRenameDialog').close();
   active={type:'group',data:g};$('app').classList.add('chat-open');$('chatHead').classList.remove('hidden');$('composer').classList.remove('hidden');
-  updateHead();renderUsers();renderGroups();restoreCurrentDraft();loadCurrentChatBackground().catch(()=>{});const msgs=await api('/api/groups/'+g.id+'/messages');renderMessages(msgs);$('text').focus()
+  updateHead();renderUsers();renderGroups();restoreCurrentDraft();loadCurrentChatBackground().catch(()=>{});
+  const msgs=await api('/api/groups/'+g.id+'/messages');
+  active.data={...active.data,unread_count:0};
+  groups=groups.map(item=>Number(item.id)===Number(g.id)?{...item,unread_count:0}:item);
+  renderGroups();updateAppBadge().catch(()=>{});
+  renderMessages(msgs);$('text').focus()
 }
 
 function updateHead(){
