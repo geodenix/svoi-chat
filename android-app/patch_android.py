@@ -8,6 +8,7 @@ permissions = """    <uses-permission android:name="android.permission.CAMERA" /
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
@@ -25,6 +26,7 @@ else:
     extra_permissions = []
     for permission in [
         "android.permission.POST_NOTIFICATIONS",
+        "android.permission.USE_FULL_SCREEN_INTENT",
         "android.permission.REQUEST_INSTALL_PACKAGES",
         "android.permission.VIBRATE",
         "android.permission.WAKE_LOCK",
@@ -236,6 +238,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.Settings;
+import android.view.WindowManager;
 import android.widget.Toast;
 
 import com.getcapacitor.BridgeActivity;
@@ -252,6 +255,8 @@ import java.util.List;
 public class MainActivity extends BridgeActivity {
     private static final String LATEST_RELEASE =
         "https://api.github.com/repos/geodenix/svoi-chat/releases/latest";
+    private static final String APP_URL =
+        "https://epl-gruz.duckdns.org";
     private static final String PREFS = "svoi_updater";
     private static final String PREF_DOWNLOAD_ID = "download_id";
     private static final String PREF_PENDING_INSTALL = "pending_install";
@@ -273,9 +278,50 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
 
         updaterPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        handlePushIntent(getIntent());
         registerDownloadReceiver();
         resumePendingUpdate();
         checkForUpdates();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handlePushIntent(intent);
+    }
+
+    private void handlePushIntent(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+
+        boolean incomingCall = intent.getBooleanExtra(
+            "svoi_incoming_call",
+            false
+        );
+
+        if (incomingCall) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(true);
+                setTurnScreenOn(true);
+            } else {
+                getWindow().addFlags(
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                        | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                );
+            }
+            getWindow().addFlags(
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            );
+        }
+
+        String path = intent.getStringExtra("svoi_url");
+        if (path != null && path.startsWith("/") && bridge != null) {
+            bridge.getWebView().post(() ->
+                bridge.getWebView().loadUrl(APP_URL + path)
+            );
+        }
     }
 
     @Override
@@ -969,6 +1015,7 @@ import com.google.firebase.messaging.FirebaseMessaging;
 public class NativePushPlugin extends Plugin {
     public static final String CHANNEL_MESSAGES = "svoi_messages";
     public static final String CHANNEL_SILENT = "svoi_messages_silent";
+    public static final String CHANNEL_CALLS = "svoi_calls_v1";
 
     private void ensureChannels() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
@@ -1000,6 +1047,26 @@ public class NativePushPlugin extends Plugin {
         silent.enableVibration(false);
         silent.setShowBadge(true);
         manager.createNotificationChannel(silent);
+
+        NotificationChannel calls = new NotificationChannel(
+            CHANNEL_CALLS,
+            "Звонки",
+            NotificationManager.IMPORTANCE_HIGH
+        );
+        calls.setDescription("Входящие звонки в «Свои»");
+        calls.enableVibration(true);
+        calls.setVibrationPattern(new long[]{0, 500, 350, 500, 350, 700});
+        calls.setLockscreenVisibility(android.app.Notification.VISIBILITY_PUBLIC);
+        calls.setShowBadge(false);
+        calls.setSound(
+            android.media.RingtoneManager.getDefaultUri(
+                android.media.RingtoneManager.TYPE_RINGTONE
+            ),
+            new android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                .build()
+        );
+        manager.createNotificationChannel(calls);
     }
 
     private boolean notificationPermissionGranted() {
@@ -1097,6 +1164,26 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
         silent.enableVibration(false);
         silent.setShowBadge(true);
         manager.createNotificationChannel(silent);
+
+        NotificationChannel calls = new NotificationChannel(
+            NativePushPlugin.CHANNEL_CALLS,
+            "Звонки",
+            NotificationManager.IMPORTANCE_HIGH
+        );
+        calls.setDescription("Входящие звонки в «Свои»");
+        calls.enableVibration(true);
+        calls.setVibrationPattern(new long[]{0, 500, 350, 500, 350, 700});
+        calls.setLockscreenVisibility(android.app.Notification.VISIBILITY_PUBLIC);
+        calls.setShowBadge(false);
+        calls.setSound(
+            android.media.RingtoneManager.getDefaultUri(
+                android.media.RingtoneManager.TYPE_RINGTONE
+            ),
+            new android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                .build()
+        );
+        manager.createNotificationChannel(calls);
     }
 
     private int parseInt(String value, int fallback) {
@@ -1122,6 +1209,7 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
         String url = data.get("url");
         boolean silent = "1".equals(data.get("silent"))
             || "true".equalsIgnoreCase(data.get("silent"));
+        boolean isCall = "call".equals(data.get("type"));
         int unread = Math.max(0, parseInt(data.get("unread_count"), 0));
 
         if (title == null || title.isEmpty()) {
@@ -1136,6 +1224,7 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
         if (url != null) {
             intent.putExtra("svoi_url", url);
         }
+        intent.putExtra("svoi_incoming_call", isCall);
         PendingIntent pendingIntent = PendingIntent.getActivity(
             this,
             0,
@@ -1143,9 +1232,13 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
 
-        String channel = silent
-            ? NativePushPlugin.CHANNEL_SILENT
-            : NativePushPlugin.CHANNEL_MESSAGES;
+        String channel = isCall
+            ? NativePushPlugin.CHANNEL_CALLS
+            : (
+                silent
+                    ? NativePushPlugin.CHANNEL_SILENT
+                    : NativePushPlugin.CHANNEL_MESSAGES
+            );
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(
             this,
@@ -1160,15 +1253,33 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
             .setNumber(unread)
             .setOnlyAlertOnce(silent)
             .setPriority(
-                silent
-                    ? NotificationCompat.PRIORITY_LOW
-                    : NotificationCompat.PRIORITY_HIGH
+                isCall
+                    ? NotificationCompat.PRIORITY_MAX
+                    : (
+                        silent
+                            ? NotificationCompat.PRIORITY_LOW
+                            : NotificationCompat.PRIORITY_HIGH
+                    )
             );
 
-        if (silent) {
-            builder.setSilent(true);
-        } else {
-            builder.setVibrate(new long[]{0, 180});
+        if (isCall) {
+            builder
+                .setCategory(NotificationCompat.CATEGORY_CALL)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setOngoing(true)
+                .setAutoCancel(false)
+                .setFullScreenIntent(pendingIntent, true)
+                .setTimeoutAfter(45000L)
+                .setOnlyAlertOnce(false)
+                .setVibrate(new long[]{0, 500, 350, 500, 350, 700});
+        }
+
+        if (!isCall) {
+            if (silent) {
+                builder.setSilent(true);
+            } else {
+                builder.setVibrate(new long[]{0, 180});
+            }
         }
 
         int notificationId = tag == null || tag.isEmpty()
