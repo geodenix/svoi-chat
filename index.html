@@ -3272,6 +3272,7 @@ function updateSpeakerButtons(){
       ?'Громкая связь включена · нажми для обычного режима'
       :'Обычный режим · нажми для громкой связи'
   }
+  syncNativeProximity().catch(()=>{})
 }
 
 let nativeScreenListenerReady=false;
@@ -4415,6 +4416,12 @@ function changePrivateParticipantSize(delta){
   applyPrivateParticipantSize()
 }
 
+function nativeProximityPlugin(){
+  return window.Capacitor?.Plugins?.NativeProximity||null
+}
+
+let nativeProximityEnabled=false;
+
 function canUseEarMode(){
   return !!currentCall
     && !!currentCall.answered
@@ -4424,13 +4431,43 @@ function canUseEarMode(){
     && !currentCall.remoteScreenSharing
 }
 
+function shouldUseNativeProximity(){
+  return !!nativeProximityPlugin()
+    && canUseEarMode()
+    && !callSpeakerMode
+}
+
+async function syncNativeProximity(){
+  const plugin=nativeProximityPlugin();
+  if(!plugin){
+    nativeProximityEnabled=false;
+    return
+  }
+
+  const shouldEnable=shouldUseNativeProximity();
+  if(shouldEnable===nativeProximityEnabled)return;
+
+  try{
+    if(shouldEnable){
+      await plugin.enable();
+      nativeProximityEnabled=true
+    }else{
+      await plugin.disable();
+      nativeProximityEnabled=false
+    }
+  }catch{
+    nativeProximityEnabled=false
+  }
+}
+
 function updateEarModeButton(){
   const button=$('earModeBtn');
   if(!button)return;
   const available=canUseEarMode();
   button.classList.toggle('hidden',!available);
   button.disabled=!available;
-  button.title='Режим у уха'
+  button.title='Режим у уха';
+  syncNativeProximity().catch(()=>{})
 }
 
 function enterEarMode(){
@@ -4827,11 +4864,13 @@ async function createPeer(peerId,peerName,id,video,stream){
       currentCall.remoteVideo=true;
       $('callAvatar').classList.add('hidden');
       applyPrivateParticipantSize();
+      syncNativeProximity().catch(()=>{});
       e.track.onended=()=>{
         if(currentCall){
           currentCall.remoteVideo=false;
           $('callAvatar').classList.remove('hidden');
-          applyPrivateParticipantSize()
+          applyPrivateParticipantSize();
+          syncNativeProximity().catch(()=>{})
         }
       }
     }
@@ -4977,7 +5016,10 @@ async function acceptIncomingCall(){
       video:!!data.video,
       sdp:pc.localDescription.toJSON?pc.localDescription.toJSON():pc.localDescription
     });
-    if(currentCall)currentCall.answered=true
+    if(currentCall){
+      currentCall.answered=true;
+      updateEarModeButton()
+    }
   }catch(err){
     try{wsSend({type:'call_reject',to_user_id:data.from_user_id,call_id:data.call_id})}catch{}
     finishCall(false);
@@ -5019,6 +5061,7 @@ function finishCall(notify=true){
     try{finishingCall.localStream?.getTracks().forEach(t=>t.stop())}catch{}
   }
   acceptingCall=false;currentCall=null;pendingCall=null;pendingIce=[];resetCallUi();
+  syncNativeProximity().catch(()=>{});
   setTimeout(()=>loadCallHistory().catch(()=>{}),500)
 }
 
