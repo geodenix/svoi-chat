@@ -475,19 +475,27 @@ public class MainActivity extends BridgeActivity {
         }
 
         try {
+            // Clear the completed download before opening Android's
+            // installer. Otherwise every app restart sees the same
+            // successful DownloadManager item and opens the installer again.
             updaterPrefs.edit()
-                .putBoolean(PREF_PENDING_INSTALL, false)
+                .remove(PREF_DOWNLOAD_ID)
+                .remove(PREF_PENDING_INSTALL)
                 .apply();
 
-            Intent install = new Intent(Intent.ACTION_VIEW);
-            install.setDataAndType(
-                apkUri,
-                "application/vnd.android.package-archive"
-            );
+            Intent install = new Intent(Intent.ACTION_INSTALL_PACKAGE);
+            install.setData(apkUri);
             install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(install);
         } catch (Exception error) {
+            // Restore the id so the user can retry if the system installer
+            // could not be opened for some reason.
+            updaterPrefs.edit()
+                .putLong(PREF_DOWNLOAD_ID, id)
+                .putBoolean(PREF_PENDING_INSTALL, false)
+                .apply();
+
             Toast.makeText(
                 this,
                 "Не удалось открыть установщик обновления",
