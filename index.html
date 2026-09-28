@@ -41,6 +41,15 @@
 }
 </style>
 <style>
+.call-overlay.call-minimized,.group-call-overlay.call-minimized{transform:translateY(112vh);opacity:0;pointer-events:none}
+.call-minimize{position:absolute;z-index:45;left:14px;top:calc(14px + var(--safe-top));width:48px;height:48px;border:0;border-radius:16px;background:#09111fcc;color:#fff;font-size:30px;line-height:1;display:grid;place-items:center;box-shadow:0 6px 24px #0007}
+.call-mini{position:fixed;z-index:980;left:10px;right:10px;top:calc(8px + var(--safe-top));min-height:62px;display:flex;align-items:center;gap:8px;padding:7px;border:1px solid #31527a;border-radius:18px;background:#10233bea;box-shadow:0 10px 30px #0009;backdrop-filter:blur(14px)}
+.call-mini-main{min-width:0;flex:1;border:0;background:transparent;color:#fff;display:flex;align-items:center;gap:10px;text-align:left;padding:5px 7px}
+.call-mini-icon{width:42px;height:42px;flex:0 0 42px;border-radius:14px;background:#247d5a;display:grid;place-items:center;font-size:20px}
+.call-mini-copy{min-width:0;flex:1}.call-mini-copy strong,.call-mini-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.call-mini-copy strong{font-size:15px}.call-mini-copy small{color:#aac0d9;font-size:12px;margin-top:2px}
+.call-mini-end{width:46px;height:46px;flex:0 0 46px;border:0;border-radius:50%;background:#d7424b;color:#fff;font-size:21px}
+@media(max-width:720px){.call-minimize{display:grid!important}.call-mini{left:8px;right:8px}.group-call-head #groupCallBack{font-size:22px}}
+<style>
 .admin-dialog{width:min(96vw,820px);max-height:min(92dvh,900px);padding:0;overflow:hidden}
 .admin-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px;border-bottom:1px solid #2a3e59}
 .admin-head h2{margin:0;font-size:21px}.admin-head-actions{display:flex;gap:8px}.admin-head-actions button{width:40px;height:40px;border:0;border-radius:12px;background:#203552;color:#fff;font-size:20px}
@@ -275,6 +284,7 @@ body.drawer-open{overflow:hidden}
 <div id="callOverlay" class="call-overlay hidden">
   <div class="call-shell">
     <div class="call-stage">
+      <button id="minimizeCallBtn" class="call-minimize hidden" type="button" title="Свернуть звонок">⌄</button>
       <video id="remoteVideo" class="remote-video" autoplay playsinline></video>
       <div id="callAvatar" class="call-avatar">С</div>
       <video id="localVideo" class="local-video hidden" autoplay muted playsinline></video>
@@ -300,6 +310,17 @@ body.drawer-open{overflow:hidden}
       <button id="endCall" class="round-call end" type="button" title="Завершить">☎</button>
     </div>
   </div>
+</div>
+
+<div id="callMiniBar" class="call-mini hidden" aria-live="polite">
+  <button id="restoreMiniCall" class="call-mini-main" type="button" title="Вернуться к звонку">
+    <span class="call-mini-icon">📞</span>
+    <span class="call-mini-copy">
+      <strong id="miniCallName">Звонок</strong>
+      <small id="miniCallStatus">Нажмите, чтобы вернуться</small>
+    </span>
+  </button>
+  <button id="miniCallEnd" class="call-mini-end" type="button" title="Завершить звонок">☎</button>
 </div>
 
 <div id="earLock" class="ear-lock hidden" aria-live="polite">
@@ -534,6 +555,7 @@ let deferredInstallPrompt=null;
 let adminRefreshTimer=null;
 let adminStatsPeriod=localStorage.getItem('svoi_admin_stats_period')==='week'?'week':'day';
 let groupCallState=null;
+let minimizedCallKind=null;
 let groupMembersData=null;
 const outboxDeliveries=new Map();
 let privateParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_private_video_size')||1)));
@@ -3738,6 +3760,86 @@ async function resetNativeAudioRoute(){
   updateSpeakerButtons()
 }
 
+function nativeCallServicePlugin(){
+  return window.Capacitor?.Plugins?.NativeCallService||null
+}
+
+async function startNativeCallService(name,video=false,group=false){
+  const plugin=nativeCallServicePlugin();
+  if(!plugin)return;
+  try{
+    await plugin.start({
+      name:String(name||'Свои'),
+      video:!!video,
+      group:!!group
+    })
+  }catch{}
+}
+
+async function stopNativeCallService(){
+  const plugin=nativeCallServicePlugin();
+  if(!plugin)return;
+  try{await plugin.stop()}catch{}
+}
+
+function hideMiniCallBar(){
+  minimizedCallKind=null;
+  $('callMiniBar')?.classList.add('hidden');
+  $('callOverlay')?.classList.remove('call-minimized');
+  $('groupCallOverlay')?.classList.remove('call-minimized')
+}
+
+function showMiniCallBar(kind,name,status){
+  minimizedCallKind=kind;
+  $('miniCallName').textContent=name||'Звонок';
+  $('miniCallStatus').textContent=status||'Звонок продолжается';
+  $('callMiniBar').classList.remove('hidden')
+}
+
+function minimizePrivateCall(){
+  if(!currentCall)return;
+  $('callOverlay').classList.add('call-minimized');
+  showMiniCallBar(
+    'private',
+    currentCall.peerName||$('callName').textContent||'Звонок',
+    currentCall.answered?'Звонок активен':'Вызов…'
+  )
+}
+
+function minimizeGroupCall(){
+  if(!groupCallState)return;
+  $('groupCallOverlay').classList.add('call-minimized');
+  showMiniCallBar(
+    'group',
+    $('groupCallName').textContent||'Групповой звонок',
+    $('groupCallStatus').textContent||'Звонок активен'
+  )
+}
+
+function restoreMinimizedCall(){
+  if(minimizedCallKind==='group'&&groupCallState){
+    $('groupCallOverlay').classList.remove('call-minimized');
+    $('callMiniBar').classList.add('hidden');
+    minimizedCallKind=null;
+    return
+  }
+  if(minimizedCallKind==='private'&&currentCall){
+    $('callOverlay').classList.remove('call-minimized');
+    $('callMiniBar').classList.add('hidden');
+    minimizedCallKind=null
+  }
+}
+
+function updateMiniCallBar(){
+  if(minimizedCallKind==='private'&&currentCall){
+    $('miniCallName').textContent=currentCall.peerName||'Звонок';
+    $('miniCallStatus').textContent=currentCall.answered?'Звонок активен':'Вызов…'
+  }else if(minimizedCallKind==='group'&&groupCallState){
+    $('miniCallName').textContent=$('groupCallName').textContent||'Групповой звонок';
+    $('miniCallStatus').textContent=$('groupCallStatus').textContent||'Звонок активен'
+  }
+}
+
 function audioOutputElements(){
   return [
     $('remoteVideo'),
@@ -4462,7 +4564,8 @@ function detachGroupTrack(track,participant=null,publication=null){
 function refreshGroupCount(){
   if(!groupCallState?.room)return;
   const count=1+groupCallState.room.remoteParticipants.size;
-  $('groupCallStatus').textContent=count+' / 10 участников'
+  $('groupCallStatus').textContent=count+' / 10 участников';
+  updateMiniCallBar()
 }
 
 function updateGroupActiveSpeakers(speakers=[]){
@@ -4689,6 +4792,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
     }
 
     await room.localParticipant.setMicrophoneEnabled(true);
+    await startNativeCallService(credentials.group_name,!!video,true).catch(()=>{});
     if(nativeAudioRoutePlugin()){
       await applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
     }
@@ -4699,12 +4803,16 @@ async function joinGroupCall(groupId,video=false,invite=false){
   }catch(err){
     try{room?.disconnect()}catch{}
     groupCallState=null;
+    hideMiniCallBar();
+    stopNativeCallService().catch(()=>{});
     $('groupCallOverlay').classList.add('hidden');
     alert(err?.message||'Не удалось подключиться к групповому звонку')
   }
 }
 
 function leaveGroupCall(disconnect=true){
+  hideMiniCallBar();
+  stopNativeCallService().catch(()=>{});
   resetNativeAudioRoute().catch(()=>{});
   const state=groupCallState;
   if(state)state.manualLeave=true;
@@ -4861,6 +4969,9 @@ $('groupCameraBtn').onclick=async()=>{
   try{
     groupCallState.cameraOff=!groupCallState.cameraOff;
     await groupCallState.room.localParticipant.setCameraEnabled(!groupCallState.cameraOff);
+    if(!groupCallState.cameraOff){
+      startNativeCallService($('groupCallName').textContent,true,true).catch(()=>{})
+    }
     $('groupCameraBtn').classList.toggle('off',groupCallState.cameraOff);
     $('groupCameraBtn').textContent=groupCallState.cameraOff?'🚫':'📷';
     $('groupSwitchCameraBtn').classList.toggle('hidden',groupCallState.cameraOff);
@@ -4885,7 +4996,7 @@ $('groupSwitchCameraBtn').onclick=async()=>{
 };
 
 $('groupEndBtn').onclick=()=>leaveGroupCall(true);
-$('groupCallBack').onclick=()=>leaveGroupCall(true);
+$('groupCallBack').onclick=()=>minimizeGroupCall();
 
 async function resumeGroupCallFromUrl(){
   const params=new URLSearchParams(location.search);
@@ -5346,6 +5457,7 @@ async function upgradeCurrentCallToVideo(){
     sender=currentCall.pc.addTrack(newTrack,currentCall.localStream);
     currentCall.video=true;
     currentCall.cameraOff=false;
+    startNativeCallService(currentCall.peerName,true,false).catch(()=>{});
 
     newTrack.onended=()=>{
       try{currentCall?.localStream?.removeTrack(newTrack)}catch{}
@@ -5396,6 +5508,7 @@ function showCallUi(name,status,video,incoming=false){
   $('callAvatar').textContent=initials(name||'С');$('callAvatar').classList.remove('hidden');
   $('incomingActions').classList.toggle('hidden',!incoming);
   $('activeCallControls').classList.toggle('hidden',incoming);
+  $('minimizeCallBtn').classList.toggle('hidden',incoming);
   updateSpeakerButtons();
   if(nativeAudioRoutePlugin()){
     applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
@@ -5407,6 +5520,8 @@ function showCallUi(name,status,video,incoming=false){
 
 function resetCallUi(){
   exitEarMode();
+  hideMiniCallBar();
+  stopNativeCallService().catch(()=>{});
   resetNativeAudioRoute().catch(()=>{});
   stopRingtone();
   stopOutgoingTone();
@@ -5435,6 +5550,7 @@ async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
   currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,remoteScreenSharing:false,screenSharing:false,screenShareBusy:false,screenStream:null,screenSender:null,screenPreviousTrack:null,screenAddedSender:false,nativeScreenSharing:false,nativeScreenPeerKey:null,nativeScreenReceiver:null,nativeScreenRemoteStream:null,nativeScreenReceiverTimer:null,renegotiating:false,answered:false};
+  startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks())pc.addTrack(track,stream);
   $('localVideo').srcObject=stream;
   updatePrivateVideoControls();
@@ -5472,7 +5588,7 @@ async function createPeer(peerId,peerName,id,video,stream){
   pc.onconnectionstatechange=()=>{
     if(!currentCall||currentCall.pc!==pc)return;
     const state=pc.connectionState;
-    if(state==='connected'){if(currentCall)currentCall.answered=true;stopOutgoingTone();$('callStatus').textContent='Соединено';updateEarModeButton()}
+    if(state==='connected'){if(currentCall)currentCall.answered=true;stopOutgoingTone();$('callStatus').textContent='Соединено';updateMiniCallBar();updateEarModeButton()}
     else if(state==='connecting')$('callStatus').textContent='Соединение…';
     else if(state==='failed'){ $('callStatus').textContent='Не удалось соединиться'; setTimeout(()=>finishCall(false),1200) }
     else if(state==='closed')finishCall(false)
@@ -5612,6 +5728,7 @@ async function acceptIncomingCall(){
       $('activeCallControls').classList.remove('hidden');
       $('callOverlay').classList.remove('incoming-call-state');
       $('callOverlay').classList.add('active-call-state');
+      updateMiniCallBar();
       updateEarModeButton()
     }
   }catch(err){
@@ -5811,6 +5928,7 @@ async function handleCallSignal(data){
     if(!currentCall||currentCall.callId!==data.call_id)return;
     stopOutgoingTone();
     currentCall.answered=true;
+    updateMiniCallBar();
     updateEarModeButton();
     try{
       await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
@@ -5831,6 +5949,12 @@ $('videoCallBtn').onclick=()=>{
 $('acceptCall').onclick=acceptIncomingCall;
 $('rejectCall').onclick=rejectIncomingCall;
 $('endCall').onclick=()=>finishCall(true);
+$('minimizeCallBtn').onclick=()=>minimizePrivateCall();
+$('restoreMiniCall').onclick=()=>restoreMinimizedCall();
+$('miniCallEnd').onclick=()=>{
+  if(minimizedCallKind==='group')leaveGroupCall(true);
+  else if(currentCall||pendingCall)finishCall(true)
+};
 
 $('muteCall').onclick=()=>{
   if(!currentCall)return;
