@@ -24,6 +24,7 @@ else:
     start = text.find(">", text.find("<manifest"))
     extra_permissions = []
     for permission in [
+        "android.permission.POST_NOTIFICATIONS",
         "android.permission.REQUEST_INSTALL_PACKAGES",
         "android.permission.VIBRATE",
         "android.permission.WAKE_LOCK",
@@ -49,6 +50,21 @@ service_decl = """        <service
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 """
+firebase_service_decl = """        <service
+            android:name=".SvoiFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+"""
+if 'android:name=".SvoiFirebaseMessagingService"' not in text:
+    app_end = text.find("</application>")
+    if app_end == -1:
+        raise SystemExit("AndroidManifest.xml: application tag not found")
+    text = text[:app_end] + firebase_service_decl + text[app_end:]
+
+
 if 'android:name=".ScreenShareService"' not in text:
     app_end = text.find("</application>")
     if app_end == -1:
@@ -116,8 +132,33 @@ for name in ["ic_launcher", "ic_launcher_round"]:
 </adaptive-icon>
 ''')
 
+google_services_source = Path("google-services.json")
+google_services_target = Path("android/app/google-services.json")
+if not google_services_source.exists():
+    raise SystemExit("google-services.json not found")
+google_services_target.write_text(google_services_source.read_text())
+
+root_gradle = Path("android/build.gradle")
+root_gradle_text = root_gradle.read_text()
+google_services_classpath = "classpath 'com.google.gms:google-services:4.4.2'"
+if google_services_classpath not in root_gradle_text:
+    marker = "dependencies {"
+    pos = root_gradle_text.find(marker)
+    if pos == -1:
+        raise SystemExit("android/build.gradle: dependencies block not found")
+    pos += len(marker)
+    root_gradle_text = (
+        root_gradle_text[:pos]
+        + "\n        "
+        + google_services_classpath
+        + root_gradle_text[pos:]
+    )
+root_gradle.write_text(root_gradle_text)
+
 gradle = Path("android/app/build.gradle")
 gradle_text = gradle.read_text()
+if "com.google.gms.google-services" not in gradle_text:
+    gradle_text += "\napply plugin: 'com.google.gms.google-services'\n"
 webrtc_dependency = "implementation 'io.github.webrtc-sdk:android:150.7871.01'"
 if webrtc_dependency not in gradle_text:
     marker = "dependencies {"
@@ -131,6 +172,20 @@ if webrtc_dependency not in gradle_text:
         + webrtc_dependency
         + gradle_text[pos:]
     )
+firebase_messaging_dependency = "implementation 'com.google.firebase:firebase-messaging:24.1.0'"
+if firebase_messaging_dependency not in gradle_text:
+    marker = "dependencies {"
+    pos = gradle_text.find(marker)
+    if pos == -1:
+        raise SystemExit("android/app/build.gradle: dependencies block not found")
+    pos += len(marker)
+    gradle_text = (
+        gradle_text[:pos]
+        + "\n    "
+        + firebase_messaging_dependency
+        + gradle_text[pos:]
+    )
+
 badger_dependency = "implementation 'me.leolin:ShortcutBadger:1.1.22@aar'"
 if badger_dependency not in gradle_text:
     marker = "dependencies {"
@@ -214,6 +269,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(NativeContactsPlugin.class);
         registerPlugin(NativeVibrationPlugin.class);
         registerPlugin(NativeBadgePlugin.class);
+        registerPlugin(NativePushPlugin.class);
         super.onCreate(savedInstanceState);
 
         updaterPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -886,6 +942,264 @@ public class NativeBadgePlugin extends Plugin {
         result.put("count", count);
         result.put("applied", applied);
         call.resolve(result);
+    }
+}
+''')
+
+push_plugin = Path(
+    "android/app/src/main/java/ru/svoi/mobile/NativePushPlugin.java"
+)
+push_plugin.write_text(r'''package ru.svoi.mobile;
+
+import android.Manifest;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.os.Build;
+
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+import com.google.firebase.messaging.FirebaseMessaging;
+
+@CapacitorPlugin(name = "NativePush")
+public class NativePushPlugin extends Plugin {
+    public static final String CHANNEL_MESSAGES = "svoi_messages";
+    public static final String CHANNEL_SILENT = "svoi_messages_silent";
+
+    private void ensureChannels() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return;
+        }
+        NotificationManager manager = (NotificationManager)
+            getContext().getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) {
+            return;
+        }
+
+        NotificationChannel messages = new NotificationChannel(
+            CHANNEL_MESSAGES,
+            "Сообщения",
+            NotificationManager.IMPORTANCE_HIGH
+        );
+        messages.setDescription("Сообщения в «Свои»");
+        messages.enableVibration(true);
+        messages.setShowBadge(true);
+        manager.createNotificationChannel(messages);
+
+        NotificationChannel silent = new NotificationChannel(
+            CHANNEL_SILENT,
+            "Беззвучные чаты",
+            NotificationManager.IMPORTANCE_LOW
+        );
+        silent.setDescription("Уведомления из чатов с включённым беззвучным режимом");
+        silent.setSound(null, null);
+        silent.enableVibration(false);
+        silent.setShowBadge(true);
+        manager.createNotificationChannel(silent);
+    }
+
+    private boolean notificationPermissionGranted() {
+        if (Build.VERSION.SDK_INT < 33) {
+            return true;
+        }
+        return getContext().checkSelfPermission(
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @PluginMethod
+    public void register(PluginCall call) {
+        ensureChannels();
+
+        if (Build.VERSION.SDK_INT >= 33 && !notificationPermissionGranted()) {
+            getActivity().requestPermissions(
+                new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                9127
+            );
+        }
+
+        FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
+            if (!task.isSuccessful() || task.getResult() == null) {
+                call.reject("Не удалось получить Firebase-токен");
+                return;
+            }
+
+            JSObject result = new JSObject();
+            result.put("token", task.getResult());
+            result.put("permission", notificationPermissionGranted());
+            call.resolve(result);
+        });
+    }
+
+    @PluginMethod
+    public void status(PluginCall call) {
+        ensureChannels();
+        JSObject result = new JSObject();
+        result.put("permission", notificationPermissionGranted());
+        call.resolve(result);
+    }
+}
+''')
+
+firebase_service = Path(
+    "android/app/src/main/java/ru/svoi/mobile/SvoiFirebaseMessagingService.java"
+)
+firebase_service.write_text(r'''package ru.svoi.mobile;
+
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.Intent;
+import android.os.Build;
+
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
+
+import com.google.firebase.messaging.FirebaseMessagingService;
+import com.google.firebase.messaging.RemoteMessage;
+
+import java.util.Map;
+
+import me.leolin.shortcutbadger.ShortcutBadger;
+
+public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
+    private void ensureChannels() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return;
+        }
+        NotificationManager manager = (NotificationManager)
+            getSystemService(NOTIFICATION_SERVICE);
+        if (manager == null) {
+            return;
+        }
+
+        NotificationChannel messages = new NotificationChannel(
+            NativePushPlugin.CHANNEL_MESSAGES,
+            "Сообщения",
+            NotificationManager.IMPORTANCE_HIGH
+        );
+        messages.setDescription("Сообщения в «Свои»");
+        messages.enableVibration(true);
+        messages.setShowBadge(true);
+        manager.createNotificationChannel(messages);
+
+        NotificationChannel silent = new NotificationChannel(
+            NativePushPlugin.CHANNEL_SILENT,
+            "Беззвучные чаты",
+            NotificationManager.IMPORTANCE_LOW
+        );
+        silent.setDescription("Уведомления из чатов с включённым беззвучным режимом");
+        silent.setSound(null, null);
+        silent.enableVibration(false);
+        silent.setShowBadge(true);
+        manager.createNotificationChannel(silent);
+    }
+
+    private int parseInt(String value, int fallback) {
+        try {
+            return Integer.parseInt(value == null ? "" : value);
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    @Override
+    public void onMessageReceived(RemoteMessage remoteMessage) {
+        Map<String, String> data = remoteMessage.getData();
+        if (data == null || data.isEmpty()) {
+            return;
+        }
+
+        ensureChannels();
+
+        String title = data.get("title");
+        String body = data.get("body");
+        String tag = data.get("tag");
+        String url = data.get("url");
+        boolean silent = "1".equals(data.get("silent"))
+            || "true".equalsIgnoreCase(data.get("silent"));
+        int unread = Math.max(0, parseInt(data.get("unread_count"), 0));
+
+        if (title == null || title.isEmpty()) {
+            title = "Свои";
+        }
+        if (body == null || body.isEmpty()) {
+            body = "Новое сообщение";
+        }
+
+        Intent intent = new Intent(this, MainActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        if (url != null) {
+            intent.putExtra("svoi_url", url);
+        }
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        String channel = silent
+            ? NativePushPlugin.CHANNEL_SILENT
+            : NativePushPlugin.CHANNEL_MESSAGES;
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(
+            this,
+            channel
+        )
+            .setSmallIcon(android.R.drawable.sym_action_chat)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setNumber(unread)
+            .setOnlyAlertOnce(silent)
+            .setPriority(
+                silent
+                    ? NotificationCompat.PRIORITY_LOW
+                    : NotificationCompat.PRIORITY_HIGH
+            );
+
+        if (silent) {
+            builder.setSilent(true);
+        } else {
+            builder.setVibrate(new long[]{0, 180});
+        }
+
+        int notificationId = tag == null || tag.isEmpty()
+            ? (int) (System.currentTimeMillis() & 0x7fffffff)
+            : Math.abs(tag.hashCode());
+
+        try {
+            NotificationManagerCompat.from(this).notify(
+                notificationId,
+                builder.build()
+            );
+        } catch (SecurityException ignored) {
+        }
+
+        try {
+            if (unread > 0) {
+                ShortcutBadger.applyCount(this, unread);
+            } else {
+                ShortcutBadger.removeCount(this);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    @Override
+    public void onNewToken(String token) {
+        super.onNewToken(token);
+        getSharedPreferences("svoi_push", MODE_PRIVATE)
+            .edit()
+            .putString("fcm_token", token)
+            .apply();
     }
 }
 ''')
