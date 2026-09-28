@@ -68,6 +68,18 @@ if webrtc_dependency not in gradle_text:
     )
 gradle.write_text(gradle_text)
 
+version_file = Path(
+    "android/app/src/main/java/ru/svoi/mobile/SvoiVersion.java"
+)
+version_file.write_text(r'''package ru.svoi.mobile;
+
+public final class SvoiVersion {
+    public static final int VERSION_CODE = 1;
+    public static final String VERSION_NAME = "debug";
+    private SvoiVersion() {}
+}
+''')
+
 main_activity = Path(
     "android/app/src/main/java/ru/svoi/mobile/MainActivity.java"
 )
@@ -151,11 +163,11 @@ public class MainActivity extends BridgeActivity {
     }
 
     private int currentVersionCode() {
-        return BuildConfig.VERSION_CODE;
+        return SvoiVersion.VERSION_CODE;
     }
 
     private String currentVersionName() {
-        return BuildConfig.VERSION_NAME;
+        return SvoiVersion.VERSION_NAME;
     }
 
     private void registerDownloadReceiver() {
