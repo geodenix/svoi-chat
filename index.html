@@ -5782,6 +5782,16 @@ function callVisualUrl(avatarUrl){
   return avatarUrl||'/icon-512.svg'
 }
 
+function clearRemoteVideoFrame(){
+  const remote=$('remoteVideo');
+  if(!remote)return;
+  try{remote.pause()}catch{}
+  try{remote.srcObject=null}catch{}
+  remote.removeAttribute('src');
+  remote.removeAttribute('poster');
+  try{remote.load()}catch{}
+}
+
 function setCallVisual(name,avatarUrl){
   const fallback=!avatarUrl;
   const url=callVisualUrl(avatarUrl);
@@ -5813,10 +5823,7 @@ function setCallVisual(name,avatarUrl){
 }
 
 function showCallUi(name,status,video,incoming=false,avatarUrl=null,nativeSystemControls=false){
-  if(incoming){
-    $('remoteVideo').srcObject=null;
-    $('remoteVideo').removeAttribute('src');
-  }
+  clearRemoteVideoFrame();
   $('callOverlay').classList.remove('hidden');
   $('callOverlay').classList.toggle('incoming-call-state',incoming);
   $('callOverlay').classList.toggle('active-call-state',!incoming);
@@ -5846,7 +5853,7 @@ function resetCallUi(){
   stopOutgoingTone();
   $('callOverlay').classList.add('hidden');
   $('callOverlay').classList.remove('incoming-call-state','active-call-state');
-  $('remoteVideo').srcObject=null;$('localVideo').srcObject=null;$('localVideo').classList.remove('mirrored');
+  clearRemoteVideoFrame();$('localVideo').srcObject=null;$('localVideo').classList.remove('mirrored');
   setCallVisual('Свои',null);
   $('callAvatar').classList.remove('hidden');
   $('incomingActions').classList.add('hidden');$('activeCallControls').classList.add('hidden');$('mediaPermission').classList.add('hidden');
