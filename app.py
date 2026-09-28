@@ -4638,6 +4638,36 @@ def pending_call(
     }
 
 
+@app.post("/api/calls/native-action/{call_id}/reject")
+async def native_reject_call(
+    call_id: str,
+    token: str = Query(..., min_length=16, max_length=256),
+):
+    call = active_calls.get(call_id)
+    if not call:
+        return {"ok": True, "status": "ended"}
+
+    expected = str(call.get("action_token") or "")
+    if not expected or not hmac.compare_digest(expected, token):
+        raise HTTPException(403, "Недействительный токен действия")
+
+    if call.get("answered"):
+        return {"ok": False, "status": "answered"}
+
+    finish_call_history(call_id, "rejected")
+    await push(
+        call["caller_id"],
+        {
+            "type": "call_reject",
+            "from_user_id": call["callee_id"],
+            "from_name": "Собеседник",
+            "call_id": call_id,
+        },
+    )
+    active_calls.pop(call_id, None)
+    return {"ok": True, "status": "rejected"}
+
+
 CALL_SIGNAL_TYPES = {
     "call_offer",
     "call_answer",
@@ -4980,6 +5010,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     "started_at": now_iso(),
                     "answered": False,
                     "missed_notified": False,
+                    "action_token": secrets.token_urlsafe(24),
                 }
                 active_calls[call_id] = call
                 save_call_started(call)
@@ -4990,7 +5021,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     target_id,
                     kind,
                     f"Звонит {display_name}",
-                    f"/?incoming_call={call_id}",
+                    (
+                        f"/?incoming_call={call_id}"
+                        f"&native_ring=1"
+                        f"&action_token={call['action_token']}"
+                    ),
                     f"incoming-call-{call_id}",
                     False,
                 )
