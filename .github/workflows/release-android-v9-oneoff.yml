@@ -1,0 +1,138 @@
+name: Release Android v9 One-off
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release-android-v9-oneoff.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build signed Svoi Android 1.0.7
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: android-app
+
+    env:
+      SVOI_KEYSTORE_PATH: ${{ github.workspace }}/android-app/android/app/svoi-release.jks
+      RAW_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      RAW_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      RAW_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Normalize signing secrets
+        shell: bash
+        run: |
+          set +x
+          KEYSTORE_B64="${RAW_KEYSTORE_BASE64#ANDROID_KEYSTORE_BASE64=}"
+          KEYSTORE_B64="$(printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]')"
+          STORE_PASS="${RAW_KEYSTORE_PASSWORD#ANDROID_KEYSTORE_PASSWORD=}"
+          STORE_PASS="$(printf '%s' "$STORE_PASS" | tr -d '\r\n')"
+          KEY_ALIAS="${RAW_KEY_ALIAS#ANDROID_KEY_ALIAS=}"
+          KEY_ALIAS="$(printf '%s' "$KEY_ALIAS" | tr -d '\r\n')"
+          KEY_PASS="$STORE_PASS"
+
+          test -n "$KEYSTORE_B64"
+          test -n "$STORE_PASS"
+          test -n "$KEY_ALIAS"
+
+          echo "::add-mask::$KEYSTORE_B64"
+          echo "::add-mask::$STORE_PASS"
+          echo "::add-mask::$KEY_ALIAS"
+          echo "::add-mask::$KEY_PASS"
+
+          printf 'SVOI_KEYSTORE_BASE64=%s\n' "$KEYSTORE_B64" >> "$GITHUB_ENV"
+          printf 'SVOI_KEYSTORE_PASSWORD=%s\n' "$STORE_PASS" >> "$GITHUB_ENV"
+          printf 'SVOI_KEY_ALIAS=%s\n' "$KEY_ALIAS" >> "$GITHUB_ENV"
+          printf 'SVOI_KEY_PASSWORD=%s\n' "$KEY_PASS" >> "$GITHUB_ENV"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install Capacitor
+        run: npm install
+
+      - name: Create Android project
+        run: npx cap add android
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Ensure release does not already exist
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "android-v9" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::Release android-v9 already exists"
+            exit 1
+          fi
+
+      - name: Patch Android app
+        run: |
+          python3 patch_android.py
+          python3 patch_release.py "9" "1.0.7"
+
+      - name: Restore and verify signing key
+        shell: bash
+        run: |
+          set +x
+          printf '%s' "$SVOI_KEYSTORE_BASE64" | base64 -d > "$SVOI_KEYSTORE_PATH"
+          keytool -list -keystore "$SVOI_KEYSTORE_PATH" -storepass "$SVOI_KEYSTORE_PASSWORD" >/dev/null
+          keytool -list -keystore "$SVOI_KEYSTORE_PATH" -storepass "$SVOI_KEYSTORE_PASSWORD" -alias "$SVOI_KEY_ALIAS" >/dev/null
+
+      - name: Build signed release APK
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew assembleRelease --stacktrace
+          cp app/build/outputs/apk/release/app-release.apk ../svoi.apk
+
+      - name: Verify APK signature
+        run: |
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs svoi.apk
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: svoi-android-release-9
+          path: android-app/svoi.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "android-v9" svoi.apk \
+            --repo "${{ github.repository }}" \
+            --title "Свои Android 1.0.7" \
+            --notes "Добавлено автоматическое гашение экрана по датчику приближения во время обычного голосового звонка. В браузерной версии сохранена ручная кнопка режима у уха." \
+            --latest
