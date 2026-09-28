@@ -1,4 +1,4 @@
-name: Check v7 APK version
+name: Check v8 APK version
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
         run: sdkmanager "build-tools;36.0.0"
       - name: Download published APK
         run: |
-          curl -L --fail --retry 3             -o /tmp/svoi.apk             "https://github.com/geodenix/svoi-chat/releases/download/android-v7/svoi.apk"
+          curl -L --fail --retry 3             -o /tmp/svoi.apk             "https://github.com/geodenix/svoi-chat/releases/download/android-v8/svoi.apk"
       - name: Read APK version
         run: |
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging /tmp/svoi.apk | head -n 3
