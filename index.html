@@ -5927,7 +5927,7 @@ function connectWs(){
     }
     if(data.type==='message'){
       const m=data.message;
-      if(m.sender_id!==me?.id){
+      if(m.sender_id!==me?.id&&!isChatMuted('user',m.sender_id)){
         playMessageSound().catch(()=>{});
         vibrateMessage()
       }
@@ -5970,7 +5970,7 @@ function connectWs(){
     if(data.type==='group_message'){
       const m=data.message;
       const shouldNotifyHere=!m.has_mentions||!!m.mentioned_me;
-      if(m.sender_id!==me?.id&&shouldNotifyHere){
+      if(m.sender_id!==me?.id&&shouldNotifyHere&&!isChatMuted('group',m.group_id)){
         playMessageSound().catch(()=>{});
         vibrateMessage()
       }
@@ -6368,6 +6368,9 @@ function openChatMenu(){
   $('groupInfoBtn').classList.toggle('hidden',active.type!=='group');
   $('groupMembersBtn').classList.toggle('hidden',active.type!=='group');
   $('blockUserBtn').classList.toggle('hidden',active.type!=='user');
+  $('muteChatBtn').textContent=active.data.muted
+    ?'🔕 '+muteStatusText(active.data)
+    :'🔔 Уведомления';
   if(active.type==='user'){
     $('blockUserBtn').textContent=active.data.blocked_by_me
       ?'✅ Разблокировать'
@@ -6375,6 +6378,68 @@ function openChatMenu(){
     $('blockUserBtn').classList.toggle('danger',!active.data.blocked_by_me)
   }
   $('chatMenuDialog').showModal()
+}
+
+function openMuteChatDialog(){
+  if(!active)return;
+  $('muteChatStatus').textContent=muteStatusText(active.data);
+  $('unmuteChatBtn').classList.toggle('hidden',!active.data.muted);
+  for(const button of document.querySelectorAll('[data-mute-duration]')){
+    button.classList.remove('active')
+  }
+  $('muteChatDialog').showModal()
+}
+
+async function setCurrentChatMute(duration){
+  if(!active)return;
+  const targetType=active.type==='group'?'group':'user';
+  const targetId=Number(active.data.id);
+  const buttons=[...document.querySelectorAll('[data-mute-duration]')];
+  buttons.forEach(button=>button.disabled=true);
+  try{
+    const result=await api('/api/chat-mute',{
+      method:'POST',
+      body:{
+        chat_type:targetType,
+        chat_id:targetId,
+        duration
+      }
+    });
+    const patch={
+      muted:!!result.muted,
+      muted_until:result.muted_until||null
+    };
+    if(targetType==='group'){
+      groups=groups.map(item=>Number(item.id)===targetId?{...item,...patch}:item);
+      if(active?.type==='group'&&Number(active.data.id)===targetId)active.data={...active.data,...patch};
+      renderGroups()
+    }else{
+      users=users.map(item=>Number(item.id)===targetId?{...item,...patch}:item);
+      if(active?.type==='user'&&Number(active.data.id)===targetId)active.data={...active.data,...patch};
+      renderUsers()
+    }
+    updateHead();
+    $('muteChatStatus').textContent=muteStatusText(active.data);
+    $('unmuteChatBtn').classList.toggle('hidden',!active.data.muted);
+    if($('chatMenuDialog').open)$('chatMenuDialog').close();
+    $('muteChatDialog').close()
+  }catch(err){
+    alert(err.message||'Не удалось изменить уведомления')
+  }finally{
+    buttons.forEach(button=>button.disabled=false)
+  }
+}
+
+$('muteChatBtn').onclick=()=>{
+  if($('chatMenuDialog').open)$('chatMenuDialog').close();
+  openMuteChatDialog()
+};
+$('closeMuteChat').onclick=()=>$('muteChatDialog').close();
+$('muteChatDialog').addEventListener('click',event=>{
+  if(event.target===$('muteChatDialog'))$('muteChatDialog').close()
+});
+for(const button of document.querySelectorAll('[data-mute-duration]')){
+  button.onclick=()=>setCurrentChatMute(button.dataset.muteDuration)
 }
 
 $('chatName').onclick=()=>openChatMenu();
