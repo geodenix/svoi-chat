@@ -4016,6 +4016,11 @@ async function startNativePrivateScreenShare(call){
   if(!plugin)throw new Error('Нативная демонстрация экрана недоступна');
 
   ensureNativeScreenStoppedListener();
+  await startNativeCallService(
+    call.peerName||$('callName').textContent||'Звонок',
+    !!localVideoTrack(),
+    false
+  ).catch(()=>{});
   await plugin.startCapture();
   const rtc=await getRtcConfig();
   const peerKey='private-'+call.callId+'-'+call.peerId;
@@ -5561,10 +5566,105 @@ async function getCallMedia(video){
   return Promise.race([request,timeout])
 }
 
+function clearPrivateRecovery(call){
+  if(!call)return;
+  if(call.recoveryTimer){
+    clearTimeout(call.recoveryTimer);
+    call.recoveryTimer=null
+  }
+  call.recovering=false;
+  call.recoveryAttempts=0
+}
+
+async function waitForStableSignaling(pc,timeoutMs=3500){
+  const started=Date.now();
+  while(pc&&pc.signalingState!=='stable'&&Date.now()-started<timeoutMs){
+    await new Promise(resolve=>setTimeout(resolve,180))
+  }
+  return !!pc&&pc.signalingState==='stable'
+}
+
+async function recoverPrivateCallConnection(call){
+  if(!call||currentCall!==call||!call.answered||call.pc?.signalingState==='closed')return;
+  if(call.recovering)return;
+  call.recovering=true;
+  call.recoveryAttempts=(call.recoveryAttempts||0)+1;
+  $('callStatus').textContent='Восстанавливаем связь…';
+  updateMiniCallBar();
+
+  try{
+    await waitForSocketOpen(7000);
+    if(currentCall!==call)return;
+    if(call.pc.connectionState==='connected'){
+      clearPrivateRecovery(call);
+      $('callStatus').textContent=call.remoteScreenSharing
+        ?'Собеседник показывает экран'
+        :(call.screenSharing?'Вы показываете экран':'Соединено');
+      updateMiniCallBar();
+      return
+    }
+
+    const stable=await waitForStableSignaling(call.pc);
+    if(!stable)throw new Error('Сигнализация WebRTC занята');
+
+    try{call.pc.restartIce?.()}catch{}
+    const offer=await call.pc.createOffer({iceRestart:true});
+    await call.pc.setLocalDescription(offer);
+    await waitForSocketOpen(7000);
+    wsSend({
+      type:'call_video_offer',
+      to_user_id:call.peerId,
+      call_id:call.callId,
+      video:!!call.video,
+      reconnect:true,
+      sdp:call.pc.localDescription.toJSON
+        ?call.pc.localDescription.toJSON()
+        :call.pc.localDescription
+    });
+
+    if(call.recoveryTimer)clearTimeout(call.recoveryTimer);
+    call.recoveryTimer=setTimeout(()=>{
+      if(
+        currentCall===call
+        && call.pc
+        && !['connected','closed'].includes(call.pc.connectionState)
+      ){
+        call.recovering=false;
+        if((call.recoveryAttempts||0)<4){
+          recoverPrivateCallConnection(call).catch(()=>{})
+        }else{
+          $('callStatus').textContent='Связь потеряна';
+          updateMiniCallBar()
+        }
+      }
+    },6500)
+  }catch{
+    call.recovering=false;
+    if(currentCall===call&&(call.recoveryAttempts||0)<4){
+      call.recoveryTimer=setTimeout(
+        ()=>recoverPrivateCallConnection(call).catch(()=>{}),
+        1200
+      )
+    }
+  }
+}
+
+function schedulePrivateCallRecovery(call,delay=900){
+  if(!call||currentCall!==call||!call.answered)return;
+  if(call.recoveryTimer)return;
+  $('callStatus').textContent='Восстанавливаем связь…';
+  updateMiniCallBar();
+  call.recoveryTimer=setTimeout(()=>{
+    if(currentCall!==call)return;
+    call.recoveryTimer=null;
+    recoverPrivateCallConnection(call).catch(()=>{})
+  },delay)
+}
+
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,remoteScreenSharing:false,screenSharing:false,screenShareBusy:false,screenStream:null,screenSender:null,screenPreviousTrack:null,screenAddedSender:false,nativeScreenSharing:false,nativeScreenPeerKey:null,nativeScreenReceiver:null,nativeScreenRemoteStream:null,nativeScreenReceiverTimer:null,renegotiating:false,answered:false};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,remoteScreenSharing:false,screenSharing:false,screenShareBusy:false,screenStream:null,screenSender:null,screenPreviousTrack:null,screenAddedSender:false,nativeScreenSharing:false,nativeScreenPeerKey:null,nativeScreenReceiver:null,nativeScreenRemoteStream:null,nativeScreenReceiverTimer:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks())pc.addTrack(track,stream);
   $('localVideo').srcObject=stream;
@@ -5602,12 +5702,28 @@ async function createPeer(peerId,peerName,id,video,stream){
     try{wsSend({type:'ice_candidate',to_user_id:peerId,call_id:id,candidate:e.candidate.toJSON()})}catch{}
   };
   pc.onconnectionstatechange=()=>{
-    if(!currentCall||currentCall.pc!==pc)return;
+    const call=currentCall;
+    if(!call||call.pc!==pc)return;
     const state=pc.connectionState;
-    if(state==='connected'){if(currentCall)currentCall.answered=true;stopOutgoingTone();$('callStatus').textContent='Соединено';updateMiniCallBar();updateEarModeButton()}
-    else if(state==='connecting')$('callStatus').textContent='Соединение…';
-    else if(state==='failed'){ $('callStatus').textContent='Не удалось соединиться'; setTimeout(()=>finishCall(false),1200) }
-    else if(state==='closed')finishCall(false)
+    if(state==='connected'){
+      call.answered=true;
+      clearPrivateRecovery(call);
+      stopOutgoingTone();
+      $('callStatus').textContent=call.remoteScreenSharing
+        ?'Собеседник показывает экран'
+        :(call.screenSharing?'Вы показываете экран':'Соединено');
+      updateMiniCallBar();
+      updateEarModeButton()
+    }else if(state==='connecting'){
+      $('callStatus').textContent='Соединение…'
+    }else if(state==='disconnected'){
+      schedulePrivateCallRecovery(call,1200)
+    }else if(state==='failed'){
+      schedulePrivateCallRecovery(call,250)
+    }else if(state==='closed'){
+      clearPrivateRecovery(call);
+      finishCall(false)
+    }
   };
   return pc
 }
@@ -5783,6 +5899,7 @@ function finishCall(notify=true){
   }
   if(currentCall){
     const finishingCall=currentCall;
+    clearPrivateRecovery(finishingCall);
     if(finishingCall.nativeScreenSharing){
       stopNativePrivateScreenShare(finishingCall,false).catch(()=>{})
     }
@@ -5915,14 +6032,19 @@ async function handleCallSignal(data){
         type:'call_video_answer',
         to_user_id:data.from_user_id,
         call_id:data.call_id,
-        video:true,
+        video:!!data.video,
+        reconnect:!!data.reconnect,
         sdp:currentCall.pc.localDescription.toJSON
           ?currentCall.pc.localDescription.toJSON()
           :currentCall.pc.localDescription
       });
-      currentCall.video=true;
+      currentCall.video=!!data.video;
       currentCall.answered=true;
-      $('callStatus').textContent='Соединено'
+      clearPrivateRecovery(currentCall);
+      $('callStatus').textContent=currentCall.remoteScreenSharing
+        ?'Собеседник показывает экран'
+        :(currentCall.screenSharing?'Вы показываете экран':'Соединено');
+      updateMiniCallBar()
     }catch(err){
       $('callStatus').textContent='Ошибка подключения видео'
     }
@@ -5934,8 +6056,12 @@ async function handleCallSignal(data){
       if(currentCall.pc.signalingState==='have-local-offer'){
         await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp))
       }
-      currentCall.video=true;
-      $('callStatus').textContent='Соединено'
+      currentCall.video=!!data.video;
+      clearPrivateRecovery(currentCall);
+      $('callStatus').textContent=currentCall.remoteScreenSharing
+        ?'Собеседник показывает экран'
+        :(currentCall.screenSharing?'Вы показываете экран':'Соединено');
+      updateMiniCallBar()
     }catch(err){
       $('callStatus').textContent='Ошибка подключения видео'
     }
