@@ -33,6 +33,8 @@
 .admin-service strong,.admin-user-copy{min-width:0;flex:1}.admin-user-copy strong,.admin-user-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.admin-user-copy small{color:#8fa3be;margin-top:2px}
 .admin-service-state{font-size:11px;font-weight:800;padding:4px 8px;border-radius:999px;background:#35445a;color:#d5deeb}.admin-service-state.active{background:#214f39;color:#aef0c8}.admin-service-state.bad{background:#65313a;color:#ffd1d6}
 .admin-user-online{width:9px;height:9px;border-radius:50%;background:#55667e;flex:0 0 9px}.admin-user-online.on{background:#45d78e}
+.admin-stats-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}.admin-stats-head h3{margin:0}.admin-period-tabs{display:flex;gap:6px}.admin-period-tabs button{border:1px solid #31527a;background:#142a46;color:#aebfd4;border-radius:9px;padding:7px 10px;font-size:12px;font-weight:750}.admin-period-tabs button.active{background:#2b86fa;color:#fff;border-color:#2b86fa}
+.admin-chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.admin-chart-card{min-width:0;border:1px solid #29415f;background:#122238;border-radius:15px;padding:11px}.admin-chart-title{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:5px}.admin-chart-title strong{font-size:14px}.admin-chart-title span{font-size:12px;color:#9fb2ca;white-space:nowrap}.admin-chart-card svg{display:block;width:100%;height:165px;overflow:visible}.admin-chart-grid-line{stroke:#2a405c;stroke-width:1}.admin-chart-line{fill:none;stroke:#5da8ff;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.admin-chart-area{fill:#5da8ff18}.admin-chart-dot{fill:#8bc1ff;stroke:#122238;stroke-width:2}.admin-chart-axis{fill:#8599b4;font-size:10px}.admin-chart-empty{display:grid;place-items:center;height:165px;color:#8196b2;font-size:12px}.admin-stats-note{display:block;color:#8196b2;font-size:11px;margin:9px 2px 0}
 .edit-message-dialog{width:min(92vw,520px)}
 .edit-message-dialog textarea{width:100%;min-height:130px;max-height:48dvh;resize:vertical;border:1px solid #354b68;background:#0f1d30;color:#fff;border-radius:14px;padding:12px 13px;margin:12px 0;line-height:1.4}
 .edit-message-dialog .edit-hint{font-size:12px;color:#8fa3be;margin-top:4px}
@@ -46,6 +48,7 @@
 .drawer-menu{overflow:auto;display:grid;gap:9px;padding-top:14px}.drawer-menu button{width:100%;border:1px solid #31527a;background:#142a46;color:#fff;border-radius:13px;padding:13px 14px;font-weight:700;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}.drawer-menu button.danger{background:#5f2c38;border-color:#77404c}.drawer-menu .install-box,.drawer-menu .calls-nav{padding:0}.drawer-menu .install-app,.drawer-menu .calls-nav-btn{margin:0}
 .drawer-section{font-size:11px;color:#8196b2;text-transform:uppercase;letter-spacing:.08em;margin:8px 4px 0}.drawer-spacer{height:2px;background:#26364d;margin:4px 0}
 body.drawer-open{overflow:hidden}
+@media(max-width:650px){.admin-chart-grid{grid-template-columns:1fr}}
 @media(max-width:560px){.admin-grid{grid-template-columns:1fr 1fr}.admin-card strong{font-size:18px}.admin-body{padding:10px}}
 </style></head>
 <body>
@@ -292,6 +295,17 @@ body.drawer-open{overflow:hidden}
     <div id="adminStatus" class="admin-status">Загрузка…</div>
     <div id="adminMetrics" class="admin-grid"></div>
     <section class="admin-section">
+      <div class="admin-stats-head">
+        <h3>Статистика активности</h3>
+        <div class="admin-period-tabs">
+          <button id="adminStatsDay" type="button">24 часа</button>
+          <button id="adminStatsWeek" type="button">7 дней</button>
+        </div>
+      </div>
+      <div id="adminCharts" class="admin-chart-grid"></div>
+      <small id="adminStatsNote" class="admin-stats-note"></small>
+    </section>
+    <section class="admin-section">
       <h3>Службы</h3>
       <div id="adminServices" class="admin-services"></div>
     </section>
@@ -350,6 +364,7 @@ let callAudioSinkId='',callSpeakerMode=false;
 let soundsEnabled=localStorage.getItem('svoi_sounds')!=='0',vibrationEnabled=localStorage.getItem('svoi_vibration')!=='0',audioContext=null,ringtoneTimer=null,outgoingToneTimer=null;
 let deferredInstallPrompt=null;
 let adminRefreshTimer=null;
+let adminStatsPeriod=localStorage.getItem('svoi_admin_stats_period')==='week'?'week':'day';
 let groupCallState=null;
 let groupMembersData=null;
 const outboxDeliveries=new Map();
@@ -824,6 +839,149 @@ function renderAdminOverview(data){
   }
 }
 
+function adminChartLabel(value,period){
+  const date=new Date(value);
+  if(period==='week'){
+    return date.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'})
+  }
+  return date.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})
+}
+
+function svgNode(name,attrs={}){
+  const node=document.createElementNS('http://www.w3.org/2000/svg',name);
+  for(const [key,value] of Object.entries(attrs))node.setAttribute(key,String(value));
+  return node
+}
+
+function renderAdminLineChart(container,{title,icon,key,totalText},data){
+  const points=Array.isArray(data?.points)?data.points:[];
+  const card=document.createElement('div');card.className='admin-chart-card';
+
+  const head=document.createElement('div');head.className='admin-chart-title';
+  const name=document.createElement('strong');name.textContent=icon+' '+title;
+  const total=document.createElement('span');total.textContent=totalText;
+  head.append(name,total);card.append(head);
+
+  if(!points.length){
+    const empty=document.createElement('div');empty.className='admin-chart-empty';empty.textContent='Пока нет данных';
+    card.append(empty);container.append(card);return
+  }
+
+  const width=620,height=180,left=38,right=12,top=15,bottom=31;
+  const plotW=width-left-right,plotH=height-top-bottom;
+  const values=points.map(point=>Math.max(0,Number(point[key])||0));
+  const rawMax=Math.max(...values,0);
+  const maxValue=Math.max(1,rawMax);
+  const svg=svgNode('svg',{viewBox:`0 0 ${width} ${height}`,role:'img','aria-label':title});
+
+  for(let i=0;i<=2;i++){
+    const y=top+(plotH*i/2);
+    svg.append(svgNode('line',{x1:left,y1:y,x2:width-right,y2:y,class:'admin-chart-grid-line'}));
+    const label=svgNode('text',{x:left-7,y:y+3,'text-anchor':'end',class:'admin-chart-axis'});
+    label.textContent=String(Math.round(maxValue*(1-i/2)));
+    svg.append(label)
+  }
+
+  const coords=values.map((value,index)=>{
+    const x=left+(points.length===1?plotW/2:(plotW*index/(points.length-1)));
+    const y=top+plotH-(value/maxValue)*plotH;
+    return {x,y,value,index}
+  });
+
+  if(coords.length>1){
+    const areaPath='M '+coords[0].x+' '+(top+plotH)+' L '
+      +coords.map(point=>point.x+' '+point.y).join(' L ')
+      +' L '+coords[coords.length-1].x+' '+(top+plotH)+' Z';
+    svg.append(svgNode('path',{d:areaPath,class:'admin-chart-area'}));
+    const linePath='M '+coords.map(point=>point.x+' '+point.y).join(' L ');
+    svg.append(svgNode('path',{d:linePath,class:'admin-chart-line'}))
+  }
+
+  const dotEvery=data.period==='week'?1:Math.max(1,Math.floor(points.length/12));
+  for(const point of coords){
+    if(point.index%dotEvery!==0&&point.index!==coords.length-1)continue;
+    const dot=svgNode('circle',{cx:point.x,cy:point.y,r:3.5,class:'admin-chart-dot'});
+    const tip=svgNode('title');
+    tip.textContent=adminChartLabel(points[point.index].start,data.period)+': '+point.value;
+    dot.append(tip);svg.append(dot)
+  }
+
+  const labelIndexes=data.period==='week'
+    ?points.map((_,index)=>index)
+    :[0,6,12,18,points.length-1].filter((value,index,array)=>value<points.length&&array.indexOf(value)===index);
+
+  for(const index of labelIndexes){
+    const x=left+(points.length===1?plotW/2:(plotW*index/(points.length-1)));
+    const label=svgNode('text',{
+      x,
+      y:height-8,
+      'text-anchor':index===0?'start':(index===points.length-1?'end':'middle'),
+      class:'admin-chart-axis'
+    });
+    label.textContent=adminChartLabel(points[index].start,data.period);
+    svg.append(label)
+  }
+
+  card.append(svg);container.append(card)
+}
+
+function renderAdminStats(data){
+  const box=$('adminCharts');box.replaceChildren();
+  $('adminStatsDay').classList.toggle('active',adminStatsPeriod==='day');
+  $('adminStatsWeek').classList.toggle('active',adminStatsPeriod==='week');
+
+  const totals=data?.totals||{};
+  const cards=[
+    {
+      title:'Онлайн',
+      icon:'🟢',
+      key:'online',
+      totalText:'Пик: '+(totals.peak_online||0)
+    },
+    {
+      title:'Сообщения',
+      icon:'💬',
+      key:'messages',
+      totalText:'Всего: '+(totals.messages||0)
+    },
+    {
+      title:'Регистрации',
+      icon:'👤',
+      key:'registrations',
+      totalText:'Всего: '+(totals.registrations||0)
+    },
+    {
+      title:'Звонки',
+      icon:'📞',
+      key:'calls',
+      totalText:'Всего: '+(totals.calls||0)
+    }
+  ];
+  for(const config of cards)renderAdminLineChart(box,config,data);
+
+  if(data?.online_tracking_since){
+    $('adminStatsNote').textContent='График онлайна собирается с '
+      +new Date(data.online_tracking_since).toLocaleString('ru-RU')
+      +'. Остальная статистика построена по сохранённым данным.'
+  }else{
+    $('adminStatsNote').textContent='История онлайна начнёт собираться после этого обновления.'
+  }
+}
+
+async function setAdminStatsPeriod(period){
+  if(!['day','week'].includes(period)||adminStatsPeriod===period)return;
+  adminStatsPeriod=period;
+  localStorage.setItem('svoi_admin_stats_period',period);
+  $('adminStatsDay').classList.toggle('active',period==='day');
+  $('adminStatsWeek').classList.toggle('active',period==='week');
+  try{
+    const stats=await api('/api/admin/stats?period='+period);
+    renderAdminStats(stats)
+  }catch(err){
+    $('adminStatsNote').textContent=err.message||'Не удалось загрузить статистику'
+  }
+}
+
 function renderAdminUsers(items){
   const box=$('adminUsers');box.replaceChildren();
   if(!Array.isArray(items)||!items.length){
@@ -845,11 +1003,12 @@ async function loadAdminPanel(){
   const status=$('adminStatus');
   status.classList.remove('error');status.textContent='Обновляем данные…';
   try{
-    const [overview,recentUsers]=await Promise.all([
+    const [overview,recentUsers,stats]=await Promise.all([
       api('/api/admin/overview'),
-      api('/api/admin/users?limit=50')
+      api('/api/admin/users?limit=50'),
+      api('/api/admin/stats?period='+adminStatsPeriod)
     ]);
-    renderAdminOverview(overview);renderAdminUsers(recentUsers);
+    renderAdminOverview(overview);renderAdminUsers(recentUsers);renderAdminStats(stats);
     const generated=overview.generated_at?new Date(overview.generated_at).toLocaleTimeString():'сейчас';
     status.textContent='Обновлено: '+generated+' · автообновление каждые 10 секунд'
   }catch(err){
@@ -4801,6 +4960,8 @@ $('openAdmin').onclick=async()=>{
   startAdminRefresh()
 };
 $('refreshAdmin').onclick=()=>loadAdminPanel();
+$('adminStatsDay').onclick=()=>setAdminStatsPeriod('day');
+$('adminStatsWeek').onclick=()=>setAdminStatsPeriod('week');
 $('closeAdmin').onclick=()=>$('adminDialog').close();
 $('adminDialog').addEventListener('click',event=>{
   if(event.target===$('adminDialog'))$('adminDialog').close()
