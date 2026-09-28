@@ -1,11 +1,6 @@
 name: Release Android APK
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/release-android.yml"
   workflow_dispatch:
     inputs:
       version_code:
@@ -21,59 +16,7 @@ permissions:
   contents: write
 
 jobs:
-  verify_signing:
-    if: github.event_name == 'push'
-    name: Verify Android signing secrets
-    runs-on: ubuntu-latest
-    env:
-      RAW_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      RAW_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      RAW_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-    steps:
-      - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Verify signing secrets
-        shell: bash
-        run: |
-          set +x
-          test -n "$RAW_KEYSTORE_BASE64" || { echo "::error::ANDROID_KEYSTORE_BASE64 is missing"; exit 1; }
-          test -n "$RAW_KEYSTORE_PASSWORD" || { echo "::error::ANDROID_KEYSTORE_PASSWORD is missing"; exit 1; }
-          test -n "$RAW_KEY_ALIAS" || { echo "::error::ANDROID_KEY_ALIAS is missing"; exit 1; }
-
-          KEYSTORE_B64="${RAW_KEYSTORE_BASE64#ANDROID_KEYSTORE_BASE64=}"
-          KEYSTORE_B64="$(printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]')"
-          STORE_PASS="${RAW_KEYSTORE_PASSWORD#ANDROID_KEYSTORE_PASSWORD=}"
-          STORE_PASS="$(printf '%s' "$STORE_PASS" | tr -d '\r\n')"
-          KEY_ALIAS="${RAW_KEY_ALIAS#ANDROID_KEY_ALIAS=}"
-          KEY_ALIAS="$(printf '%s' "$KEY_ALIAS" | tr -d '\r\n')"
-
-          echo "::add-mask::$KEYSTORE_B64"
-          echo "::add-mask::$STORE_PASS"
-          echo "::add-mask::$KEY_ALIAS"
-
-          printf '%s' "$KEYSTORE_B64" | base64 -d > /tmp/svoi-release.jks || {
-            echo "::error::ANDROID_KEYSTORE_BASE64 is invalid"
-            exit 1
-          }
-
-          keytool -list -keystore /tmp/svoi-release.jks -storepass "$STORE_PASS" >/dev/null 2>&1 || {
-            echo "::error::ANDROID_KEYSTORE_PASSWORD does not match the keystore"
-            exit 1
-          }
-
-          keytool -list -keystore /tmp/svoi-release.jks -storepass "$STORE_PASS" -alias "$KEY_ALIAS" >/dev/null 2>&1 || {
-            echo "::error::ANDROID_KEY_ALIAS does not exist in the keystore"
-            exit 1
-          }
-
-          echo "All Android signing secrets are valid."
-
   release:
-    if: github.event_name == 'workflow_dispatch'
     name: Build signed Svoi APK
     runs-on: ubuntu-latest
 
