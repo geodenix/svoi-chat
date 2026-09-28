@@ -1508,11 +1508,36 @@ function replaceMessageNode(message){
   }
 }
 
-function applyGroupMessageDeleted(groupId,messageId,deletedAt){
+function removeGroupMessageNode(messageId){
+  const id=Number(messageId);
+  currentMessages=currentMessages.filter(item=>Number(item.id)!==id);
+  document.querySelector('.bubble[data-message-id="'+id+'"]')?.remove();
+
+  for(const item of currentMessages){
+    if(Number(item.reply_to_message_id)!==id)continue;
+    const replyNode=document.querySelector('.bubble[data-message-id="'+item.id+'"]');
+    if(replyNode)replyNode.replaceWith(msgNode(item))
+  }
+
+  const box=$('messages');
+  if(!currentMessages.length&&!box.querySelector('.empty')){
+    box.innerHTML='<div class="empty">Сообщений пока нет. Напиши первым.</div>'
+  }
+}
+
+function applyGroupMessageDeleted(groupId,messageId,deletedAt,showDeletedNotice=false){
   if(active?.type!=='group'||Number(active.data.id)!==Number(groupId))return;
+
+  if(!showDeletedNotice){
+    removeGroupMessageNode(messageId);
+    return
+  }
+
   const node=document.querySelector('.bubble[data-message-id="'+messageId+'"]');
-  if(!node)return;
-  const old=node._message||{
+  const existing=currentMessages.find(item=>Number(item.id)===Number(messageId));
+  if(!node&&!existing)return;
+
+  const old=node?._message||existing||{
     id:messageId,
     group_id:groupId,
     sender_id:0,
@@ -1528,7 +1553,8 @@ function applyGroupMessageDeleted(groupId,messageId,deletedAt){
     deleted:true,
     deleted_at:deletedAt||new Date().toISOString(),
     can_delete:false,
-    can_restore:!!active.data.is_admin
+    can_restore:!!active.data.is_admin,
+    show_deleted_notice:true
   })
 }
 
@@ -1541,7 +1567,12 @@ async function deleteGroupMessageForAll(message){
       '/api/groups/'+active.data.id+'/messages/'+message.id,
       {method:'DELETE'}
     );
-    applyGroupMessageDeleted(active.data.id,message.id,result.deleted_at)
+    applyGroupMessageDeleted(
+      active.data.id,
+      message.id,
+      result.deleted_at,
+      !!result.show_deleted_notice
+    )
   }catch(err){
     alert(err.message||'Не удалось удалить сообщение')
   }
@@ -1949,7 +1980,7 @@ function msgNode(m){
     d.classList.add('deleted-message');
     const note=document.createElement('span');
     note.className='deleted-note';
-    note.textContent='Сообщение удалено';
+    note.textContent=m.show_deleted_notice===false?'':'Сообщение удалено';
     d.append(note)
   }else{
     if(m.body)appendRichMessageText(d,m.body);
@@ -4493,14 +4524,21 @@ function connectWs(){
       applyGroupMessageDeleted(
         data.group_id,
         data.message_id,
-        data.deleted_at
+        data.deleted_at,
+        !!data.show_deleted_notice
       );
       return
     }
     if(data.type==='group_message_restored'){
       const m=data.message;
       if(active?.type==='group'&&Number(active.data.id)===Number(data.group_id)){
-        replaceMessageNode(m)
+        if(currentMessages.some(item=>Number(item.id)===Number(m.id))){
+          replaceMessageNode(m)
+        }else{
+          currentMessages.push(m);
+          currentMessages.sort((a,b)=>Number(a.id)-Number(b.id));
+          renderMessages(currentMessages)
+        }
       }
       return
     }
