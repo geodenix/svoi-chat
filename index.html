@@ -3712,6 +3712,26 @@ async function removePushSubscription(){
   }catch{}
 }
 
+function nativeAudioRoutePlugin(){
+  return window.Capacitor?.Plugins?.NativeAudioRoute||null
+}
+
+async function applyNativeSpeakerMode(enabled){
+  const plugin=nativeAudioRoutePlugin();
+  if(!plugin)return false;
+  const result=await plugin.setSpeaker({enabled:!!enabled});
+  return result?.applied!==false
+}
+
+async function resetNativeAudioRoute(){
+  const plugin=nativeAudioRoutePlugin();
+  if(!plugin)return;
+  try{await plugin.reset()}catch{}
+  callSpeakerMode=false;
+  callAudioSinkId='';
+  updateSpeakerButtons()
+}
+
 function audioOutputElements(){
   return [
     $('remoteVideo'),
@@ -4250,11 +4270,28 @@ function screenShareErrorMessage(err){
 }
 
 async function chooseSpeakerOutput(){
+  const nativePlugin=nativeAudioRoutePlugin();
+
+  if(nativePlugin){
+    const next=!callSpeakerMode;
+    try{
+      const applied=await applyNativeSpeakerMode(next);
+      if(!applied)throw new Error('Android не смог переключить аудиовыход');
+      callSpeakerMode=next;
+      callAudioSinkId='';
+      updateSpeakerButtons();
+      return
+    }catch(err){
+      alert(err?.message||'Не удалось переключить динамик');
+      return
+    }
+  }
+
   const media=navigator.mediaDevices;
   const remote=$('remoteVideo');
 
   if(!remote||typeof remote.setSinkId!=='function'){
-    alert('Этот браузер не даёт сайту переключать разговорный и громкий динамик. Используй системную кнопку аудиовыхода телефона.');
+    alert('Этот браузер не поддерживает переключение аудиовыхода.');
     return
   }
 
@@ -4279,8 +4316,7 @@ async function chooseSpeakerOutput(){
     }
 
     if(!device?.deviceId){
-      alert('Браузер не показал отдельный громкий динамик. На этом телефоне аудиовыходом управляет система.');
-      return
+      throw new Error('Аудиовыходом управляет система устройства')
     }
 
     callAudioSinkId=device.deviceId;
@@ -4631,6 +4667,9 @@ async function joinGroupCall(groupId,video=false,invite=false){
     }
 
     await room.localParticipant.setMicrophoneEnabled(true);
+    if(nativeAudioRoutePlugin()){
+      await applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
+    }
     if(video)await room.localParticipant.setCameraEnabled(true);
 
     await renderGroupLocalTracks();
@@ -4644,6 +4683,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
 }
 
 function leaveGroupCall(disconnect=true){
+  resetNativeAudioRoute().catch(()=>{});
   const state=groupCallState;
   if(state)state.manualLeave=true;
   if(state?.nativeScreenSharing){
@@ -5334,6 +5374,9 @@ function showCallUi(name,status,video,incoming=false){
   $('incomingActions').classList.toggle('hidden',!incoming);
   $('activeCallControls').classList.toggle('hidden',incoming);
   updateSpeakerButtons();
+  if(nativeAudioRoutePlugin()){
+    applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
+  }
   $('cameraCall').classList.remove('hidden');
   $('screenShareCall').classList.remove('hidden');
   updatePrivateVideoControls()
@@ -5341,6 +5384,7 @@ function showCallUi(name,status,video,incoming=false){
 
 function resetCallUi(){
   exitEarMode();
+  resetNativeAudioRoute().catch(()=>{});
   stopRingtone();
   stopOutgoingTone();
   $('callOverlay').classList.add('hidden');
