@@ -3429,6 +3429,7 @@ CALL_SIGNAL_TYPES = {
     "call_answer",
     "call_video_offer",
     "call_video_answer",
+    "call_screen_state",
     "ice_candidate",
     "call_reject",
     "call_end",
@@ -3742,6 +3743,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     call["video"] = True
                     mark_call_video(call_id)
                 payload["video"] = True
+                await push(target_id, payload)
+                continue
+
+            if signal_type == "call_screen_state":
+                if not call or not call.get("answered"):
+                    continue
+                participants = {call["caller_id"], call["callee_id"]}
+                if user_id not in participants or target_id not in participants:
+                    continue
+                payload["sharing"] = bool(data.get("sharing", False))
                 await push(target_id, payload)
                 continue
 
