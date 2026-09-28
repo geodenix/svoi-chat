@@ -3290,6 +3290,234 @@ function ensureNativeScreenStoppedListener(){
   ).catch(()=>{nativeScreenListenerReady=false})
 }
 
+function groupParticipantUserId(participant){
+  const match=String(participant?.identity||'').match(/^user-(\d+)$/);
+  return match?Number(match[1]):null
+}
+
+function restoreGroupParticipantVideo(userId){
+  const state=groupCallState;
+  if(!state)return;
+  const identity='user-'+Number(userId);
+  const participant=state.room.remoteParticipants.get(identity);
+  const tile=$(groupTileId(identity));
+  if(!participant||!tile)return;
+
+  const publications=[...participant.videoTrackPublications.values()]
+    .filter(pub=>pub.track&&!isScreenPublication(pub,pub.track));
+  const publication=publications[0]||null;
+  if(publication?.track){
+    attachGroupTrack(publication.track,participant,false,publication)
+  }else{
+    for(const old of tile.querySelectorAll('video[data-native-screen="1"]'))old.remove();
+    tile.dataset.screenSharing='0';
+    tile.querySelector('.tile-avatar')?.classList.remove('hidden');
+    const name=tile.querySelector('.tile-name');
+    if(name)name.textContent=participant.name||participant.identity||'Участник'
+  }
+}
+
+function closeNativeGroupScreenReceiver(userId,restore=true){
+  const state=groupCallState;
+  if(!state)return;
+  const id=Number(userId);
+  const pc=state.nativeScreenReceivers?.get(id);
+  if(pc){
+    try{pc.ontrack=null;pc.close()}catch{}
+    state.nativeScreenReceivers.delete(id)
+  }
+  const tile=$(groupTileId('user-'+id));
+  if(tile){
+    for(const video of tile.querySelectorAll('video[data-native-screen="1"]'))video.remove();
+    tile.dataset.screenSharing='0'
+  }
+  if(restore)restoreGroupParticipantVideo(id)
+}
+
+async function acceptNativeGroupScreenOffer(data){
+  const state=groupCallState;
+  const groupId=Number(data.group_id);
+  const fromId=Number(data.from_user_id);
+  if(!state||Number(state.groupId)!==groupId||!fromId)return;
+
+  if(!state.nativeScreenReceivers)state.nativeScreenReceivers=new Map();
+  closeNativeGroupScreenReceiver(fromId,false);
+
+  const pc=new RTCPeerConnection(await getRtcConfig());
+  state.nativeScreenReceivers.set(fromId,pc);
+
+  pc.ontrack=event=>{
+    if(
+      groupCallState!==state
+      || Number(state.groupId)!==groupId
+      || event.track?.kind!=='video'
+    )return;
+
+    const stream=event.streams?.[0]||new MediaStream([event.track]);
+    const identity='user-'+fromId;
+    const participant=state.room.remoteParticipants.get(identity)
+      || {identity,name:data.from_name||'Участник'};
+    const tile=ensureGroupTile(participant,false);
+
+    for(const old of tile.querySelectorAll('video'))old.remove();
+    const video=document.createElement('video');
+    video.autoplay=true;
+    video.playsInline=true;
+    video.dataset.nativeScreen='1';
+    video.srcObject=stream;
+    tile.prepend(video);
+    video.play().catch(()=>{});
+
+    tile.dataset.screenSharing='1';
+    tile.querySelector('.tile-avatar')?.classList.add('hidden');
+    const name=tile.querySelector('.tile-name');
+    if(name)name.textContent=(participant.name||participant.identity||'Участник')+' · экран'
+  };
+
+  try{
+    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    const answer=await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await waitForIceGatheringComplete(pc);
+    await waitForSocketOpen();
+    wsSend({
+      type:'native_screen_answer',
+      to_user_id:fromId,
+      call_id:data.call_id,
+      group_id:groupId,
+      sdp:pc.localDescription.toJSON
+        ?pc.localDescription.toJSON()
+        :pc.localDescription
+    })
+  }catch(err){
+    closeNativeGroupScreenReceiver(fromId,true);
+    alert(err?.message||'Не удалось принять демонстрацию экрана')
+  }
+}
+
+async function sendNativeGroupScreenToParticipant(participant){
+  const state=groupCallState;
+  if(!state?.nativeScreenSharing)return;
+  const targetId=groupParticipantUserId(participant);
+  if(!targetId||targetId===Number(me?.id))return;
+
+  const plugin=nativeScreenPlugin();
+  if(!plugin)return;
+  if(!state.nativeScreenPeerKeys)state.nativeScreenPeerKeys=new Map();
+
+  const oldKey=state.nativeScreenPeerKeys.get(targetId);
+  if(oldKey){
+    try{await plugin.removePeer({peerKey:oldKey})}catch{}
+  }
+
+  const peerKey='group-'+state.groupId+'-'+targetId;
+  const rtc=state.nativeScreenRtc||await getRtcConfig();
+  state.nativeScreenRtc=rtc;
+  const offer=await plugin.createOffer({
+    peerKey,
+    iceServers:rtc.iceServers||[]
+  });
+
+  if(groupCallState!==state||!state.nativeScreenSharing){
+    try{await plugin.removePeer({peerKey})}catch{}
+    return
+  }
+
+  state.nativeScreenPeerKeys.set(targetId,peerKey);
+  await waitForSocketOpen();
+  wsSend({
+    type:'native_screen_offer',
+    to_user_id:targetId,
+    call_id:'group-'+state.groupId,
+    group_id:state.groupId,
+    sdp:{type:'offer',sdp:offer.sdp}
+  })
+}
+
+async function startNativeGroupScreenShare(state){
+  const plugin=nativeScreenPlugin();
+  if(!plugin)throw new Error('Нативная демонстрация экрана недоступна');
+
+  ensureNativeScreenStoppedListener();
+  const restoreCamera=!state.cameraOff;
+  state.screenRestoreCamera=restoreCamera;
+  if(restoreCamera)await state.room.localParticipant.setCameraEnabled(false);
+
+  try{
+    await plugin.startCapture();
+    state.nativeScreenSharing=true;
+    state.screenSharing=true;
+    state.nativeScreenPeerKeys=new Map();
+    state.nativeScreenRtc=await getRtcConfig();
+
+    const participants=[...state.room.remoteParticipants.values()];
+    for(const participant of participants){
+      try{await sendNativeGroupScreenToParticipant(participant)}catch{}
+    }
+
+    const localTile=$(groupTileId(state.room.localParticipant.identity));
+    if(localTile){
+      localTile.dataset.screenSharing='1';
+      const name=localTile.querySelector('.tile-name');
+      if(name)name.textContent=(state.room.localParticipant.name||'Вы')+' · вы · экран'
+    }
+    setGroupCallStatus('Демонстрация экрана включена')
+  }catch(err){
+    state.nativeScreenSharing=false;
+    state.screenSharing=false;
+    try{await plugin.stopCapture()}catch{}
+    if(restoreCamera&&!state.cameraOff){
+      try{await state.room.localParticipant.setCameraEnabled(true)}catch{}
+    }
+    state.screenRestoreCamera=false;
+    throw err
+  }
+}
+
+async function stopNativeGroupScreenShare(state,notifyPeers=true){
+  if(!state)return;
+  const plugin=nativeScreenPlugin();
+  const peers=[...(state.nativeScreenPeerKeys?.entries?.()||[])];
+
+  if(notifyPeers){
+    for(const [userId] of peers){
+      try{
+        wsSend({
+          type:'native_screen_stop',
+          to_user_id:userId,
+          call_id:'group-'+state.groupId,
+          group_id:state.groupId
+        })
+      }catch{}
+    }
+  }
+
+  for(const [,peerKey] of peers){
+    try{await plugin?.removePeer?.({peerKey})}catch{}
+  }
+  try{await plugin?.stopCapture?.()}catch{}
+
+  state.nativeScreenPeerKeys=new Map();
+  state.nativeScreenRtc=null;
+  state.nativeScreenSharing=false;
+  state.screenSharing=false;
+
+  if(state.screenRestoreCamera&&!state.cameraOff){
+    try{await state.room.localParticipant.setCameraEnabled(true)}catch{}
+  }
+  state.screenRestoreCamera=false;
+
+  const localTile=$(groupTileId(state.room.localParticipant.identity));
+  if(localTile){
+    localTile.dataset.screenSharing='0';
+    const name=localTile.querySelector('.tile-name');
+    if(name)name.textContent=(state.room.localParticipant.name||'Вы')+' · вы'
+  }
+
+  await renderGroupLocalTracks().catch(()=>{});
+  refreshGroupCount()
+}
+
 function screenShareErrorMessage(err){
   if(err?.name==='NotAllowedError')return 'Демонстрация экрана отменена или запрещена';
   if(err?.name==='NotSupportedError')return 'Этот браузер не поддерживает демонстрацию экрана';
@@ -3590,6 +3818,10 @@ async function joinGroupCall(groupId,video=false,invite=false){
       facing:'user',
       screenSharing:false,
       screenRestoreCamera:false,
+      nativeScreenSharing:false,
+      nativeScreenPeerKeys:new Map(),
+      nativeScreenReceivers:new Map(),
+      nativeScreenRtc:null,
       reconnectAttempts:0,
       recovering:false,
       needsRecovery:false,
