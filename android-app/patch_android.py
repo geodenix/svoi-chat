@@ -131,6 +131,20 @@ if webrtc_dependency not in gradle_text:
         + webrtc_dependency
         + gradle_text[pos:]
     )
+badger_dependency = "implementation 'me.leolin:ShortcutBadger:1.1.22@aar'"
+if badger_dependency not in gradle_text:
+    marker = "dependencies {"
+    pos = gradle_text.find(marker)
+    if pos == -1:
+        raise SystemExit("android/app/build.gradle: dependencies block not found")
+    pos += len(marker)
+    gradle_text = (
+        gradle_text[:pos]
+        + "\n    "
+        + badger_dependency
+        + gradle_text[pos:]
+    )
+
 gradle.write_text(gradle_text)
 
 version_file = Path(
@@ -199,6 +213,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(NativeProximityPlugin.class);
         registerPlugin(NativeContactsPlugin.class);
         registerPlugin(NativeVibrationPlugin.class);
+        registerPlugin(NativeBadgePlugin.class);
         super.onCreate(savedInstanceState);
 
         updaterPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -829,6 +844,48 @@ public class NativeContactsPlugin extends Plugin {
         } catch (Exception ignored) {
             return null;
         }
+    }
+}
+''')
+
+badge_plugin = Path(
+    "android/app/src/main/java/ru/svoi/mobile/NativeBadgePlugin.java"
+)
+badge_plugin.write_text(r'''package ru.svoi.mobile;
+
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+
+import me.leolin.shortcutbadger.ShortcutBadger;
+
+@CapacitorPlugin(name = "NativeBadge")
+public class NativeBadgePlugin extends Plugin {
+    @PluginMethod
+    public void setBadge(PluginCall call) {
+        int count = Math.max(0, call.getInt("count", 0));
+        boolean applied;
+        try {
+            if (count > 0) {
+                applied = ShortcutBadger.applyCount(getContext(), count);
+            } else {
+                applied = ShortcutBadger.removeCount(getContext());
+            }
+        } catch (Exception error) {
+            call.reject(
+                error.getMessage() != null
+                    ? error.getMessage()
+                    : "Не удалось обновить счётчик приложения"
+            );
+            return;
+        }
+
+        JSObject result = new JSObject();
+        result.put("count", count);
+        result.put("applied", applied);
+        call.resolve(result);
     }
 }
 ''')
