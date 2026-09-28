@@ -3571,6 +3571,23 @@ function nativePushPlugin(){
   return window.Capacitor?.Plugins?.NativePush||null
 }
 
+async function clearNativeCallNotification(callId){
+  if(!callId)return;
+  try{await nativePushPlugin()?.clearCall?.({callId:String(callId)})}catch{}
+}
+
+async function maybeRequestFullScreenCalls(result){
+  if(
+    !result?.permission
+    || result?.fullScreenAllowed!==false
+    || localStorage.getItem('svoi_fullscreen_prompted')==='1'
+  )return;
+  localStorage.setItem('svoi_fullscreen_prompted','1');
+  if(confirm('Разрешить «Свои» показывать входящие звонки поверх экрана блокировки?')){
+    try{await nativePushPlugin()?.requestFullScreen?.()}catch{}
+  }
+}
+
 async function ensureNativePushRegistration(){
   const plugin=nativePushPlugin();
   if(!plugin)return null;
@@ -3583,7 +3600,10 @@ async function ensureNativePushRegistration(){
   localStorage.setItem('svoi_fcm_token',result.token);
   if(result.permission){
     setDrawerButton($('notifyBtn'),'✅','Уведомления','Android');
-    $('notifyBtn').title='Системные Android-уведомления включены'
+    $('notifyBtn').title=result.fullScreenAllowed===false
+      ?'Уведомления включены; полноэкранные звонки нужно разрешить'
+      :'Системные Android-уведомления включены';
+    await maybeRequestFullScreenCalls(result)
   }else{
     setDrawerButton($('notifyBtn'),'🔔','Уведомления','Разрешить');
     $('notifyBtn').title='Нажми и разреши уведомления Android'
@@ -5405,7 +5425,7 @@ async function startCall(video){
   return startCallTo(active.data,video)
 }
 
-function incomingCall(data){
+function incomingCall(data,suppressRingtone=false){
   if(currentCall?.callId===data.call_id||pendingCall?.call_id===data.call_id){
     if(Array.isArray(data.ice_candidates)){
       pendingIce.push(...data.ice_candidates)
@@ -5421,7 +5441,7 @@ function incomingCall(data){
     :[];
   pendingCall=data;preparedMediaStream=null;
   showCallUi(data.from_name,data.video?'Входящий видеозвонок':'Входящий голосовой звонок',data.video,true);
-  startRingtone().catch(()=>{});
+  if(!suppressRingtone)startRingtone().catch(()=>{});
   $('mediaPermission').classList.toggle('hidden',!data.video);
   if(data.video){
     $('mediaPermissionText').textContent='Нужен доступ к камере и микрофону';
@@ -5462,6 +5482,7 @@ async function acceptIncomingCall(){
   stopRingtone();
   acceptingCall=true;
   const data=pendingCall;
+  clearNativeCallNotification(data.call_id);
   $('acceptCall').disabled=true;$('rejectCall').disabled=true;
   showCallUi(
     data.from_name,
@@ -5518,6 +5539,7 @@ async function acceptIncomingCall(){
 async function rejectIncomingCall(){
   if(!pendingCall||acceptingCall)return;
   const data=pendingCall;
+  clearNativeCallNotification(data.call_id);
   try{
     await waitForSocketOpen();
     wsSend({type:'call_reject',to_user_id:data.from_user_id,call_id:data.call_id})
@@ -5527,6 +5549,8 @@ async function rejectIncomingCall(){
 }
 
 function finishCall(notify=true){
+  const endingCallId=currentCall?.callId||pendingCall?.call_id||null;
+  if(endingCallId)clearNativeCallNotification(endingCallId);
   if(notify&&currentCall){
     try{wsSend({type:'call_end',to_user_id:currentCall.peerId,call_id:currentCall.callId})}catch{}
   }else if(notify&&pendingCall){
@@ -5865,15 +5889,21 @@ async function resumeIncomingCallFromUrl(){
   const params=new URLSearchParams(location.search);
   const callId=params.get('incoming_call');
   if(!callId)return;
+  const nativeRing=params.get('native_ring')==='1';
+  const nativeAccept=params.get('native_accept')==='1';
 
   history.replaceState({},'',location.pathname);
 
   try{
     const data=await api('/api/calls/pending/'+encodeURIComponent(callId));
     await waitForSocketOpen();
-    incomingCall(data)
+    incomingCall(data,nativeRing||nativeAccept);
+    if(nativeAccept){
+      setTimeout(()=>acceptIncomingCall().catch(()=>{}),80)
+    }
   }catch(err){
     if(err?.status===404){
+      clearNativeCallNotification(callId);
       alert('Этот звонок уже завершён')
     }else{
       alert(err.message||'Не удалось восстановить входящий звонок')
