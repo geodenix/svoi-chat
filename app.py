@@ -953,60 +953,231 @@ def account_phone(
     conn=Depends(db),
 ):
     row = conn.execute(
-        """SELECT phone_last4,phone_linked_at
+        """SELECT phone_last4,phone_linked_at,phone_verified_at
            FROM users
            WHERE id=?""",
         (user["id"],),
     ).fetchone()
+    verified = bool(row and row["phone_verified_at"])
     return {
-        "linked": bool(row and row["phone_last4"]),
-        "last4": row["phone_last4"] if row else None,
-        "linked_at": row["phone_linked_at"] if row else None,
-        "verified": False,
+        "linked": verified,
+        "verified": verified,
+        "last4": row["phone_last4"] if verified else None,
+        "linked_at": row["phone_linked_at"] if verified else None,
+        "verified_at": row["phone_verified_at"] if verified else None,
     }
 
 
-@app.post("/api/account/phone")
-def link_account_phone(
-    data: PhoneLinkIn,
+@app.post("/api/account/phone/request")
+def request_phone_verification(
+    data: PhoneSmsRequestIn,
     user=Depends(current_user),
     conn=Depends(db),
 ):
-    row = conn.execute(
+    account = conn.execute(
         """SELECT id,password_hash,salt
            FROM users
            WHERE id=?""",
         (user["id"],),
     ).fetchone()
-    if not row or not verify_password(
+    if not account or not verify_password(
         data.current_password,
-        row["password_hash"],
-        row["salt"],
+        account["password_hash"],
+        account["salt"],
     ):
         raise HTTPException(401, "Неверный текущий пароль")
 
-    phone_hash, last4 = phone_lookup_hash(data.phone)
+    phone_digits = normalize_phone_digits(data.phone)
+    phone_hash, last4 = phone_lookup_hash(phone_digits)
+
     owner = conn.execute(
-        "SELECT id FROM users WHERE phone_hash=? AND id<>?",
+        """SELECT id
+           FROM users
+           WHERE phone_hash=?
+             AND phone_verified_at IS NOT NULL
+             AND id<>?""",
         (phone_hash, user["id"]),
     ).fetchone()
     if owner:
         raise HTTPException(
             409,
-            "Этот номер уже привязан к другому аккаунту",
+            "Этот номер уже подтверждён в другом аккаунте",
         )
 
+    now = datetime.now(timezone.utc)
+
+    cooldown_cutoff = (
+        now - timedelta(seconds=SMS_RESEND_COOLDOWN_SECONDS)
+    ).isoformat()
+    recent = conn.execute(
+        """SELECT id
+           FROM phone_verifications
+           WHERE user_id=?
+             AND sent_at>=?
+           ORDER BY id DESC
+           LIMIT 1""",
+        (user["id"], cooldown_cutoff),
+    ).fetchone()
+    if recent:
+        raise HTTPException(
+            429,
+            "Подожди минуту перед повторной отправкой кода",
+        )
+
+    day_cutoff = (now - timedelta(hours=24)).isoformat()
+    requests_24h = int(
+        conn.execute(
+            """SELECT COUNT(*)
+               FROM phone_verifications
+               WHERE user_id=? AND sent_at>=?""",
+            (user["id"], day_cutoff),
+        ).fetchone()[0]
+    )
+    if requests_24h >= SMS_MAX_REQUESTS_24H:
+        raise HTTPException(
+            429,
+            "Достигнут лимит SMS-кодов. Попробуй позже.",
+        )
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    code_hash, code_salt = hash_password(code)
+    sent_at = now.isoformat()
+    expires_at = (
+        now + timedelta(seconds=SMS_CODE_TTL_SECONDS)
+    ).isoformat()
+
+    send_phone_verification_sms(phone_digits, code)
+
     conn.execute(
-        """UPDATE users
-           SET phone_hash=?,phone_last4=?,phone_linked_at=?
-           WHERE id=?""",
-        (phone_hash, last4, now_iso(), user["id"]),
+        """INSERT INTO phone_verifications(
+             user_id,phone_hash,phone_last4,
+             code_hash,code_salt,expires_at,sent_at,attempts
+           ) VALUES(?,?,?,?,?,?,?,0)""",
+        (
+            user["id"],
+            phone_hash,
+            last4,
+            code_hash,
+            code_salt,
+            expires_at,
+            sent_at,
+        ),
     )
     conn.commit()
+
+    return {
+        "sent": True,
+        "last4": last4,
+        "expires_in": SMS_CODE_TTL_SECONDS,
+        "resend_after": SMS_RESEND_COOLDOWN_SECONDS,
+    }
+
+
+@app.post("/api/account/phone/verify")
+def verify_phone_code(
+    data: PhoneSmsVerifyIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    now = datetime.now(timezone.utc)
+    row = conn.execute(
+        """SELECT *
+           FROM phone_verifications
+           WHERE user_id=?
+             AND used_at IS NULL
+           ORDER BY id DESC
+           LIMIT 1""",
+        (user["id"],),
+    ).fetchone()
+
+    if not row:
+        raise HTTPException(400, "Сначала запроси SMS-код")
+
+    expires_at = datetime.fromisoformat(
+        str(row["expires_at"]).replace("Z", "+00:00")
+    )
+    if expires_at < now:
+        raise HTTPException(
+            410,
+            "Срок действия кода истёк. Запроси новый.",
+        )
+
+    attempts = int(row["attempts"] or 0)
+    if attempts >= SMS_MAX_VERIFY_ATTEMPTS:
+        raise HTTPException(
+            429,
+            "Слишком много неверных попыток. Запроси новый код.",
+        )
+
+    if not verify_password(
+        data.code,
+        row["code_hash"],
+        row["code_salt"],
+    ):
+        conn.execute(
+            """UPDATE phone_verifications
+               SET attempts=attempts+1
+               WHERE id=?""",
+            (row["id"],),
+        )
+        conn.commit()
+        remaining = max(
+            0,
+            SMS_MAX_VERIFY_ATTEMPTS - attempts - 1,
+        )
+        raise HTTPException(
+            401,
+            f"Неверный код. Осталось попыток: {remaining}",
+        )
+
+    owner = conn.execute(
+        """SELECT id
+           FROM users
+           WHERE phone_hash=?
+             AND phone_verified_at IS NOT NULL
+             AND id<>?""",
+        (row["phone_hash"], user["id"]),
+    ).fetchone()
+    if owner:
+        raise HTTPException(
+            409,
+            "Этот номер уже подтверждён в другом аккаунте",
+        )
+
+    verified_at = now.isoformat()
+    conn.execute(
+        """UPDATE users
+           SET phone_hash=?,
+               phone_last4=?,
+               phone_linked_at=?,
+               phone_verified_at=?
+           WHERE id=?""",
+        (
+            row["phone_hash"],
+            row["phone_last4"],
+            verified_at,
+            verified_at,
+            user["id"],
+        ),
+    )
+    conn.execute(
+        "UPDATE phone_verifications SET used_at=? WHERE id=?",
+        (verified_at, row["id"]),
+    )
+    conn.execute(
+        """UPDATE phone_verifications
+           SET used_at=COALESCE(used_at,?)
+           WHERE user_id=? AND id<>? AND used_at IS NULL""",
+        (verified_at, user["id"], row["id"]),
+    )
+    conn.commit()
+
     return {
         "linked": True,
-        "last4": last4,
-        "verified": False,
+        "verified": True,
+        "last4": row["phone_last4"],
+        "linked_at": verified_at,
+        "verified_at": verified_at,
     }
 
 
@@ -1016,16 +1187,16 @@ def unlink_account_phone(
     user=Depends(current_user),
     conn=Depends(db),
 ):
-    row = conn.execute(
+    account = conn.execute(
         """SELECT id,password_hash,salt
            FROM users
            WHERE id=?""",
         (user["id"],),
     ).fetchone()
-    if not row or not verify_password(
+    if not account or not verify_password(
         data.current_password,
-        row["password_hash"],
-        row["salt"],
+        account["password_hash"],
+        account["salt"],
     ):
         raise HTTPException(401, "Неверный текущий пароль")
 
@@ -1033,12 +1204,18 @@ def unlink_account_phone(
         """UPDATE users
            SET phone_hash=NULL,
                phone_last4=NULL,
-               phone_linked_at=NULL
+               phone_linked_at=NULL,
+               phone_verified_at=NULL
            WHERE id=?""",
         (user["id"],),
     )
     conn.commit()
-    return {"linked": False, "last4": None, "verified": False}
+
+    return {
+        "linked": False,
+        "verified": False,
+        "last4": None,
+    }
 
 
 @app.post("/api/phone-contacts/sync")
@@ -1074,6 +1251,7 @@ async def sync_phone_contacts(
             FROM users u
             LEFT JOIN uploads a ON a.id=u.avatar_id
             WHERE u.id<>?
+              AND u.phone_verified_at IS NOT NULL
               AND u.phone_hash IN ({placeholders})
         """
         rows.extend(
