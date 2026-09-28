@@ -3271,7 +3271,12 @@ function wsSend(payload){
 function callId(){return crypto.randomUUID?crypto.randomUUID():(Date.now()+'-'+Math.random().toString(16).slice(2))}
 
 function privateVideoAvailable(){
-  return !!currentCall&&(!!localVideoTrack()||!!currentCall.remoteVideo)
+  return !!currentCall&&(
+    !!localVideoTrack()
+    || !!currentCall.remoteVideo
+    || !!currentCall.screenSharing
+    || !!currentCall.remoteScreenSharing
+  )
 }
 
 function applyPrivateParticipantSize(){
@@ -3313,6 +3318,8 @@ function canUseEarMode(){
     && !!currentCall.answered
     && !localVideoTrack()
     && !currentCall.remoteVideo
+    && !currentCall.screenSharing
+    && !currentCall.remoteScreenSharing
 }
 
 function updateEarModeButton(){
@@ -3386,10 +3393,187 @@ function updatePrivateVideoControls(){
     ?'Включить видео'
     :(enabled?'Выключить камеру':'Включить камеру');
 
-  switchButton.classList.toggle('hidden',!hasVideo);
-  preview.classList.toggle('hidden',!hasVideo||!enabled);
+  const sharing=!!currentCall?.screenSharing;
+  cameraButton.disabled=sharing;
+  switchButton.classList.toggle('hidden',sharing||!hasVideo);
+  preview.classList.toggle('hidden',sharing?false:(!hasVideo||!enabled));
+  updatePrivateScreenShareControls();
   updateEarModeButton();
   applyPrivateParticipantSize()
+}
+
+function updatePrivateScreenShareControls(){
+  const button=$('screenShareCall');
+  if(!button)return;
+  button.classList.toggle('hidden',!screenShareSupported());
+  const sharing=!!currentCall?.screenSharing;
+  button.classList.toggle('sharing',sharing);
+  button.textContent=sharing?'⏹️':'🖥️';
+  button.title=sharing?'Остановить демонстрацию экрана':'Демонстрация экрана';
+  button.disabled=!!currentCall?.screenShareBusy
+}
+
+async function renegotiatePrivateVideo(status='Обновляем видео…'){
+  if(!currentCall)return;
+  $('callStatus').textContent=status;
+  const offer=await currentCall.pc.createOffer();
+  await currentCall.pc.setLocalDescription(offer);
+  await waitForSocketOpen();
+  wsSend({
+    type:'call_video_offer',
+    to_user_id:currentCall.peerId,
+    call_id:currentCall.callId,
+    video:true,
+    sdp:currentCall.pc.localDescription.toJSON
+      ?currentCall.pc.localDescription.toJSON()
+      :currentCall.pc.localDescription
+  })
+}
+
+async function stopPrivateScreenShare(notifyPeer=true){
+  const call=currentCall;
+  if(!call?.screenSharing||call.screenShareBusy)return;
+  call.screenShareBusy=true;
+  updatePrivateScreenShareControls();
+
+  const stream=call.screenStream;
+  const sender=call.screenSender;
+  const previousTrack=call.screenPreviousTrack;
+  const addedSender=!!call.screenAddedSender;
+
+  try{
+    const screenTrack=stream?.getVideoTracks?.()[0]||null;
+    if(screenTrack)screenTrack.onended=null;
+
+    if(sender&&call.pc){
+      if(addedSender){
+        try{call.pc.removeTrack(sender)}catch{}
+        await renegotiatePrivateVideo('Останавливаем демонстрацию…')
+      }else{
+        const restore=previousTrack?.readyState==='live'?previousTrack:null;
+        await sender.replaceTrack(restore)
+      }
+    }
+
+    try{stream?.getTracks().forEach(track=>track.stop())}catch{}
+
+    call.screenSharing=false;
+    call.screenStream=null;
+    call.screenSender=null;
+    call.screenPreviousTrack=null;
+    call.screenAddedSender=false;
+
+    const camera=localVideoTrack();
+    if(camera&&camera.readyState==='live'){
+      $('localVideo').srcObject=call.localStream;
+      $('localVideo').classList.toggle('hidden',!camera.enabled);
+      $('localVideo').play().catch(()=>{})
+    }else{
+      $('localVideo').srcObject=null;
+      $('localVideo').classList.add('hidden')
+    }
+
+    if(notifyPeer){
+      try{
+        wsSend({
+          type:'call_screen_state',
+          to_user_id:call.peerId,
+          call_id:call.callId,
+          sharing:false
+        })
+      }catch{}
+    }
+    $('callStatus').textContent='Соединено'
+  }catch(err){
+    alert(err?.message||'Не удалось остановить демонстрацию экрана')
+  }finally{
+    if(currentCall===call){
+      call.screenShareBusy=false;
+      updatePrivateVideoControls()
+    }
+  }
+}
+
+async function startPrivateScreenShare(){
+  const call=currentCall;
+  if(!call)return;
+  if(call.screenSharing){
+    await stopPrivateScreenShare(true);
+    return
+  }
+  if(call.screenShareBusy)return;
+  if(!call.answered){
+    alert('Дождись, пока собеседник примет звонок');
+    return
+  }
+  if(!screenShareSupported()){
+    alert('Этот браузер не поддерживает демонстрацию экрана');
+    return
+  }
+
+  call.screenShareBusy=true;
+  updatePrivateScreenShareControls();
+
+  let display=null;
+  let sender=null;
+  let addedSender=false;
+  try{
+    display=await navigator.mediaDevices.getDisplayMedia({
+      video:true,
+      audio:false
+    });
+    const screenTrack=display.getVideoTracks()[0];
+    if(!screenTrack)throw new Error('Экран не выбран');
+
+    sender=call.pc.getSenders().find(item=>item.track?.kind==='video')||null;
+    const previousTrack=sender?.track||null;
+
+    if(sender){
+      await sender.replaceTrack(screenTrack)
+    }else{
+      sender=call.pc.addTrack(screenTrack,display);
+      addedSender=true;
+      await renegotiatePrivateVideo('Подключаем демонстрацию…')
+    }
+
+    call.screenSharing=true;
+    call.screenStream=display;
+    call.screenSender=sender;
+    call.screenPreviousTrack=previousTrack;
+    call.screenAddedSender=addedSender;
+    call.video=true;
+
+    screenTrack.onended=()=>{
+      if(currentCall===call&&call.screenSharing){
+        stopPrivateScreenShare(true).catch(()=>{})
+      }
+    };
+
+    $('localVideo').srcObject=display;
+    $('localVideo').classList.remove('hidden');
+    $('localVideo').play().catch(()=>{});
+    $('callStatus').textContent='Вы показываете экран';
+
+    try{
+      wsSend({
+        type:'call_screen_state',
+        to_user_id:call.peerId,
+        call_id:call.callId,
+        sharing:true
+      })
+    }catch{}
+  }catch(err){
+    if(addedSender&&sender&&call.pc){
+      try{call.pc.removeTrack(sender)}catch{}
+    }
+    try{display?.getTracks().forEach(track=>track.stop())}catch{}
+    alert(screenShareErrorMessage(err))
+  }finally{
+    if(currentCall===call){
+      call.screenShareBusy=false;
+      updatePrivateVideoControls()
+    }
+  }
 }
 
 async function upgradeCurrentCallToVideo(){
@@ -3466,6 +3650,7 @@ function showCallUi(name,status,video,incoming=false){
   $('activeCallControls').classList.toggle('hidden',incoming);
   updateSpeakerButtons();
   $('cameraCall').classList.remove('hidden');
+  $('screenShareCall').classList.toggle('hidden',!screenShareSupported());
   updatePrivateVideoControls()
 }
 
@@ -3476,7 +3661,7 @@ function resetCallUi(){
   $('callOverlay').classList.add('hidden');$('remoteVideo').srcObject=null;$('localVideo').srcObject=null;
   $('callAvatar').classList.remove('hidden');
   $('incomingActions').classList.add('hidden');$('activeCallControls').classList.add('hidden');$('mediaPermission').classList.add('hidden');
-  $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');$('cameraCall').disabled=false;updateSpeakerButtons();updatePrivateVideoControls();applyPrivateParticipantSize();
+  $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');$('cameraCall').disabled=false;$('screenShareCall').classList.remove('sharing');$('screenShareCall').textContent='🖥️';updateSpeakerButtons();updatePrivateVideoControls();applyPrivateParticipantSize();
   if(preparedMediaStream){try{preparedMediaStream.getTracks().forEach(t=>t.stop())}catch{}preparedMediaStream=null}
 }
 
@@ -3495,7 +3680,7 @@ async function getCallMedia(video){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,renegotiating:false,answered:false};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteScreenSharing:false,screenSharing:false,screenShareBusy:false,screenStream:null,screenSender:null,screenPreviousTrack:null,screenAddedSender:false,renegotiating:false,answered:false};
   for(const track of stream.getTracks())pc.addTrack(track,stream);
   $('localVideo').srcObject=stream;
   updatePrivateVideoControls();
@@ -3693,6 +3878,7 @@ function finishCall(notify=true){
     try{wsSend({type:'call_reject',to_user_id:pendingCall.from_user_id,call_id:pendingCall.call_id})}catch{}
   }
   if(currentCall){
+    try{currentCall.screenStream?.getTracks().forEach(t=>{t.onended=null;t.stop()})}catch{}
     try{currentCall.pc.onicecandidate=null;currentCall.pc.ontrack=null;currentCall.pc.close()}catch{}
     try{currentCall.localStream?.getTracks().forEach(t=>t.stop())}catch{}
   }
@@ -3712,6 +3898,32 @@ async function handleCallSignal(data){
   }
   if(data.type==='call_end'){
     if((currentCall&&currentCall.callId===data.call_id)||(pendingCall&&pendingCall.call_id===data.call_id)){finishCall(false)}
+    return
+  }
+  if(data.type==='call_screen_state'){
+    if(!currentCall||currentCall.callId!==data.call_id)return;
+    currentCall.remoteScreenSharing=!!data.sharing;
+    if(data.sharing){
+      exitEarMode();
+      currentCall.remoteVideo=true;
+      $('callAvatar').classList.add('hidden');
+      $('callStatus').textContent='Собеседник показывает экран'
+    }else{
+      $('callStatus').textContent='Соединено';
+      setTimeout(()=>{
+        if(!currentCall||currentCall.callId!==data.call_id||currentCall.remoteScreenSharing)return;
+        const remoteStream=$('remoteVideo').srcObject;
+        const hasLiveVideo=!!remoteStream?.getVideoTracks?.().some(track=>track.readyState==='live'&&!track.muted);
+        if(!hasLiveVideo){
+          currentCall.remoteVideo=false;
+          $('callAvatar').classList.remove('hidden')
+        }
+        updateEarModeButton();
+        applyPrivateParticipantSize()
+      },500)
+    }
+    updateEarModeButton();
+    applyPrivateParticipantSize();
     return
   }
   if(data.type==='ice_candidate'){
@@ -3798,6 +4010,7 @@ $('speakerCall').onclick=()=>chooseSpeakerOutput();
 $('privateSizeDown').onclick=()=>changePrivateParticipantSize(-1);
 $('privateSizeUp').onclick=()=>changePrivateParticipantSize(1);
 $('earModeBtn').onclick=()=>enterEarMode();
+$('screenShareCall').onclick=()=>startPrivateScreenShare();
 
 const earLock=$('earLock');
 earLock.addEventListener('pointerdown',beginEarUnlock);
@@ -3809,7 +4022,7 @@ earLock.addEventListener('pointerleave',event=>{
 earLock.addEventListener('contextmenu',event=>event.preventDefault());
 
 $('cameraCall').onclick=async()=>{
-  if(!currentCall)return;
+  if(!currentCall||currentCall.screenSharing)return;
   const track=localVideoTrack();
   if(!track){
     await upgradeCurrentCallToVideo();
@@ -3822,7 +4035,7 @@ $('cameraCall').onclick=async()=>{
 };
 
 $('switchCamera').onclick=async()=>{
-  if(!currentCall||!localVideoTrack())return;
+  if(!currentCall||currentCall.screenSharing||!localVideoTrack())return;
   const button=$('switchCamera');
   button.disabled=true;
 
@@ -3955,7 +4168,7 @@ function connectWs(){
   socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));
   socket.onmessage=e=>{
     const data=JSON.parse(e.data);
-    if(['call_offer','call_answer','call_video_offer','call_video_answer','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
+    if(['call_offer','call_answer','call_video_offer','call_video_answer','call_screen_state','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
       handleCallSignal(data);return
     }
     if(data.type==='group_call_invite'){
