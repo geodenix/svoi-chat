@@ -3066,8 +3066,228 @@ function updateSpeakerButtons(){
   }
 }
 
-function screenShareSupported(){
+let nativeScreenListenerReady=false;
+
+function nativeScreenPlugin(){
+  return window.Capacitor?.Plugins?.NativeScreenShare||null
+}
+
+function webScreenShareSupported(){
   return !!navigator.mediaDevices?.getDisplayMedia
+}
+
+function nativeScreenShareSupported(){
+  return !!nativeScreenPlugin()
+}
+
+function screenShareSupported(){
+  return webScreenShareSupported()||nativeScreenShareSupported()
+}
+
+function waitForIceGatheringComplete(pc,timeoutMs=5500){
+  if(!pc||pc.iceGatheringState==='complete')return Promise.resolve();
+  return new Promise(resolve=>{
+    let done=false;
+    const finish=()=>{
+      if(done)return;
+      done=true;
+      clearTimeout(timer);
+      pc.removeEventListener?.('icegatheringstatechange',check);
+      resolve()
+    };
+    const check=()=>{
+      if(pc.iceGatheringState==='complete')finish()
+    };
+    const timer=setTimeout(finish,timeoutMs);
+    pc.addEventListener?.('icegatheringstatechange',check)
+  })
+}
+
+function closeNativePrivateScreenReceiver(call,restoreMain=true){
+  const pc=call?.nativeScreenReceiver;
+  if(pc){
+    try{pc.ontrack=null;pc.close()}catch{}
+  }
+  if(call){
+    call.nativeScreenReceiver=null;
+    call.nativeScreenRemoteStream=null;
+    call.remoteScreenSharing=false
+  }
+  if(restoreMain&&currentCall===call){
+    const remote=$('remoteVideo');
+    remote.srcObject=call?.remoteMediaStream||null;
+    if(call?.remoteMediaStream){
+      remote.play().catch(()=>{});
+      call.remoteVideo=!!call.remoteMediaStream.getVideoTracks?.().some(track=>track.readyState==='live');
+      $('callAvatar').classList.toggle('hidden',!!call.remoteVideo)
+    }else{
+      call.remoteVideo=false;
+      $('callAvatar').classList.remove('hidden')
+    }
+    $('callStatus').textContent='Соединено';
+    updateEarModeButton();
+    applyPrivateParticipantSize()
+  }
+}
+
+async function acceptNativePrivateScreenOffer(data){
+  const call=currentCall;
+  if(!call||call.callId!==data.call_id||data.group_id)return;
+
+  closeNativePrivateScreenReceiver(call,false);
+  const pc=new RTCPeerConnection(await getRtcConfig());
+  call.nativeScreenReceiver=pc;
+  call.remoteScreenSharing=true;
+  exitEarMode();
+  $('callStatus').textContent='Подключаем демонстрацию экрана…';
+
+  pc.ontrack=event=>{
+    if(currentCall!==call||event.track?.kind!=='video')return;
+    const stream=event.streams?.[0]||new MediaStream([event.track]);
+    call.nativeScreenRemoteStream=stream;
+    call.remoteScreenSharing=true;
+    call.remoteVideo=true;
+    $('remoteVideo').srcObject=stream;
+    $('remoteVideo').play().catch(()=>{});
+    $('callAvatar').classList.add('hidden');
+    $('callStatus').textContent='Собеседник показывает экран';
+    updateEarModeButton();
+    applyPrivateParticipantSize()
+  };
+
+  try{
+    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    const answer=await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await waitForIceGatheringComplete(pc);
+    await waitForSocketOpen();
+    wsSend({
+      type:'native_screen_answer',
+      to_user_id:data.from_user_id,
+      call_id:data.call_id,
+      sdp:pc.localDescription.toJSON
+        ?pc.localDescription.toJSON()
+        :pc.localDescription
+    })
+  }catch(err){
+    closeNativePrivateScreenReceiver(call,true);
+    alert(err?.message||'Не удалось принять демонстрацию экрана')
+  }
+}
+
+async function startNativePrivateScreenShare(call){
+  const plugin=nativeScreenPlugin();
+  if(!plugin)throw new Error('Нативная демонстрация экрана недоступна');
+
+  ensureNativeScreenStoppedListener();
+  await plugin.startCapture();
+  const rtc=await getRtcConfig();
+  const peerKey='private-'+call.callId+'-'+call.peerId;
+  const offer=await plugin.createOffer({
+    peerKey,
+    iceServers:rtc.iceServers||[]
+  });
+
+  call.nativeScreenPeerKey=peerKey;
+  call.nativeScreenSharing=true;
+  call.screenSharing=true;
+  call.video=true;
+
+  await waitForSocketOpen();
+  wsSend({
+    type:'native_screen_offer',
+    to_user_id:call.peerId,
+    call_id:call.callId,
+    sdp:{type:'offer',sdp:offer.sdp}
+  });
+  wsSend({
+    type:'call_screen_state',
+    to_user_id:call.peerId,
+    call_id:call.callId,
+    sharing:true
+  });
+
+  $('localVideo').srcObject=null;
+  $('localVideo').classList.add('hidden');
+  $('callStatus').textContent='Вы показываете экран'
+}
+
+async function stopNativePrivateScreenShare(call,notifyPeer=true){
+  const plugin=nativeScreenPlugin();
+  const peerKey=call?.nativeScreenPeerKey;
+  try{
+    if(plugin&&peerKey)await plugin.removePeer({peerKey})
+  }catch{}
+  try{
+    if(plugin)await plugin.stopCapture()
+  }catch{}
+
+  if(call){
+    call.nativeScreenPeerKey=null;
+    call.nativeScreenSharing=false;
+    call.screenSharing=false
+  }
+
+  if(notifyPeer&&call){
+    try{
+      wsSend({
+        type:'native_screen_stop',
+        to_user_id:call.peerId,
+        call_id:call.callId
+      });
+      wsSend({
+        type:'call_screen_state',
+        to_user_id:call.peerId,
+        call_id:call.callId,
+        sharing:false
+      })
+    }catch{}
+  }
+
+  if(currentCall===call){
+    const camera=localVideoTrack();
+    if(camera&&camera.readyState==='live'){
+      $('localVideo').srcObject=call.localStream;
+      $('localVideo').classList.toggle('hidden',!camera.enabled);
+      $('localVideo').play().catch(()=>{})
+    }else{
+      $('localVideo').srcObject=null;
+      $('localVideo').classList.add('hidden')
+    }
+    $('callStatus').textContent='Соединено'
+  }
+}
+
+function ensureNativeScreenStoppedListener(){
+  if(nativeScreenListenerReady)return;
+  const plugin=nativeScreenPlugin();
+  if(!plugin?.addListener)return;
+  nativeScreenListenerReady=true;
+  Promise.resolve(
+    plugin.addListener('captureStopped',()=>{
+      const call=currentCall;
+      if(call?.nativeScreenSharing){
+        call.nativeScreenSharing=false;
+        call.screenSharing=false;
+        call.nativeScreenPeerKey=null;
+        try{
+          wsSend({
+            type:'native_screen_stop',
+            to_user_id:call.peerId,
+            call_id:call.callId
+          });
+          wsSend({
+            type:'call_screen_state',
+            to_user_id:call.peerId,
+            call_id:call.callId,
+            sharing:false
+          })
+        }catch{}
+        $('callStatus').textContent='Соединено';
+        updatePrivateVideoControls()
+      }
+    })
+  ).catch(()=>{nativeScreenListenerReady=false})
 }
 
 function screenShareErrorMessage(err){
@@ -3820,6 +4040,10 @@ async function stopPrivateScreenShare(notifyPeer=true){
   const addedSender=!!call.screenAddedSender;
 
   try{
+    if(call.nativeScreenSharing){
+      await stopNativePrivateScreenShare(call,notifyPeer);
+      return
+    }
     const screenTrack=stream?.getVideoTracks?.()[0]||null;
     if(screenTrack)screenTrack.onended=null;
 
@@ -3891,6 +4115,24 @@ async function startPrivateScreenShare(){
 
   call.screenShareBusy=true;
   updatePrivateScreenShareControls();
+
+  if(nativeScreenShareSupported()){
+    try{
+      await startNativePrivateScreenShare(call)
+    }catch(err){
+      try{await nativeScreenPlugin()?.stopCapture?.()}catch{}
+      call.nativeScreenSharing=false;
+      call.screenSharing=false;
+      call.nativeScreenPeerKey=null;
+      alert(screenShareErrorMessage(err))
+    }finally{
+      if(currentCall===call){
+        call.screenShareBusy=false;
+        updatePrivateVideoControls()
+      }
+    }
+    return
+  }
 
   let display=null;
   let sender=null;
@@ -4058,16 +4300,19 @@ async function getCallMedia(video){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteScreenSharing:false,screenSharing:false,screenShareBusy:false,screenStream:null,screenSender:null,screenPreviousTrack:null,screenAddedSender:false,renegotiating:false,answered:false};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,remoteScreenSharing:false,screenSharing:false,screenShareBusy:false,screenStream:null,screenSender:null,screenPreviousTrack:null,screenAddedSender:false,nativeScreenSharing:false,nativeScreenPeerKey:null,nativeScreenReceiver:null,nativeScreenRemoteStream:null,renegotiating:false,answered:false};
   for(const track of stream.getTracks())pc.addTrack(track,stream);
   $('localVideo').srcObject=stream;
   updatePrivateVideoControls();
   pc.ontrack=e=>{
     const stream=e.streams?.[0];
     if(stream){
-      $('remoteVideo').srcObject=stream;
-      applyAudioOutput($('remoteVideo')).catch(()=>{});
-      $('remoteVideo').play().catch(()=>{})
+      currentCall.remoteMediaStream=stream;
+      if(!currentCall.remoteScreenSharing){
+        $('remoteVideo').srcObject=stream;
+        applyAudioOutput($('remoteVideo')).catch(()=>{});
+        $('remoteVideo').play().catch(()=>{})
+      }
     }
     if(e.track?.kind==='video'){
       exitEarMode();
@@ -4256,15 +4501,49 @@ function finishCall(notify=true){
     try{wsSend({type:'call_reject',to_user_id:pendingCall.from_user_id,call_id:pendingCall.call_id})}catch{}
   }
   if(currentCall){
-    try{currentCall.screenStream?.getTracks().forEach(t=>{t.onended=null;t.stop()})}catch{}
-    try{currentCall.pc.onicecandidate=null;currentCall.pc.ontrack=null;currentCall.pc.close()}catch{}
-    try{currentCall.localStream?.getTracks().forEach(t=>t.stop())}catch{}
+    const finishingCall=currentCall;
+    if(finishingCall.nativeScreenSharing){
+      stopNativePrivateScreenShare(finishingCall,false).catch(()=>{})
+    }
+    closeNativePrivateScreenReceiver(finishingCall,false);
+    try{finishingCall.screenStream?.getTracks().forEach(t=>{t.onended=null;t.stop()})}catch{}
+    try{finishingCall.pc.onicecandidate=null;finishingCall.pc.ontrack=null;finishingCall.pc.close()}catch{}
+    try{finishingCall.localStream?.getTracks().forEach(t=>t.stop())}catch{}
   }
   acceptingCall=false;currentCall=null;pendingCall=null;pendingIce=[];resetCallUi();
   setTimeout(()=>loadCallHistory().catch(()=>{}),500)
 }
 
 async function handleCallSignal(data){
+  if(data.type==='native_screen_offer'){
+    await acceptNativePrivateScreenOffer(data);
+    return
+  }
+  if(data.type==='native_screen_answer'){
+    if(
+      !data.group_id
+      && currentCall
+      && currentCall.callId===data.call_id
+      && currentCall.nativeScreenSharing
+      && currentCall.nativeScreenPeerKey
+    ){
+      try{
+        await nativeScreenPlugin()?.setAnswer?.({
+          peerKey:currentCall.nativeScreenPeerKey,
+          sdp:data.sdp?.sdp||''
+        })
+      }catch(err){
+        alert(err?.message||'Не удалось подключить демонстрацию экрана')
+      }
+    }
+    return
+  }
+  if(data.type==='native_screen_stop'){
+    if(!data.group_id&&currentCall&&currentCall.callId===data.call_id){
+      closeNativePrivateScreenReceiver(currentCall,true)
+    }
+    return
+  }
   if(data.type==='call_offer'){incomingCall(data);return}
   if(data.type==='call_unavailable'){
     if(currentCall&&currentCall.callId===data.call_id){stopOutgoingTone();alert('Пользователь сейчас недоступен');finishCall(false)}
@@ -4546,7 +4825,7 @@ function connectWs(){
   socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));
   socket.onmessage=e=>{
     const data=JSON.parse(e.data);
-    if(['call_offer','call_answer','call_video_offer','call_video_answer','call_screen_state','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
+    if(['call_offer','call_answer','call_video_offer','call_video_answer','call_screen_state','ice_candidate','call_reject','call_end','call_unavailable','native_screen_offer','native_screen_answer','native_screen_stop'].includes(data.type)){
       handleCallSignal(data);return
     }
     if(data.type==='group_call_invite'){
