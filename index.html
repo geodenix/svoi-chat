@@ -606,8 +606,41 @@ function isStandalone(){
     || window.navigator.standalone===true
 }
 
+function isAndroidDevice(){
+  return /Android/i.test(navigator.userAgent||'')
+}
+
+function isIosDevice(){
+  const ua=navigator.userAgent||'';
+  return /iPhone|iPad|iPod/i.test(ua)
+    || (navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1)
+}
+
+function isNativeMobileApp(){
+  try{
+    return !!window.Capacitor?.isNativePlatform?.()
+  }catch{
+    return false
+  }
+}
+
+const latestAndroidApkUrl='https://github.com/geodenix/svoi-chat/releases/latest/download/svoi.apk';
+
 function updateInstallUi(){
-  $('installBox').classList.toggle('hidden',isStandalone())
+  const box=$('installBox');
+  const button=$('installBtn');
+  if(!box||!button)return;
+
+  const hide=isStandalone()||isNativeMobileApp();
+  box.classList.toggle('hidden',hide);
+  if(hide)return;
+
+  const label=button.querySelector('span');
+  if(label){
+    if(isAndroidDevice())label.textContent='📲 Скачать приложение «Свои»';
+    else if(isIosDevice())label.textContent='📲 Добавить «Свои» на экран';
+    else label.textContent='📲 Установить «Свои»'
+  }
 }
 
 window.addEventListener('beforeinstallprompt',event=>{
@@ -622,10 +655,26 @@ window.addEventListener('appinstalled',()=>{
 });
 
 $('installBtn').onclick=async()=>{
-  if(isStandalone()){
+  if(isStandalone()||isNativeMobileApp()){
     $('installBox').classList.add('hidden');
     return
   }
+
+  if(isAndroidDevice()){
+    const link=document.createElement('a');
+    link.href=latestAndroidApkUrl;
+    link.rel='noopener';
+    document.body.append(link);
+    link.click();
+    link.remove();
+    return
+  }
+
+  if(isIosDevice()){
+    alert('На iPhone открой меню «Поделиться» в Safari и выбери «На экран Домой». После этого «Свои» будет запускаться как отдельное приложение.')
+    return
+  }
+
   if(deferredInstallPrompt){
     deferredInstallPrompt.prompt();
     try{await deferredInstallPrompt.userChoice}catch{}
@@ -633,7 +682,8 @@ $('installBtn').onclick=async()=>{
     updateInstallUi();
     return
   }
-  alert('Открой меню браузера ⋮ и выбери «Добавить на главный экран». После установки «Свои» будет запускаться как отдельное приложение.')
+
+  alert('Открой меню браузера и выбери «Добавить на главный экран» или «Установить приложение».')
 };
 
 updateInstallUi();
