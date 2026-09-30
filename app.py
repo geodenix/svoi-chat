@@ -4674,14 +4674,9 @@ CALL_SIGNAL_TYPES = {
     "call_answer",
     "call_video_offer",
     "call_video_answer",
-    "call_screen_state",
     "ice_candidate",
     "call_reject",
     "call_end",
-    "native_screen_offer",
-    "native_screen_answer",
-    "native_screen_ice",
-    "native_screen_stop",
 }
 
 
@@ -4975,8 +4970,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 "call_answer",
                 "call_video_offer",
                 "call_video_answer",
-                "native_screen_offer",
-                "native_screen_answer",
             }:
                 sdp = data.get("sdp")
                 if not isinstance(sdp, dict):
@@ -4989,52 +4982,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     "call_video_answer",
                 }:
                     payload["video"] = bool(data.get("video", False))
-            elif signal_type in {"ice_candidate", "native_screen_ice"}:
+            elif signal_type == "ice_candidate":
                 candidate = data.get("candidate")
                 if not isinstance(candidate, dict):
                     continue
                 payload["candidate"] = candidate
-
-            if signal_type in {
-                "native_screen_offer",
-                "native_screen_answer",
-                "native_screen_ice",
-                "native_screen_stop",
-            }:
-                group_id_raw = data.get("group_id")
-                if group_id_raw is not None:
-                    try:
-                        group_id = int(group_id_raw)
-                    except (TypeError, ValueError):
-                        continue
-
-                    membership = connect_db()
-                    sender_member = membership.execute(
-                        "SELECT 1 FROM group_members WHERE group_id=? AND user_id=?",
-                        (group_id, user_id),
-                    ).fetchone()
-                    target_member = membership.execute(
-                        "SELECT 1 FROM group_members WHERE group_id=? AND user_id=?",
-                        (group_id, target_id),
-                    ).fetchone()
-                    membership.close()
-
-                    if not sender_member or not target_member:
-                        continue
-
-                    payload["group_id"] = group_id
-                    await push(target_id, payload)
-                    continue
-
-                call = active_calls.get(call_id)
-                if not call or not call.get("answered"):
-                    continue
-                participants = {call["caller_id"], call["callee_id"]}
-                if user_id not in participants or target_id not in participants:
-                    continue
-
-                await push(target_id, payload)
-                continue
 
             if signal_type == "call_offer":
                 call = {
@@ -5096,16 +5048,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     payload["video"] = requested_video
 
                 payload["reconnect"] = reconnect
-                await push(target_id, payload)
-                continue
-
-            if signal_type == "call_screen_state":
-                if not call or not call.get("answered"):
-                    continue
-                participants = {call["caller_id"], call["callee_id"]}
-                if user_id not in participants or target_id not in participants:
-                    continue
-                payload["sharing"] = bool(data.get("sharing", False))
                 await push(target_id, payload)
                 continue
 
