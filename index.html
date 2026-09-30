@@ -4795,7 +4795,7 @@ function showCallUi(name,status,video,incoming=false,avatarUrl=null,nativeSystem
   setCallPing(null);
   setCallVisual(name,avatarUrl);
   $('callAvatar').classList.remove('hidden');
-  $('incomingActions').classList.toggle('hidden',!incoming||nativeSystemControls);
+  $('incomingActions').classList.toggle('hidden',!incoming);
   $('activeCallControls').classList.toggle('hidden',incoming);
   $('minimizeCallBtn').classList.toggle('hidden',incoming);
   updateSpeakerButtons();
@@ -5159,7 +5159,7 @@ async function acceptIncomingCall(options={}){
         preparedMediaStream=null
       }
       pendingCall=data;
-      $('incomingActions').classList.add('hidden');
+      $('incomingActions').classList.remove('hidden');
       $('activeCallControls').classList.add('hidden');
       $('callStatus').textContent='Подключаем звонок…';
       if(!suppressFailureAlert){
@@ -5560,7 +5560,7 @@ async function restoreIncomingCallAction(action){
 
   try{
     if(nativeSystemControls){
-      $('incomingActions')?.classList.add('hidden');
+      $('incomingActions')?.classList.remove('hidden');
     }
 
     await waitForAppForeground();
@@ -5591,7 +5591,7 @@ async function restoreIncomingCallAction(action){
         nativeSystemControls
       )
     }else if(nativeSystemControls&&pendingCall?.call_id===callId){
-      $('incomingActions')?.classList.add('hidden');
+      $('incomingActions')?.classList.remove('hidden');
       if(data?.from_avatar_url){
         pendingCall.from_avatar_url=data.from_avatar_url
       }
