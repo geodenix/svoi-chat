@@ -4674,14 +4674,9 @@ CALL_SIGNAL_TYPES = {
     "call_answer",
     "call_video_offer",
     "call_video_answer",
-    "call_screen_state",
     "ice_candidate",
     "call_reject",
     "call_end",
-    "native_screen_offer",
-    "native_screen_answer",
-    "native_screen_ice",
-    "native_screen_stop",
 }
 
 
