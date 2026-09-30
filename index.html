@@ -277,7 +277,6 @@ body.drawer-open{overflow:hidden}
     <button id="groupSpeakerBtn" type="button" title="Аудиовыход: обычный">🔈</button>
     <button id="groupCameraBtn" type="button" title="Камера">📷</button>
     <button id="groupSwitchCameraBtn" type="button" title="Сменить камеру">🔄</button>
-    <button id="groupScreenShareBtn" type="button" hidden disabled aria-hidden="true">🖥️</button>
     <button id="groupEndBtn" class="end" type="button" title="Выйти">☎</button>
   </div>
 </div>
@@ -308,7 +307,6 @@ body.drawer-open{overflow:hidden}
       <button id="privateSizeUp" class="round-call video-size-btn hidden" type="button" title="Увеличить видео">+</button>
       <button id="cameraCall" class="round-call" type="button" title="Камера">📷</button>
       <button id="switchCamera" class="round-call" type="button" title="Сменить камеру">🔄</button>
-      <button id="screenShareCall" class="round-call" type="button" hidden disabled aria-hidden="true">🖥️</button>
       <button id="endCall" class="round-call end" type="button" title="Завершить">☎</button>
     </div>
   </div>
@@ -4787,13 +4785,6 @@ async function recoverGroupCall(state){
     );
 
     await state.room.localParticipant.setMicrophoneEnabled(!state.muted);
-    if(state.screenSharing){
-      state.screenSharing=false;
-      state.screenRestoreCamera=false;
-      $('groupScreenShareBtn').classList.remove('sharing');
-      $('groupScreenShareBtn').textContent='🖥️';
-      $('groupScreenShareBtn').title='Демонстрация экрана'
-    }
     await state.room.localParticipant.setCameraEnabled(!state.cameraOff);
     if(!state.cameraOff){
       let track=null;
@@ -4866,12 +4857,6 @@ async function joinGroupCall(groupId,video=false,invite=false){
       muted:false,
       cameraOff:!video,
       facing:'user',
-      screenSharing:false,
-      screenRestoreCamera:false,
-      nativeScreenSharing:false,
-      nativeScreenPeerKeys:new Map(),
-      nativeScreenReceivers:new Map(),
-      nativeScreenRtc:null,
       reconnectAttempts:0,
       recovering:false,
       needsRecovery:false,
@@ -4887,10 +4872,6 @@ async function joinGroupCall(groupId,video=false,invite=false){
     updateSpeakerButtons();
     $('groupCameraBtn').classList.toggle('off',!video);
     $('groupSwitchCameraBtn').classList.toggle('hidden',!video);
-    $('groupScreenShareBtn').classList.remove('hidden');
-    $('groupScreenShareBtn').classList.remove('sharing');
-    $('groupScreenShareBtn').textContent='🖥️';
-    $('groupScreenShareBtn').title='Демонстрация экрана';
 
     room
       .on(LivekitClient.RoomEvent.TrackSubscribed,(track,publication,participant)=>{
@@ -4901,22 +4882,10 @@ async function joinGroupCall(groupId,video=false,invite=false){
       })
       .on(LivekitClient.RoomEvent.ParticipantConnected,(participant)=>{
         ensureGroupTile(participant,false);refreshGroupCount();
-        if(groupCallState?.nativeScreenSharing){
-          sendNativeGroupScreenToParticipant(participant).catch(()=>{})
-        }
       })
       .on(LivekitClient.RoomEvent.ParticipantDisconnected,(participant)=>{
         const leavingTile=$(groupTileId(participant.identity));
         const wasFocused=!!leavingTile?.classList.contains('focused');
-        const userId=groupParticipantUserId(participant);
-        if(userId&&groupCallState){
-          const key=groupCallState.nativeScreenPeerKeys?.get(userId);
-          if(key){
-            nativeScreenPlugin()?.removePeer?.({peerKey:key}).catch(()=>{});
-            groupCallState.nativeScreenPeerKeys.delete(userId)
-          }
-          closeNativeGroupScreenReceiver(userId,false)
-        }
         $(groupTileId(participant.identity))?.remove();
         if(wasFocused)$('groupCallGrid').classList.remove('has-focus');
         refreshGroupCount()
@@ -4985,22 +4954,10 @@ function leaveGroupCall(disconnect=true){
   resetNativeAudioRoute().catch(()=>{});
   const state=groupCallState;
   if(state)state.manualLeave=true;
-  if(state?.nativeScreenSharing){
-    stopNativeGroupScreenShare(state,true).catch(()=>{})
-  }else if(state?.screenSharing){
-    try{state.room.localParticipant.setScreenShareEnabled(false).catch(()=>{})}catch{}
-  }
-  if(state?.nativeScreenReceivers){
-    for(const userId of [...state.nativeScreenReceivers.keys()]){
-      closeNativeGroupScreenReceiver(userId,false)
-    }
-  }
   groupCallState=null;
   if(state&&disconnect){
     try{state.room.disconnect()}catch{}
   }
-  $('groupScreenShareBtn').classList.remove('sharing');
-  $('groupScreenShareBtn').textContent='🖥️';
   $('groupCallGrid').replaceChildren();
   $('groupCallGrid').classList.remove('has-focus');
   $('groupCallOverlay').classList.add('hidden')
@@ -5211,8 +5168,6 @@ function privateVideoAvailable(){
   return !!currentCall&&(
     !!localVideoTrack()
     || !!currentCall.remoteVideo
-    || !!currentCall.screenSharing
-    || !!currentCall.remoteScreenSharing
   )
 }
 
@@ -5261,8 +5216,6 @@ function canUseEarMode(){
     && !!currentCall.answered
     && !localVideoTrack()
     && !currentCall.remoteVideo
-    && !currentCall.screenSharing
-    && !currentCall.remoteScreenSharing
 }
 
 function shouldUseNativeProximity(){
@@ -5388,15 +5341,9 @@ function updatePrivateVideoControls(){
     ?'Включить видео'
     :(enabled?'Выключить камеру':'Включить камеру');
 
-  const sharing=!!currentCall?.screenSharing;
-  const nativeSharing=!!currentCall?.nativeScreenSharing;
-  cameraButton.disabled=sharing;
-  switchButton.classList.toggle('hidden',sharing||!hasVideo);
-  preview.classList.toggle(
-    'hidden',
-    nativeSharing?true:(sharing?false:(!hasVideo||!enabled))
-  );
-  updatePrivateScreenShareControls();
+  cameraButton.disabled=false;
+  switchButton.classList.toggle('hidden',!hasVideo);
+  preview.classList.toggle('hidden',!hasVideo||!enabled);
   updateEarModeButton();
   applyPrivateParticipantSize()
 }
@@ -5839,7 +5786,6 @@ function showCallUi(name,status,video,incoming=false,avatarUrl=null,nativeSystem
     applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
   }
   $('cameraCall').classList.remove('hidden');
-  $('screenShareCall').classList.remove('hidden');
   updatePrivateVideoControls()
 }
 
@@ -5857,7 +5803,7 @@ function resetCallUi(){
   setCallVisual('Свои',null);
   $('callAvatar').classList.remove('hidden');
   $('incomingActions').classList.add('hidden');$('activeCallControls').classList.add('hidden');$('mediaPermission').classList.add('hidden');
-  $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');$('cameraCall').disabled=false;$('screenShareCall').classList.remove('sharing');$('screenShareCall').textContent='🖥️';updateSpeakerButtons();updatePrivateVideoControls();applyPrivateParticipantSize();
+  $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');$('cameraCall').disabled=false;updateSpeakerButtons();updatePrivateVideoControls();applyPrivateParticipantSize();
   if(preparedMediaStream){try{preparedMediaStream.getTracks().forEach(t=>t.stop())}catch{}preparedMediaStream=null}
 }
 
@@ -5904,9 +5850,7 @@ async function recoverPrivateCallConnection(call){
     if(currentCall!==call)return;
     if(call.pc.connectionState==='connected'){
       clearPrivateRecovery(call);
-      $('callStatus').textContent=call.remoteScreenSharing
-        ?'Собеседник показывает экран'
-        :(call.screenSharing?'Вы показываете экран':'Соединено');
+      $('callStatus').textContent='Соединено';
       updateMiniCallBar();
       return
     }
@@ -5971,7 +5915,7 @@ function schedulePrivateCallRecovery(call,delay=900){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,remoteScreenSharing:false,screenSharing:false,screenShareBusy:false,screenStream:null,screenSender:null,screenPreviousTrack:null,screenAddedSender:false,screenRestoreCamera:false,nativeScreenSharing:false,nativeScreenPeerKey:null,nativeScreenReceiver:null,nativeScreenRemoteStream:null,nativeScreenReceiverTimer:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0,screenShareTransitionUntil:0};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks())pc.addTrack(track,stream);
   $('localVideo').srcObject=stream;
@@ -5981,11 +5925,9 @@ async function createPeer(peerId,peerName,id,video,stream){
     const stream=e.streams?.[0];
     if(stream){
       currentCall.remoteMediaStream=stream;
-      if(!currentCall.remoteScreenSharing){
-        $('remoteVideo').srcObject=stream;
-        applyAudioOutput($('remoteVideo')).catch(()=>{});
-        $('remoteVideo').play().catch(()=>{})
-      }
+      $('remoteVideo').srcObject=stream;
+      applyAudioOutput($('remoteVideo')).catch(()=>{});
+      $('remoteVideo').play().catch(()=>{});
     }
     if(e.track?.kind==='video'){
       exitEarMode();
@@ -6017,9 +5959,7 @@ async function createPeer(peerId,peerName,id,video,stream){
       clearPrivateRecovery(call);
       startCallPing(call);
       stopOutgoingTone();
-      $('callStatus').textContent=call.remoteScreenSharing
-        ?'Собеседник показывает экран'
-        :(call.screenSharing?'Вы показываете экран':'Соединено');
+      $('callStatus').textContent='Соединено';
       updateMiniCallBar();
       updateEarModeButton()
     }else if(state==='connecting'){
@@ -6027,12 +5967,10 @@ async function createPeer(peerId,peerName,id,video,stream){
       $('callStatus').textContent='Соединение…'
     }else if(state==='disconnected'){
       stopCallPing();
-      const transition=Number(call.screenShareTransitionUntil||0)>Date.now();
-      schedulePrivateCallRecovery(call,transition?8000:1800)
+      schedulePrivateCallRecovery(call,1800)
     }else if(state==='failed'){
       stopCallPing();
-      const transition=Number(call.screenShareTransitionUntil||0)>Date.now();
-      schedulePrivateCallRecovery(call,transition?5000:700)
+      schedulePrivateCallRecovery(call,700)
     }else if(state==='closed'){
       stopCallPing();
       clearPrivateRecovery(call);
@@ -6249,11 +6187,6 @@ function finishCall(notify=true){
   if(currentCall){
     const finishingCall=currentCall;
     clearPrivateRecovery(finishingCall);
-    if(finishingCall.nativeScreenSharing){
-      stopNativePrivateScreenShare(finishingCall,false).catch(()=>{})
-    }
-    closeNativePrivateScreenReceiver(finishingCall,false);
-    try{finishingCall.screenStream?.getTracks().forEach(t=>{t.onended=null;t.stop()})}catch{}
     try{finishingCall.pc.onicecandidate=null;finishingCall.pc.ontrack=null;finishingCall.pc.close()}catch{}
     try{finishingCall.localStream?.getTracks().forEach(t=>t.stop())}catch{}
   }
@@ -6367,36 +6300,6 @@ async function handleCallSignal(data){
     if((currentCall&&currentCall.callId===data.call_id)||(pendingCall&&pendingCall.call_id===data.call_id)){finishCall(false)}
     return
   }
-  if(data.type==='call_screen_state'){
-    if(!currentCall||currentCall.callId!==data.call_id)return;
-    currentCall.remoteScreenSharing=!!data.sharing;
-    if(data.sharing){
-      exitEarMode();
-      const screenReady=!!currentCall.nativeScreenRemoteStream
-        || !!$('remoteVideo').srcObject?.getVideoTracks?.().some(
-          track=>track.readyState==='live'
-        );
-      $('callStatus').textContent=screenReady
-        ?'Собеседник показывает экран'
-        :'Подключаем демонстрацию экрана…'
-    }else{
-      $('callStatus').textContent='Соединено';
-      setTimeout(()=>{
-        if(!currentCall||currentCall.callId!==data.call_id||currentCall.remoteScreenSharing)return;
-        const remoteStream=$('remoteVideo').srcObject;
-        const hasLiveVideo=!!remoteStream?.getVideoTracks?.().some(track=>track.readyState==='live'&&!track.muted);
-        if(!hasLiveVideo){
-          currentCall.remoteVideo=false;
-          $('callAvatar').classList.remove('hidden')
-        }
-        updateEarModeButton();
-        applyPrivateParticipantSize()
-      },500)
-    }
-    updateEarModeButton();
-    applyPrivateParticipantSize();
-    return
-  }
   if(data.type==='ice_candidate'){
     if(currentCall&&currentCall.callId===data.call_id&&currentCall.pc.remoteDescription){
       try{await currentCall.pc.addIceCandidate(new RTCIceCandidate(data.candidate))}catch{}
@@ -6428,9 +6331,7 @@ async function handleCallSignal(data){
       currentCall.video=!!data.video;
       currentCall.answered=true;
       clearPrivateRecovery(currentCall);
-      $('callStatus').textContent=currentCall.remoteScreenSharing
-        ?'Собеседник показывает экран'
-        :(currentCall.screenSharing?'Вы показываете экран':'Соединено');
+      $('callStatus').textContent='Соединено';
       updateMiniCallBar()
     }catch(err){
       $('callStatus').textContent='Ошибка подключения видео'
@@ -6445,9 +6346,7 @@ async function handleCallSignal(data){
       }
       currentCall.video=!!data.video;
       clearPrivateRecovery(currentCall);
-      $('callStatus').textContent=currentCall.remoteScreenSharing
-        ?'Собеседник показывает экран'
-        :(currentCall.screenSharing?'Вы показываете экран':'Соединено');
+      $('callStatus').textContent='Соединено';
       updateMiniCallBar()
     }catch(err){
       $('callStatus').textContent='Ошибка подключения видео'
@@ -6519,8 +6418,6 @@ $('speakerCall').onclick=()=>chooseSpeakerOutput();
 $('privateSizeDown').onclick=()=>changePrivateParticipantSize(-1);
 $('privateSizeUp').onclick=()=>changePrivateParticipantSize(1);
 $('earModeBtn').onclick=()=>enterEarMode();
-$('screenShareCall').onclick=()=>startPrivateScreenShare();
-
 const earLock=$('earLock');
 earLock.addEventListener('pointerdown',beginEarUnlock);
 earLock.addEventListener('pointerup',cancelEarUnlock);
@@ -6531,7 +6428,7 @@ earLock.addEventListener('pointerleave',event=>{
 earLock.addEventListener('contextmenu',event=>event.preventDefault());
 
 $('cameraCall').onclick=async()=>{
-  if(!currentCall||currentCall.screenSharing)return;
+  if(!currentCall)return;
   const track=localVideoTrack();
   if(!track){
     await upgradeCurrentCallToVideo();
@@ -6544,7 +6441,7 @@ $('cameraCall').onclick=async()=>{
 };
 
 $('switchCamera').onclick=async()=>{
-  if(!currentCall||currentCall.screenSharing||!localVideoTrack())return;
+  if(!currentCall||!localVideoTrack())return;
   const button=$('switchCamera');
   button.disabled=true;
 
