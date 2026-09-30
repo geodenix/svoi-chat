@@ -333,6 +333,7 @@ body.drawer-open{overflow:hidden}
   <div class="chat-menu-actions">
     <button id="groupInfoBtn" class="hidden" type="button">ℹ️ Информация о группе</button>
     <button id="groupMembersBtn" class="hidden" type="button">👥 Участники</button>
+    <button id="addParticipantBtn" type="button">➕ Добавить участника</button>
     <button id="searchMessagesBtn" type="button">🔎 Поиск по сообщениям</button>
     <button id="chatBackgroundBtn" type="button">🖼 Фон чата</button>
     <button id="muteChatBtn" type="button">🔔 Уведомления</button>
@@ -496,6 +497,18 @@ body.drawer-open{overflow:hidden}
   </div>
 </dialog>
 
+<dialog id="addParticipantDialog">
+  <h2 id="addParticipantTitle" class="dialog-title">Добавить участника</h2>
+  <p id="addParticipantNote" class="muted"></p>
+  <input id="addParticipantGroupName" class="group-name hidden" maxlength="80" autocomplete="off" placeholder="Название новой группы">
+  <div id="addParticipantList" class="member-list"></div>
+  <div class="dialog-actions">
+    <button id="cancelAddParticipant" type="button">Отмена</button>
+    <button id="confirmAddParticipant" class="primary" type="button">Добавить</button>
+  </div>
+  <div id="addParticipantError" class="error"></div>
+</dialog>
+
 <dialog id="groupRenameDialog">
   <h2 class="dialog-title">Информация о группе</h2>
   <p id="groupInfoCount" class="muted">Участников: 0</p>
@@ -549,6 +562,7 @@ let adminStatsPeriod=localStorage.getItem('svoi_admin_stats_period')==='week'?'w
 let groupCallState=null;
 let minimizedCallKind=null;
 let groupMembersData=null;
+let addParticipantContext=null;
 const outboxDeliveries=new Map();
 let privateParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_private_video_size')||1)));
 let groupParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_group_video_size')||1)));
@@ -6647,6 +6661,180 @@ async function renderBlacklist(){
   }
 }
 
+function addParticipantRow(user,checked=false,disabled=false){
+  const label=document.createElement('label');
+  label.className='member-row';
+
+  const input=document.createElement('input');
+  input.type='checkbox';
+  input.value=String(user.id);
+  input.checked=!!checked;
+  input.disabled=!!disabled;
+
+  const avatar=document.createElement('span');
+  avatar.className='avatar';
+  setAvatar(avatar,user);
+
+  const copy=document.createElement('span');
+  copy.style.minWidth='0';
+  copy.style.flex='1';
+
+  const name=document.createElement('strong');
+  name.textContent=user.display_name||user.username;
+  name.style.display='block';
+
+  const tag=document.createElement('small');
+  tag.className='muted';
+  tag.textContent='@'+user.username;
+  tag.style.display='block';
+
+  copy.append(name,tag);
+  label.append(input,avatar,copy);
+  return label
+}
+
+async function openAddParticipantDialog(){
+  if(!active)return;
+  const context={
+    type:active.type,
+    chatId:Number(active.data.id),
+    peer:active.type==='user'?{...active.data}:null
+  };
+  addParticipantContext=context;
+
+  $('addParticipantError').textContent='';
+  $('addParticipantList').replaceChildren();
+  $('addParticipantGroupName').classList.toggle('hidden',context.type!=='user');
+
+  if(context.type==='user'){
+    $('addParticipantTitle').textContent='Добавить в личный чат';
+    $('addParticipantNote').textContent=
+      'Будет создана новая группа. Текущая личная переписка останется отдельной.';
+    $('addParticipantGroupName').value='Группа с '+(context.peer.display_name||context.peer.username);
+
+    const peerRow=addParticipantRow(context.peer,true,true);
+    $('addParticipantList').append(peerRow);
+
+    const candidates=users.filter(user=>
+      Number(user.id)!==Number(context.peer.id)
+      && Number(user.id)!==Number(me?.id)
+    );
+    if(!candidates.length){
+      const empty=document.createElement('div');
+      empty.className='muted';
+      empty.style.padding='12px';
+      empty.textContent='Других пользователей пока нет.';
+      $('addParticipantList').append(empty)
+    }else{
+      for(const user of candidates){
+        $('addParticipantList').append(addParticipantRow(user))
+      }
+    }
+  }else{
+    if(!active.data.is_admin)return;
+    $('addParticipantTitle').textContent='Добавить в группу';
+    $('addParticipantNote').textContent='Выбери одного или нескольких пользователей.';
+    $('addParticipantGroupName').value='';
+
+    try{
+      const members=await api('/api/groups/'+context.chatId+'/members');
+      if(
+        !addParticipantContext
+        || addParticipantContext.type!=='group'
+        || Number(addParticipantContext.chatId)!==context.chatId
+      )return;
+
+      const memberIds=new Set((members.members||[]).map(member=>Number(member.id)));
+      const candidates=users.filter(user=>
+        Number(user.id)!==Number(me?.id)
+        && !memberIds.has(Number(user.id))
+      );
+
+      if(!candidates.length){
+        const empty=document.createElement('div');
+        empty.className='muted';
+        empty.style.padding='12px';
+        empty.textContent='Все доступные пользователи уже в группе.';
+        $('addParticipantList').append(empty)
+      }else{
+        for(const user of candidates){
+          $('addParticipantList').append(addParticipantRow(user))
+        }
+      }
+    }catch(err){
+      $('addParticipantError').textContent=err.message||'Не удалось загрузить участников'
+    }
+  }
+
+  $('addParticipantDialog').showModal()
+}
+
+async function confirmAddParticipant(){
+  const context=addParticipantContext;
+  if(!context)return;
+
+  const selected=[...$('addParticipantList').querySelectorAll('input[type="checkbox"]:checked:not(:disabled)')]
+    .map(input=>Number(input.value))
+    .filter(Boolean);
+
+  if(!selected.length){
+    $('addParticipantError').textContent='Выбери хотя бы одного пользователя';
+    return
+  }
+
+  const button=$('confirmAddParticipant');
+  button.disabled=true;
+  $('addParticipantError').textContent='';
+
+  try{
+    if(context.type==='user'){
+      const name=$('addParticipantGroupName').value.trim();
+      if(!name){
+        $('addParticipantError').textContent='Укажи название новой группы';
+        return
+      }
+
+      const memberIds=[Number(context.peer.id),...selected];
+      const group=await api('/api/groups',{
+        method:'POST',
+        body:{name,member_ids:memberIds}
+      });
+
+      $('addParticipantDialog').close();
+      addParticipantContext=null;
+      await loadGroups();
+      await openGroup(group)
+    }else{
+      const groupId=context.chatId;
+      const selectedUsers=selected
+        .map(id=>users.find(user=>Number(user.id)===id))
+        .filter(Boolean);
+
+      for(const user of selectedUsers){
+        await api('/api/groups/'+groupId+'/members',{
+          method:'POST',
+          body:{tag:'@'+user.username}
+        })
+      }
+
+      $('addParticipantDialog').close();
+      addParticipantContext=null;
+      await loadGroups();
+      if(active?.type==='group'&&Number(active.data.id)===groupId){
+        const fresh=groups.find(group=>Number(group.id)===groupId);
+        if(fresh){
+          active.data=fresh;
+          updateHead()
+        }
+      }
+    }
+  }catch(err){
+    $('addParticipantError').textContent=err.message||'Не удалось добавить участника'
+  }finally{
+    button.disabled=false
+  }
+}
+
 function openChatMenu(){
   if(!active)return;
   $('chatMenuTitle').textContent=active.type==='group'
@@ -6657,6 +6845,10 @@ function openChatMenu(){
     :formatLastSeen(active.data);
   $('groupInfoBtn').classList.toggle('hidden',active.type!=='group');
   $('groupMembersBtn').classList.toggle('hidden',active.type!=='group');
+  $('addParticipantBtn').classList.toggle(
+    'hidden',
+    active.type==='group'&&!active.data.is_admin
+  );
   $('blockUserBtn').classList.toggle('hidden',active.type!=='user');
   $('muteChatBtn').textContent=active.data.muted
     ?'🔕 '+muteStatusText(active.data)
@@ -6741,6 +6933,27 @@ $('groupInfoBtn').onclick=()=>{
   $('chatMenuDialog').close();
   openGroupInfoDialog()
 };
+$('addParticipantBtn').onclick=()=>{
+  if($('chatMenuDialog').open)$('chatMenuDialog').close();
+  openAddParticipantDialog().catch(err=>{
+    alert(err?.message||'Не удалось открыть добавление участников')
+  })
+};
+$('cancelAddParticipant').onclick=()=>{
+  addParticipantContext=null;
+  $('addParticipantDialog').close()
+};
+$('confirmAddParticipant').onclick=()=>confirmAddParticipant();
+$('addParticipantDialog').addEventListener('click',event=>{
+  if(event.target===$('addParticipantDialog')){
+    addParticipantContext=null;
+    $('addParticipantDialog').close()
+  }
+});
+$('addParticipantDialog').addEventListener('close',()=>{
+  addParticipantContext=null;
+  $('addParticipantError').textContent=''
+});
 $('blockUserBtn').onclick=async()=>{
   if(active?.type!=='user')return;
   const userId=active.data.id;
