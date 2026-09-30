@@ -10,6 +10,9 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Set
@@ -61,6 +64,20 @@ SERVER_ADMIN_IDS = {
     for value in os.getenv("SVOI_SERVER_ADMIN_IDS", "").split(",")
     if value.strip().isdigit()
 }
+AI_API_BASE = os.getenv("AI_API_BASE", "").strip().rstrip("/")
+AI_API_KEY = os.getenv("AI_API_KEY", "").strip()
+AI_MODEL = os.getenv("AI_MODEL", "").strip()
+AI_SYSTEM_PROMPT = os.getenv(
+    "AI_SYSTEM_PROMPT",
+    "Ты AI-помощник администратора мессенджера «Свои». Отвечай по существу и на языке пользователя.",
+).strip()
+try:
+    AI_TIMEOUT_SECONDS = max(
+        5,
+        min(180, int(os.getenv("AI_TIMEOUT_SECONDS", "90"))),
+    )
+except Exception:
+    AI_TIMEOUT_SECONDS = 90
 APP_STARTED_AT = time.time()
 
 app = FastAPI(title="Свои", version="0.1.0")
@@ -667,6 +684,16 @@ class AdminUserRenameIn(BaseModel):
     display_name: str = Field(min_length=1, max_length=60)
 
 
+class AdminAIMessageIn(BaseModel):
+    role: str = Field(pattern=r"^(user|assistant)$")
+    content: str = Field(min_length=1, max_length=12000)
+
+
+class AdminAIChatIn(BaseModel):
+    messages: list[AdminAIMessageIn] = Field(min_length=1, max_length=24)
+    temperature: float = Field(default=0.7, ge=0, le=2)
+
+
 class GroupMemberAddIn(BaseModel):
     tag: str = Field(min_length=1, max_length=33)
 
@@ -1187,6 +1214,178 @@ def _bucket_counts(rows, start, step, bucket_count):
         if 0 <= index < bucket_count:
             values[index] += 1
     return values
+
+
+def _ai_configured() -> bool:
+    return bool(AI_API_BASE and AI_MODEL)
+
+
+def _ai_endpoint() -> str:
+    if AI_API_BASE.endswith("/chat/completions"):
+        return AI_API_BASE
+    return AI_API_BASE + "/chat/completions"
+
+
+def _ai_provider_name() -> str:
+    if not AI_API_BASE:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(AI_API_BASE)
+        return parsed.netloc or parsed.path
+    except Exception:
+        return ""
+
+
+def _ai_extract_text(payload: dict) -> str:
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except Exception as exc:
+        raise RuntimeError("AI-провайдер вернул неизвестный формат ответа") from exc
+
+    if isinstance(content, str):
+        value = content.strip()
+        if value:
+            return value
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text_value = item.get("text")
+                if isinstance(text_value, str) and text_value.strip():
+                    parts.append(text_value.strip())
+        if parts:
+            return "\n".join(parts)
+
+    raise RuntimeError("AI-провайдер вернул пустой ответ")
+
+
+def _ai_request_sync(messages: list[dict], temperature: float) -> str:
+    if not _ai_configured():
+        raise RuntimeError(
+            "AI не настроен на сервере. Укажи AI_API_BASE и AI_MODEL."
+        )
+
+    request_messages = []
+    if AI_SYSTEM_PROMPT:
+        request_messages.append(
+            {"role": "system", "content": AI_SYSTEM_PROMPT}
+        )
+    request_messages.extend(messages)
+
+    payload = json.dumps(
+        {
+            "model": AI_MODEL,
+            "messages": request_messages,
+            "temperature": temperature,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Svoi-Admin-AI/1.0",
+    }
+    if AI_API_KEY:
+        headers["Authorization"] = "Bearer " + AI_API_KEY
+
+    request = urllib.request.Request(
+        _ai_endpoint(),
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=AI_TIMEOUT_SECONDS,
+        ) as response:
+            raw = response.read(2 * 1024 * 1024)
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            raw_error = exc.read(4096).decode("utf-8", "replace")
+            parsed_error = json.loads(raw_error)
+            detail = str(
+                parsed_error.get("error", {}).get("message")
+                or parsed_error.get("detail")
+                or ""
+            ).strip()
+        except Exception:
+            detail = ""
+        message = f"AI-провайдер ответил HTTP {exc.code}"
+        if detail:
+            message += ": " + detail[:300]
+        raise RuntimeError(message) from exc
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        raise RuntimeError(
+            "Не удалось подключиться к AI-провайдеру"
+            + (f": {reason}" if reason else "")
+        ) from exc
+    except TimeoutError as exc:
+        raise RuntimeError("AI-провайдер не ответил вовремя") from exc
+
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError("AI-провайдер вернул некорректный JSON") from exc
+
+    return _ai_extract_text(data)
+
+
+@app.get("/api/admin/ai/status")
+def admin_ai_status(user=Depends(require_server_admin)):
+    return {
+        "configured": _ai_configured(),
+        "provider": _ai_provider_name(),
+        "model": AI_MODEL or None,
+        "has_api_key": bool(AI_API_KEY),
+    }
+
+
+@app.post("/api/admin/ai/chat")
+async def admin_ai_chat(
+    data: AdminAIChatIn,
+    user=Depends(require_server_admin),
+):
+    if not _ai_configured():
+        raise HTTPException(
+            503,
+            "AI не настроен. Добавь AI_API_BASE и AI_MODEL в /etc/svoi-chat.env.",
+        )
+
+    messages = [
+        {
+            "role": item.role,
+            "content": item.content.strip(),
+        }
+        for item in data.messages
+        if item.content.strip()
+    ]
+    if not messages:
+        raise HTTPException(400, "Сообщение пустое")
+
+    try:
+        reply = await asyncio.to_thread(
+            _ai_request_sync,
+            messages,
+            data.temperature,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            "Не удалось получить ответ AI-провайдера",
+        ) from exc
+
+    return {
+        "reply": reply,
+        "model": AI_MODEL,
+    }
 
 
 @app.get("/api/admin/overview")
