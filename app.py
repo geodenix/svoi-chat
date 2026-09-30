@@ -66,6 +66,7 @@ SERVER_ADMIN_IDS = {
 }
 AI_API_BASE = os.getenv("AI_API_BASE", "").strip().rstrip("/")
 AI_API_KEY = os.getenv("AI_API_KEY", "").strip()
+AI_AUTH_SCHEME = os.getenv("AI_AUTH_SCHEME", "Bearer").strip() or "Bearer"
 AI_MODEL = os.getenv("AI_MODEL", "").strip()
 AI_SYSTEM_PROMPT = os.getenv(
     "AI_SYSTEM_PROMPT",
@@ -1288,7 +1289,7 @@ def _ai_request_sync(messages: list[dict], temperature: float) -> str:
         "User-Agent": "Svoi-Admin-AI/1.0",
     }
     if AI_API_KEY:
-        headers["Authorization"] = "Bearer " + AI_API_KEY
+        headers["Authorization"] = AI_AUTH_SCHEME + " " + AI_API_KEY
 
     request = urllib.request.Request(
         _ai_endpoint(),
@@ -1343,6 +1344,7 @@ def admin_ai_status(user=Depends(require_server_admin)):
         "provider": _ai_provider_name(),
         "model": AI_MODEL or None,
         "has_api_key": bool(AI_API_KEY),
+        "auth_scheme": AI_AUTH_SCHEME,
     }
 
 
