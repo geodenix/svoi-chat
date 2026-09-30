@@ -223,6 +223,7 @@ main_activity.write_text(r'''package ru.svoi.mobile;
 
 import android.app.AlertDialog;
 import android.app.DownloadManager;
+import android.app.NotificationManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -323,6 +324,41 @@ public class MainActivity extends BridgeActivity {
             "svoi_open_active_call",
             false
         );
+
+        // Once the user accepts a native incoming call, immediately dismiss
+        // the high-priority CallStyle notification. Otherwise Samsung/Android
+        // can leave the large "call active" heads-up banner over the app,
+        // covering the chat header/back button.
+        if (openActiveCall) {
+            int notificationId = intent.getIntExtra(
+                "svoi_notification_id",
+                0
+            );
+            if (notificationId == 0 && path != null) {
+                try {
+                    Uri callUri = Uri.parse(APP_URL + path);
+                    String callId = callUri.getQueryParameter(
+                        "incoming_call"
+                    );
+                    if (callId != null && !callId.isEmpty()) {
+                        notificationId = Math.abs(
+                            ("incoming-call-" + callId).hashCode()
+                        );
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+
+            if (notificationId != 0) {
+                NotificationManager notificationManager =
+                    (NotificationManager) getSystemService(
+                        NOTIFICATION_SERVICE
+                    );
+                if (notificationManager != null) {
+                    notificationManager.cancel(notificationId);
+                }
+            }
+        }
 
         if (path != null && path.startsWith("/") && bridge != null) {
             final String targetUrl = APP_URL + path;
@@ -1552,6 +1588,7 @@ public class SvoiFirebaseMessagingService extends FirebaseMessagingService {
             acceptIntent.putExtra("svoi_url", acceptUrl);
             acceptIntent.putExtra("svoi_incoming_call", true);
             acceptIntent.putExtra("svoi_open_active_call", true);
+            acceptIntent.putExtra("svoi_notification_id", notificationId);
 
             Intent declineIntent = new Intent(this, CallActionReceiver.class);
             declineIntent.setAction("ru.svoi.mobile.REJECT_CALL");
