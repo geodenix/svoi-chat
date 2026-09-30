@@ -667,6 +667,10 @@ class AdminUserRenameIn(BaseModel):
     display_name: str = Field(min_length=1, max_length=60)
 
 
+class AdminUsernameRenameIn(BaseModel):
+    username: str = Field(min_length=3, max_length=33)
+
+
 class GroupMemberAddIn(BaseModel):
     tag: str = Field(min_length=1, max_length=33)
 
@@ -1509,6 +1513,67 @@ async def admin_rename_user(
     conn.execute(
         "UPDATE users SET display_name=? WHERE id=?",
         (display_name, target_user_id),
+    )
+    conn.commit()
+
+    row = conn.execute(
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.id=?""",
+        (target_user_id,),
+    ).fetchone()
+    user_data = user_json(row)
+    await _broadcast_profile(user_data)
+    return user_data
+
+
+@app.patch("/api/admin/users/{target_user_id}/username")
+async def admin_change_username(
+    target_user_id: int,
+    data: AdminUsernameRenameIn,
+    user=Depends(require_server_admin),
+    conn=Depends(db),
+):
+    username = data.username.strip()
+    if username.startswith("@"):
+        username = username[1:]
+    username = username.strip().lower()
+
+    if not re.fullmatch(r"[a-z0-9_.-]{3,32}", username):
+        raise HTTPException(
+            400,
+            "Ник должен содержать 3–32 символа: латинские буквы, цифры, _, . или -",
+        )
+
+    target = conn.execute(
+        "SELECT id,username FROM users WHERE id=?",
+        (target_user_id,),
+    ).fetchone()
+    if not target:
+        raise HTTPException(404, "Пользователь не найден")
+
+    current_username = str(target["username"]).strip().lower()
+    if (
+        int(target["id"]) not in SERVER_ADMIN_IDS
+        and current_username in SERVER_ADMIN_USERNAMES
+    ):
+        raise HTTPException(
+            409,
+            "Этот админ привязан к нику. Сначала закрепи права администратора по ID.",
+        )
+
+    existing = conn.execute(
+        "SELECT id FROM users WHERE username=? AND id<>?",
+        (username, target_user_id),
+    ).fetchone()
+    if existing:
+        raise HTTPException(409, "Такой ник уже занят")
+
+    conn.execute(
+        "UPDATE users SET username=? WHERE id=?",
+        (username, target_user_id),
     )
     conn.commit()
 
