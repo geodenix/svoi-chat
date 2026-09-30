@@ -2963,6 +2963,55 @@ async def history(
     return result
 
 
+@app.post("/api/messages/{other_id}/read")
+async def mark_private_messages_read(
+    other_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    if not conn.execute(
+        "SELECT 1 FROM users WHERE id=?",
+        (other_id,),
+    ).fetchone():
+        raise HTTPException(404, "Пользователь не найден")
+
+    unread_rows = conn.execute(
+        """SELECT id FROM messages
+           WHERE sender_id=? AND recipient_id=? AND read_at IS NULL
+           ORDER BY id""",
+        (other_id, user["id"]),
+    ).fetchall()
+
+    if not unread_rows:
+        return {"ok": True, "message_ids": [], "read_at": None}
+
+    seen_at = now_iso()
+    conn.execute(
+        """UPDATE messages
+           SET delivered_at=COALESCE(delivered_at, ?),
+               read_at=?
+           WHERE sender_id=? AND recipient_id=? AND read_at IS NULL""",
+        (seen_at, seen_at, other_id, user["id"]),
+    )
+    conn.commit()
+
+    message_ids = [int(row["id"]) for row in unread_rows]
+    await push(
+        other_id,
+        {
+            "type": "read_receipt",
+            "reader_id": user["id"],
+            "message_ids": message_ids,
+            "read_at": seen_at,
+        },
+    )
+    return {
+        "ok": True,
+        "message_ids": message_ids,
+        "read_at": seen_at,
+    }
+
+
 async def push(user_id: int, payload: dict) -> int:
     dead = []
     sent = 0
