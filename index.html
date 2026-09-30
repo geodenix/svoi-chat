@@ -1448,6 +1448,32 @@ async function renameAdminUser(item){
   }
 }
 
+async function changeAdminUsername(item){
+  const current=(item.username||'').trim();
+  const value=window.prompt('Новый ник пользователя',current?'@'+current:'');
+  if(value===null)return;
+  const username=value.trim().replace(/^@/,'').toLowerCase();
+  if(!/^[a-z0-9_.-]{3,32}$/.test(username)){
+    window.alert('Ник: 3–32 символа. Можно латинские буквы, цифры, _, . и -');
+    return
+  }
+  if(username===current.toLowerCase())return;
+  try{
+    const updated=await api('/api/admin/users/'+item.id+'/username',{
+      method:'PATCH',
+      body:{username}
+    });
+    item.username=updated.username;
+    await Promise.all([loadAdminPanel(),loadUsers()]);
+    if(Number(item.id)===Number(me?.id)){
+      me.username=updated.username
+    }
+    window.alert('Ник изменён на @'+updated.username+'. При следующем входе пользователь должен использовать новый ник.')
+  }catch(err){
+    window.alert(err.message||'Не удалось изменить ник пользователя')
+  }
+}
+
 function renderAdminUsers(items){
   const box=$('adminUsers');box.replaceChildren();
   if(!Array.isArray(items)||!items.length){
@@ -1464,7 +1490,10 @@ function renderAdminUsers(items){
     const edit=document.createElement('button');
     edit.type='button';edit.className='admin-user-edit';edit.textContent='✏️';edit.title='Изменить имя';
     edit.onclick=()=>renameAdminUser(item);
-    copy.append(strong,small);row.append(dot,copy,edit);box.append(row)
+    const editUsername=document.createElement('button');
+    editUsername.type='button';editUsername.className='admin-user-edit';editUsername.textContent='@';editUsername.title='Изменить ник';
+    editUsername.onclick=()=>changeAdminUsername(item);
+    copy.append(strong,small);row.append(dot,copy,edit,editUsername);box.append(row)
   }
 }
 
