@@ -4084,6 +4084,10 @@ function attachGroupTrack(track,participant,isLocal=false,publication=null){
       name.textContent=(participant.name||participant.identity||'Участник')
         +(isLocal?' · вы':'')
     }
+    for(const old of tile.querySelectorAll('video')){
+      try{old.pause()}catch{}
+      old.remove()
+    }
     const element=track.attach();
     element.autoplay=true;element.playsInline=true;
     if(isLocal){
@@ -4091,11 +4095,17 @@ function attachGroupTrack(track,participant,isLocal=false,publication=null){
       const frontCamera=(groupCallState?.facing||'user')==='user';
       element.classList.toggle('local-mirrored',frontCamera)
     }
-    for(const old of tile.querySelectorAll('video'))old.remove();
     tile.prepend(element)
   }else if(track.kind===LivekitClient.Track.Kind.Audio){
+    // После реконнекта LiveKit может быстро переиздать аудиотрек.
+    // Оставляем в плитке только один audio-элемент, иначе возможны эхо
+    // и двойное воспроизведение одного участника.
+    for(const old of tile.querySelectorAll('audio')){
+      try{old.pause()}catch{}
+      old.remove()
+    }
     const element=track.attach();
-    element.autoplay=true;element.style.display='none';
+    element.autoplay=true;element.playsInline=true;element.style.display='none';
     tile.append(element);
     applyAudioOutput(element).catch(()=>{})
   }
@@ -4117,18 +4127,40 @@ function detachGroupTrack(track,participant=null,publication=null){
 }
 
 function refreshGroupCount(){
-  if(!groupCallState?.room)return;
-  const count=1+groupCallState.room.remoteParticipants.size;
+  const state=groupCallState;
+  if(!state?.room)return;
+  const count=1+state.room.remoteParticipants.size;
+  if(state.lastParticipantCount===count)return;
+  state.lastParticipantCount=count;
   $('groupCallStatus').textContent=count+' / 10 участников';
   updateMiniCallBar()
 }
 
 function updateGroupActiveSpeakers(speakers=[]){
-  document.querySelectorAll('.group-tile.speaking')
-    .forEach(tile=>tile.classList.remove('speaking'));
-  for(const participant of speakers.slice(0,3)){
-    $(groupTileId(participant.identity))?.classList.add('speaking')
-  }
+  const state=groupCallState;
+  if(!state)return;
+  state.pendingSpeakers=speakers.slice(0,3);
+  if(state.speakerFrame)return;
+  state.speakerFrame=requestAnimationFrame(()=>{
+    if(groupCallState!==state)return;
+    state.speakerFrame=0;
+    const next=new Set(
+      (state.pendingSpeakers||[]).map(p=>String(p.identity||''))
+    );
+    const previous=state.activeSpeakerIds||new Set();
+
+    for(const identity of previous){
+      if(!next.has(identity)){
+        $(groupTileId(identity))?.classList.remove('speaking')
+      }
+    }
+    for(const identity of next){
+      if(!previous.has(identity)){
+        $(groupTileId(identity))?.classList.add('speaking')
+      }
+    }
+    state.activeSpeakerIds=next
+  })
 }
 
 function setGroupCallStatus(text){
@@ -4164,13 +4196,24 @@ async function recoverGroupCall(state){
   try{
     const credentials=await api('/api/groups/'+state.groupId+'/call-token',{
       method:'POST',
-      body:{video:!!state.video,invite:false}
+      body:{video:!state.cameraOff,invite:false}
     });
+
+    if(groupCallState!==state||state.manualLeave){
+      state.recovering=false;
+      return
+    }
 
     await state.room.connect(
       credentials.server_url,
       credentials.participant_token
     );
+
+    if(groupCallState!==state||state.manualLeave){
+      state.recovering=false;
+      try{state.room.disconnect()}catch{}
+      return
+    }
 
     await state.room.localParticipant.setMicrophoneEnabled(!state.muted);
     await state.room.localParticipant.setCameraEnabled(!state.cameraOff);
@@ -4231,10 +4274,21 @@ async function joinGroupCall(groupId,video=false,invite=false){
     room=new LivekitClient.Room({
       adaptiveStream:true,
       dynacast:true,
+      disconnectOnPageLeave:false,
+      audioCaptureDefaults:{
+        echoCancellation:true,
+        noiseSuppression:true,
+        autoGainControl:true
+      },
       videoCaptureDefaults:{
-        resolution:LivekitClient.VideoPresets.h720.resolution
+        resolution:LivekitClient.VideoPresets.h720.resolution,
+        frameRate:24
       }
     });
+
+    // Начинаем подготовку WebRTC-соединения сразу, пока строится интерфейс.
+    // Это сокращает задержку до фактического room.connect().
+    try{room.prepareConnection(credentials.server_url,credentials.participant_token)}catch{}
 
     groupCallState={
       room,
@@ -4246,7 +4300,11 @@ async function joinGroupCall(groupId,video=false,invite=false){
       reconnectAttempts:0,
       recovering:false,
       needsRecovery:false,
-      manualLeave:false
+      manualLeave:false,
+      lastParticipantCount:-1,
+      speakerFrame:0,
+      pendingSpeakers:[],
+      activeSpeakerIds:new Set()
     };
 
     $('groupCallGrid').replaceChildren();
@@ -4261,7 +4319,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
 
     room
       .on(LivekitClient.RoomEvent.TrackSubscribed,(track,publication,participant)=>{
-        attachGroupTrack(track,participant,false,publication);refreshGroupCount()
+        attachGroupTrack(track,participant,false,publication)
       })
       .on(LivekitClient.RoomEvent.TrackUnsubscribed,(track,publication,participant)=>{
         detachGroupTrack(track,participant,publication)
@@ -4290,6 +4348,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
           groupCallState.reconnectAttempts=0;
           groupCallState.recovering=false;
           groupCallState.needsRecovery=false;
+          groupCallState.lastParticipantCount=-1;
           refreshGroupCount()
         }
       })
@@ -4339,7 +4398,13 @@ function leaveGroupCall(disconnect=true){
   stopNativeCallService().catch(()=>{});
   resetNativeAudioRoute().catch(()=>{});
   const state=groupCallState;
-  if(state)state.manualLeave=true;
+  if(state){
+    state.manualLeave=true;
+    if(state.speakerFrame){
+      cancelAnimationFrame(state.speakerFrame);
+      state.speakerFrame=0
+    }
+  }
   groupCallState=null;
   if(state&&disconnect){
     try{state.room.disconnect()}catch{}
