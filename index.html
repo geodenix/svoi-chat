@@ -4546,6 +4546,17 @@ window.addEventListener('offline',()=>{
     groupCallState.needsRecovery=true;
     setGroupCallStatus('Нет интернета · ждём сеть')
   }
+
+  const call=currentCall;
+  if(call?.answered){
+    if(call.recoveryTimer){
+      clearTimeout(call.recoveryTimer);
+      call.recoveryTimer=null
+    }
+    call.recovering=false;
+    $('callStatus').textContent='Нет интернета · ждём сеть';
+    updateMiniCallBar()
+  }
 });
 
 window.addEventListener('online',()=>{
@@ -4553,6 +4564,15 @@ window.addEventListener('online',()=>{
   if(state&&state.needsRecovery&&!state.manualLeave){
     setGroupCallStatus('Интернет появился · переподключаемся…');
     recoverGroupCall(state).catch(()=>{})
+  }
+
+  const call=currentCall;
+  if(
+    call?.answered
+    && call.pc
+    && !['connected','closed'].includes(call.pc.connectionState)
+  ){
+    schedulePrivateCallRecovery(call,350)
   }
 });
 
@@ -5070,8 +5090,18 @@ function resetCallUi(){
 
 async function getCallMedia(video){
   const request=navigator.mediaDevices.getUserMedia({
-    audio:true,
-    video:video?{facingMode:{ideal:cameraFacing}}:false
+    audio:{
+      echoCancellation:true,
+      noiseSuppression:true,
+      autoGainControl:true,
+      channelCount:{ideal:1}
+    },
+    video:video?{
+      facingMode:{ideal:cameraFacing},
+      width:{ideal:1280,max:1280},
+      height:{ideal:720,max:720},
+      frameRate:{ideal:24,max:30}
+    }:false
   });
   const timeout=new Promise((_,reject)=>setTimeout(()=>{
     const err=new Error(video?'Камера не ответила. Проверь разрешение камеры.':'Микрофон не ответил. Проверь разрешение.');
@@ -5101,14 +5131,29 @@ async function waitForStableSignaling(pc,timeoutMs=3500){
 async function recoverPrivateCallConnection(call){
   if(!call||currentCall!==call||!call.answered||call.pc?.signalingState==='closed')return;
   if(call.recovering)return;
+  if((call.recoveryAttempts||0)>=5){
+    $('callStatus').textContent='Связь потеряна';
+    updateMiniCallBar();
+    return
+  }
+
   call.recovering=true;
   call.recoveryAttempts=(call.recoveryAttempts||0)+1;
+  const attempt=call.recoveryAttempts;
   $('callStatus').textContent='Восстанавливаем связь…';
   updateMiniCallBar();
 
   try{
+    // Небольшая прогрессивная пауза даёт браузеру/Android время
+    // самостоятельно восстановить маршрут после переключения сети.
+    if(attempt>1){
+      await new Promise(resolve=>setTimeout(resolve,Math.min(2600,500*attempt)))
+    }
+    if(currentCall!==call||call.pc?.signalingState==='closed')return;
+
     await waitForSocketOpen(7000);
     if(currentCall!==call)return;
+
     if(call.pc.connectionState==='connected'){
       clearPrivateRecovery(call);
       $('callStatus').textContent='Соединено';
@@ -5116,13 +5161,17 @@ async function recoverPrivateCallConnection(call){
       return
     }
 
-    const stable=await waitForStableSignaling(call.pc);
+    const stable=await waitForStableSignaling(call.pc,4200);
     if(!stable)throw new Error('Сигнализация WebRTC занята');
+    if(currentCall!==call)return;
 
     try{call.pc.restartIce?.()}catch{}
     const offer=await call.pc.createOffer({iceRestart:true});
+    if(currentCall!==call)return;
     await call.pc.setLocalDescription(offer);
     await waitForSocketOpen(7000);
+    if(currentCall!==call)return;
+
     wsSend({
       type:'call_video_offer',
       to_user_id:call.peerId,
@@ -5142,21 +5191,19 @@ async function recoverPrivateCallConnection(call){
         && !['connected','closed'].includes(call.pc.connectionState)
       ){
         call.recovering=false;
-        if((call.recoveryAttempts||0)<4){
-          recoverPrivateCallConnection(call).catch(()=>{})
-        }else{
-          $('callStatus').textContent='Связь потеряна';
-          updateMiniCallBar()
-        }
+        recoverPrivateCallConnection(call).catch(()=>{})
       }
-    },6500)
+    },7000)
   }catch{
     call.recovering=false;
-    if(currentCall===call&&(call.recoveryAttempts||0)<4){
-      call.recoveryTimer=setTimeout(
-        ()=>recoverPrivateCallConnection(call).catch(()=>{}),
-        1200
-      )
+    if(currentCall===call&&(call.recoveryAttempts||0)<5){
+      const retryDelay=Math.min(3500,900+600*(call.recoveryAttempts||0));
+      if(call.recoveryTimer)clearTimeout(call.recoveryTimer);
+      call.recoveryTimer=setTimeout(()=>{
+        if(currentCall!==call)return;
+        call.recoveryTimer=null;
+        recoverPrivateCallConnection(call).catch(()=>{})
+      },retryDelay)
     }
   }
 }
@@ -5176,20 +5223,38 @@ function schedulePrivateCallRecovery(call,delay=900){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new'};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks())pc.addTrack(track,stream);
   $('localVideo').srcObject=stream;
   updatePrivateLocalMirror();
   updatePrivateVideoControls();
   pc.ontrack=e=>{
-    const stream=e.streams?.[0];
-    if(stream){
-      currentCall.remoteMediaStream=stream;
-      $('remoteVideo').srcObject=stream;
+    const call=currentCall;
+    if(!call||call.pc!==pc)return;
+
+    const incoming=e.streams?.[0]||null;
+    if(incoming){
+      call.remoteMediaStream=incoming;
+      if($('remoteVideo').srcObject!==incoming){
+        $('remoteVideo').srcObject=incoming
+      }
       applyAudioOutput($('remoteVideo')).catch(()=>{});
-      $('remoteVideo').play().catch(()=>{});
+      $('remoteVideo').play().catch(()=>{})
+    }else if(e.track){
+      if(!call.remoteMediaStream){
+        call.remoteMediaStream=new MediaStream()
+      }
+      if(!call.remoteMediaStream.getTracks().some(track=>track.id===e.track.id)){
+        call.remoteMediaStream.addTrack(e.track)
+      }
+      if($('remoteVideo').srcObject!==call.remoteMediaStream){
+        $('remoteVideo').srcObject=call.remoteMediaStream
+      }
+      applyAudioOutput($('remoteVideo')).catch(()=>{});
+      $('remoteVideo').play().catch(()=>{})
     }
+
     if(e.track?.kind==='video'){
       exitEarMode();
       currentCall.remoteVideo=true;
@@ -5215,6 +5280,9 @@ async function createPeer(peerId,peerName,id,video,stream){
     const call=currentCall;
     if(!call||call.pc!==pc)return;
     const state=pc.connectionState;
+    if(call.lastConnectionState===state)return;
+    call.lastConnectionState=state;
+
     if(state==='connected'){
       call.answered=true;
       clearPrivateRecovery(call);
@@ -5225,13 +5293,15 @@ async function createPeer(peerId,peerName,id,video,stream){
       updateEarModeButton()
     }else if(state==='connecting'){
       stopCallPing();
-      $('callStatus').textContent='Соединение…'
+      $('callStatus').textContent='Соединение…';
+      updateMiniCallBar()
     }else if(state==='disconnected'){
       stopCallPing();
-      schedulePrivateCallRecovery(call,1800)
+      // Короткий обрыв WebRTC часто восстанавливает сам.
+      schedulePrivateCallRecovery(call,2200)
     }else if(state==='failed'){
       stopCallPing();
-      schedulePrivateCallRecovery(call,700)
+      schedulePrivateCallRecovery(call,500)
     }else if(state==='closed'){
       stopCallPing();
       clearPrivateRecovery(call);
