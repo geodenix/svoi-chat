@@ -277,7 +277,7 @@ body.drawer-open{overflow:hidden}
     <button id="groupSpeakerBtn" type="button" title="Аудиовыход: обычный">🔈</button>
     <button id="groupCameraBtn" type="button" title="Камера">📷</button>
     <button id="groupSwitchCameraBtn" type="button" title="Сменить камеру">🔄</button>
-    <button id="groupScreenShareBtn" type="button" title="Демонстрация экрана">🖥️</button>
+    <button id="groupScreenShareBtn" class="hidden" type="button" style="display:none!important" disabled aria-hidden="true">🖥️</button>
     <button id="groupEndBtn" class="end" type="button" title="Выйти">☎</button>
   </div>
 </div>
@@ -308,7 +308,7 @@ body.drawer-open{overflow:hidden}
       <button id="privateSizeUp" class="round-call video-size-btn hidden" type="button" title="Увеличить видео">+</button>
       <button id="cameraCall" class="round-call" type="button" title="Камера">📷</button>
       <button id="switchCamera" class="round-call" type="button" title="Сменить камеру">🔄</button>
-      <button id="screenShareCall" class="round-call" type="button" title="Демонстрация экрана">🖥️</button>
+      <button id="screenShareCall" class="round-call hidden" type="button" style="display:none!important" disabled aria-hidden="true">🖥️</button>
       <button id="endCall" class="round-call end" type="button" title="Завершить">☎</button>
     </div>
   </div>
@@ -3894,7 +3894,7 @@ function nativeScreenShareSupported(){
 }
 
 function screenShareSupported(){
-  return webScreenShareSupported()||nativeScreenShareSupported()
+  return false
 }
 
 function waitForIceGatheringComplete(pc,timeoutMs=5500){
@@ -5131,7 +5131,7 @@ async function toggleGroupScreenShare(){
   }
 }
 
-$('groupScreenShareBtn').onclick=()=>toggleGroupScreenShare();
+$('groupScreenShareBtn').onclick=null;
 
 $('groupCameraBtn').onclick=async()=>{
   if(!groupCallState)return;
@@ -5839,7 +5839,8 @@ function showCallUi(name,status,video,incoming=false,avatarUrl=null,nativeSystem
     applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
   }
   $('cameraCall').classList.remove('hidden');
-  $('screenShareCall').classList.remove('hidden');
+  $('screenShareCall').classList.add('hidden');
+  $('screenShareCall').disabled=true;
   updatePrivateVideoControls()
 }
 
@@ -6519,7 +6520,7 @@ $('speakerCall').onclick=()=>chooseSpeakerOutput();
 $('privateSizeDown').onclick=()=>changePrivateParticipantSize(-1);
 $('privateSizeUp').onclick=()=>changePrivateParticipantSize(1);
 $('earModeBtn').onclick=()=>enterEarMode();
-$('screenShareCall').onclick=()=>startPrivateScreenShare();
+$('screenShareCall').onclick=null;
 
 const earLock=$('earLock');
 earLock.addEventListener('pointerdown',beginEarUnlock);
@@ -6908,7 +6909,8 @@ function connectWs(){
   };
   socket.onmessage=e=>{
     const data=JSON.parse(e.data);
-    if(['call_offer','call_answer','call_video_offer','call_video_answer','call_screen_state','ice_candidate','call_reject','call_end','call_unavailable','native_screen_offer','native_screen_answer','native_screen_ice','native_screen_stop'].includes(data.type)){
+    if(['call_screen_state','native_screen_offer','native_screen_answer','native_screen_ice','native_screen_stop'].includes(data.type))return;
+    if(['call_offer','call_answer','call_video_offer','call_video_answer','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
       handleCallSignal(data);return
     }
     if(data.type==='group_call_invite'){
