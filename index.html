@@ -533,6 +533,7 @@ const $=id=>document.getElementById(id);
 let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],callHistory=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false,foundUser=null;
 let chatBackgroundRequest=0,currentChatBackgroundUrl='';
 let currentMessages=[],typingStopTimer=null,lastTypingSentAt=0;
+let privateChatLoadRequest=0,privateUsersRefreshTimer=null;
 let forwardSource=null,replySource=null,editSource=null,messageActionSource=null;
 const incomingTyping=new Map();
 let messageRecorder=null,messageRecordStream=null,messageRecordChunks=[],messageRecordKind=null,messageRecordTimer=null,messageRecordStartedAt=0,messageRecordBlob=null,messageRecordMime='',messageRecordTarget=null,messageRecordAction=null,messageRecordObjectUrl='';
@@ -1787,13 +1788,45 @@ async function openUser(u){
   if($('chatBackgroundDialog').open)$('chatBackgroundDialog').close();
   if($('groupMembersDialog').open)$('groupMembersDialog').close();
   if($('groupRenameDialog').open)$('groupRenameDialog').close();
-  active={type:'user',data:u};$('app').classList.add('chat-open');$('chatHead').classList.remove('hidden');$('composer').classList.remove('hidden');
-  updateHead();renderUsers();renderGroups();restoreCurrentDraft();loadCurrentChatBackground().catch(()=>{});
-  const msgs=await api('/api/messages/'+u.id);
-  active.data={...active.data,unread_count:0};
-  users=users.map(item=>Number(item.id)===Number(u.id)?{...item,unread_count:0}:item);
-  renderUsers();updateAppBadge().catch(()=>{});
-  renderMessages(msgs);$('text').focus()
+
+  const request=++privateChatLoadRequest;
+  const userId=Number(u.id);
+  active={type:'user',data:u};
+  $('app').classList.add('chat-open');
+  $('chatHead').classList.remove('hidden');
+  $('composer').classList.remove('hidden');
+  updateHead();
+  renderUsers();
+  renderGroups();
+  restoreCurrentDraft();
+  loadCurrentChatBackground().catch(()=>{});
+
+  const box=$('messages');
+  box.innerHTML='<div class="empty">Загрузка переписки…</div>';
+
+  try{
+    const msgs=await api('/api/messages/'+userId);
+    if(
+      request!==privateChatLoadRequest
+      || active?.type!=='user'
+      || Number(active.data.id)!==userId
+    )return;
+
+    active.data={...active.data,unread_count:0};
+    users=users.map(item=>
+      Number(item.id)===userId
+        ?{...item,unread_count:0}
+        :item
+    );
+    renderUsers();
+    updateAppBadge().catch(()=>{});
+    renderMessages(msgs);
+    $('text').focus()
+  }catch(err){
+    if(request!==privateChatLoadRequest)return;
+    box.innerHTML='<div class="empty">Не удалось загрузить переписку</div>';
+    throw err
+  }
 }
 
 async function openGroup(g){
@@ -2960,17 +2993,79 @@ function msgNode(m){
   d.append(meta);return d
 }
 
+function messagesNearBottom(box=$('messages'),threshold=140){
+  if(!box)return true;
+  return box.scrollHeight-box.scrollTop-box.clientHeight<=threshold
+}
+
+function scrollMessagesToBottom(behavior='auto'){
+  const box=$('messages');
+  if(!box)return;
+  if(typeof box.scrollTo==='function'){
+    box.scrollTo({top:box.scrollHeight,behavior})
+  }else{
+    box.scrollTop=box.scrollHeight
+  }
+}
+
 function renderMessages(items){
   currentMessages=[...items];
-  const box=$('messages');box.replaceChildren();
-  if(!items.length)box.innerHTML='<div class="empty">Сообщений пока нет. Напиши первым.</div>';
-  else for(const m of items)box.append(msgNode(m));box.scrollTop=box.scrollHeight
+  const box=$('messages');
+  box.replaceChildren();
+
+  if(!items.length){
+    box.innerHTML='<div class="empty">Сообщений пока нет. Напиши первым.</div>';
+  }else{
+    const fragment=document.createDocumentFragment();
+    for(const m of items)fragment.append(msgNode(m));
+    box.append(fragment)
+  }
+
+  requestAnimationFrame(()=>scrollMessagesToBottom('auto'))
 }
 
 function appendMessage(m){
-  if(currentMessages.some(item=>Number(item.id)===Number(m.id)))return;
+  if(currentMessages.some(item=>Number(item.id)===Number(m.id)))return false;
+
+  const box=$('messages');
+  const shouldFollow=
+    Number(m.sender_id)===Number(me?.id)
+    || messagesNearBottom(box);
+
   currentMessages.push(m);
-  const box=$('messages');box.querySelector('.empty')?.remove();box.append(msgNode(m));box.scrollTop=box.scrollHeight
+  box.querySelector('.empty')?.remove();
+  box.append(msgNode(m));
+
+  if(shouldFollow){
+    requestAnimationFrame(()=>scrollMessagesToBottom('smooth'))
+  }
+  return true
+}
+
+async function markPrivateChatRead(userId){
+  const id=Number(userId);
+  if(!id)return;
+  const result=await api('/api/messages/'+id+'/read',{method:'POST'});
+  if(
+    active?.type==='user'
+    && Number(active.data.id)===id
+    && (result?.message_ids||[]).length
+  ){
+    const ids=new Set(result.message_ids.map(Number));
+    currentMessages=currentMessages.map(item=>
+      ids.has(Number(item.id))
+        ?{...item,read_at:result.read_at||item.read_at}
+        :item
+    )
+  }
+}
+
+function schedulePrivateUsersRefresh(delay=180){
+  if(privateUsersRefreshTimer)clearTimeout(privateUsersRefreshTimer);
+  privateUsersRefreshTimer=setTimeout(()=>{
+    privateUsersRefreshTimer=null;
+    loadUsers().catch(()=>{})
+  },delay)
 }
 
 function syncSend(){
@@ -5988,17 +6083,29 @@ function connectWs(){
     }
     if(data.type==='message'){
       const m=data.message;
-      if(m.sender_id!==me?.id&&!isChatMuted('user',m.sender_id)){
+      const senderId=Number(m.sender_id);
+      const recipientId=Number(m.recipient_id);
+      const activeUserId=active?.type==='user'
+        ?Number(active.data.id)
+        :0;
+
+      if(senderId!==Number(me?.id)&&!isChatMuted('user',senderId)){
         playMessageSound().catch(()=>{});
         vibrateMessage()
       }
-      if(active?.type==='user'&&(m.sender_id===active.data.id||m.recipient_id===active.data.id)){
+
+      if(
+        active?.type==='user'
+        && (senderId===activeUserId||recipientId===activeUserId)
+      ){
         appendMessage(m);
-        if(m.sender_id===active.data.id){
-          const activeUserId=Number(active.data.id);
-          api('/api/messages/'+activeUserId).then(items=>{
-            if(active?.type==='user'&&Number(active.data.id)===activeUserId){
-              renderMessages(items);
+
+        if(senderId===activeUserId){
+          markPrivateChatRead(activeUserId).then(()=>{
+            if(
+              active?.type==='user'
+              && Number(active.data.id)===activeUserId
+            ){
               active.data={...active.data,unread_count:0};
               users=users.map(item=>
                 Number(item.id)===activeUserId
@@ -6011,18 +6118,11 @@ function connectWs(){
           }).catch(()=>{})
         }
       }
-      loadUsers().then(()=>{
-        if(active?.type==='user'&&Number(active.data.id)===Number(m.sender_id)){
-          active.data={...active.data,unread_count:0};
-          users=users.map(item=>
-            Number(item.id)===Number(m.sender_id)
-              ?{...item,unread_count:0}
-              :item
-          );
-          renderUsers();
-          updateAppBadge().catch(()=>{})
-        }
-      }).catch(()=>{})
+
+      // Обновляем превью/счётчики списка диалогов пачкой, а не на каждое
+      // сообщение отдельно.
+      schedulePrivateUsersRefresh()
+      return
     }
     if(data.type==='message_edited'){
       const m=data.message;
@@ -6044,13 +6144,26 @@ function connectWs(){
       return
     }
     if(data.type==='read_receipt'){
-      if(active?.type==='user'&&data.reader_id===active.data.id){
-        for(const id of data.message_ids||[]){
+      if(
+        active?.type==='user'
+        && Number(data.reader_id)===Number(active.data.id)
+      ){
+        const ids=new Set((data.message_ids||[]).map(Number));
+        currentMessages=currentMessages.map(item=>
+          ids.has(Number(item.id))
+            ?{...item,read_at:data.read_at||item.read_at}
+            :item
+        );
+        for(const id of ids){
           const bubble=document.querySelector('.bubble[data-message-id="'+id+'"]');
           const receipt=bubble?.querySelector('.receipt');
-          if(receipt){receipt.textContent='✓✓ прочитано';receipt.classList.add('read')}
+          if(receipt){
+            receipt.textContent='✓✓ прочитано';
+            receipt.classList.add('read')
+          }
         }
       }
+      return
     }
     if(data.type==='group_message'){
       const m=data.message;
