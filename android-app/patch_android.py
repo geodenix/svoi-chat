@@ -1752,9 +1752,12 @@ audio_route_plugin = Path(
 audio_route_plugin.write_text(r'''package ru.svoi.mobile;
 
 import android.content.Context;
+import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -1768,10 +1771,64 @@ import java.util.List;
 public class NativeAudioRoutePlugin extends Plugin {
     private Integer previousMode = null;
     private Boolean previousSpeakerphone = null;
+    private Boolean previousBluetoothSco = null;
+    private boolean routingActive = false;
+    private boolean speakerForced = false;
+    private AudioDeviceCallback deviceCallback = null;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private AudioManager audioManager() {
         return (AudioManager)
             getContext().getSystemService(Context.AUDIO_SERVICE);
+    }
+
+    @Override
+    public void load() {
+        super.load();
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return;
+        }
+
+        AudioManager manager = audioManager();
+        if (manager == null) {
+            return;
+        }
+
+        deviceCallback = new AudioDeviceCallback() {
+            @Override
+            public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
+                scheduleAutomaticRoute();
+            }
+
+            @Override
+            public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
+                scheduleAutomaticRoute();
+            }
+        };
+
+        try {
+            manager.registerAudioDeviceCallback(deviceCallback, mainHandler);
+        } catch (Exception ignored) {
+            deviceCallback = null;
+        }
+    }
+
+    private void scheduleAutomaticRoute() {
+        if (!routingActive || speakerForced) {
+            return;
+        }
+
+        mainHandler.removeCallbacksAndMessages(null);
+        mainHandler.postDelayed(() -> {
+            AudioManager manager = audioManager();
+            if (manager == null || !routingActive || speakerForced) {
+                return;
+            }
+            try {
+                routePreferred(manager);
+            } catch (Exception ignored) {
+            }
+        }, 350);
     }
 
     private void rememberState(AudioManager manager) {
@@ -1781,6 +1838,28 @@ public class NativeAudioRoutePlugin extends Plugin {
         if (previousSpeakerphone == null) {
             previousSpeakerphone = manager.isSpeakerphoneOn();
         }
+        if (
+            previousBluetoothSco == null
+            && Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+        ) {
+            previousBluetoothSco = manager.isBluetoothScoOn();
+        }
+    }
+
+    private boolean isBluetoothCommunicationType(int type) {
+        if (type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
+            return true;
+        }
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+            && type == AudioDeviceInfo.TYPE_BLE_HEADSET
+        ) {
+            return true;
+        }
+        return (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+            && type == AudioDeviceInfo.TYPE_HEARING_AID
+        );
     }
 
     private AudioDeviceInfo findCommunicationDevice(
@@ -1802,6 +1881,107 @@ public class NativeAudioRoutePlugin extends Plugin {
         return null;
     }
 
+    private AudioDeviceInfo findPreferredBluetoothDevice(
+        AudioManager manager
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return null;
+        }
+
+        AudioDeviceInfo best = null;
+        int bestPriority = -1;
+
+        for (AudioDeviceInfo device : manager.getAvailableCommunicationDevices()) {
+            int type = device.getType();
+            int priority = -1;
+
+            if (type == AudioDeviceInfo.TYPE_BLE_HEADSET) {
+                priority = 30;
+            } else if (type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
+                priority = 20;
+            } else if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                && type == AudioDeviceInfo.TYPE_HEARING_AID
+            ) {
+                priority = 10;
+            }
+
+            if (priority > bestPriority) {
+                best = device;
+                bestPriority = priority;
+            }
+        }
+
+        return best;
+    }
+
+    private boolean hasLegacyBluetoothHeadset(AudioManager manager) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return false;
+        }
+
+        try {
+            AudioDeviceInfo[] devices =
+                manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+
+            for (AudioDeviceInfo device : devices) {
+                int type = device.getType();
+                if (
+                    type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                    || type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+                ) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+
+        return false;
+    }
+
+    private void stopLegacyBluetooth(AudioManager manager) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return;
+        }
+
+        try {
+            manager.setBluetoothScoOn(false);
+        } catch (Exception ignored) {
+        }
+        try {
+            manager.stopBluetoothSco();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private boolean routeBluetooth(AudioManager manager) {
+        manager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AudioDeviceInfo bluetooth =
+                findPreferredBluetoothDevice(manager);
+            if (bluetooth == null) {
+                return false;
+            }
+
+            manager.setSpeakerphoneOn(false);
+            return manager.setCommunicationDevice(bluetooth);
+        }
+
+        if (!hasLegacyBluetoothHeadset(manager)) {
+            return false;
+        }
+
+        manager.setSpeakerphoneOn(false);
+        try {
+            manager.startBluetoothSco();
+            manager.setBluetoothScoOn(true);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private boolean routeSpeaker(AudioManager manager) {
         manager.setMode(AudioManager.MODE_IN_COMMUNICATION);
 
@@ -1813,6 +1993,8 @@ public class NativeAudioRoutePlugin extends Plugin {
             if (speaker != null && manager.setCommunicationDevice(speaker)) {
                 return true;
             }
+        } else {
+            stopLegacyBluetooth(manager);
         }
 
         manager.setSpeakerphoneOn(true);
@@ -1831,10 +2013,47 @@ public class NativeAudioRoutePlugin extends Plugin {
                 return true;
             }
             manager.clearCommunicationDevice();
+            return true;
         }
 
+        stopLegacyBluetooth(manager);
         manager.setSpeakerphoneOn(false);
         return !manager.isSpeakerphoneOn();
+    }
+
+    private boolean routePreferred(AudioManager manager) {
+        if (routeBluetooth(manager)) {
+            return true;
+        }
+        return routeEarpiece(manager);
+    }
+
+    private String currentRoute(AudioManager manager) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AudioDeviceInfo current = manager.getCommunicationDevice();
+            if (current != null) {
+                int type = current.getType();
+                if (isBluetoothCommunicationType(type)) {
+                    return "bluetooth";
+                }
+                if (type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                    return "speaker";
+                }
+                if (type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE) {
+                    return "earpiece";
+                }
+                return "device";
+            }
+        } else {
+            try {
+                if (manager.isBluetoothScoOn()) {
+                    return "bluetooth";
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        return manager.isSpeakerphoneOn() ? "speaker" : "earpiece";
     }
 
     @PluginMethod
@@ -1847,16 +2066,33 @@ public class NativeAudioRoutePlugin extends Plugin {
 
         boolean enabled = call.getBoolean("enabled", false);
         rememberState(manager);
+        routingActive = true;
+        speakerForced = enabled;
 
         try {
             boolean applied = enabled
                 ? routeSpeaker(manager)
-                : routeEarpiece(manager);
+                : routePreferred(manager);
 
+            String route = currentRoute(manager);
             JSObject result = new JSObject();
             result.put("speaker", enabled);
             result.put("applied", applied);
+            result.put("route", route);
+            result.put("bluetooth", "bluetooth".equals(route));
             result.put("mode", manager.getMode());
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                AudioDeviceInfo current = manager.getCommunicationDevice();
+                if (current != null) {
+                    result.put("deviceType", current.getType());
+                    result.put(
+                        "deviceName",
+                        String.valueOf(current.getProductName())
+                    );
+                }
+            }
+
             call.resolve(result);
         } catch (Exception error) {
             call.reject(
@@ -1876,45 +2112,68 @@ public class NativeAudioRoutePlugin extends Plugin {
         }
 
         JSObject result = new JSObject();
-        boolean speaker = manager.isSpeakerphoneOn();
+        String route = currentRoute(manager);
+        result.put("route", route);
+        result.put("bluetooth", "bluetooth".equals(route));
+        result.put("speaker", "speaker".equals(route));
+        result.put("mode", manager.getMode());
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             AudioDeviceInfo current = manager.getCommunicationDevice();
             if (current != null) {
-                speaker = current.getType()
-                    == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER;
                 result.put("deviceType", current.getType());
-                result.put("deviceName", String.valueOf(current.getProductName()));
+                result.put(
+                    "deviceName",
+                    String.valueOf(current.getProductName())
+                );
             }
         }
 
-        result.put("speaker", speaker);
-        result.put("mode", manager.getMode());
         call.resolve(result);
+    }
+
+    private void restoreState(AudioManager manager) {
+        routingActive = false;
+        speakerForced = false;
+        mainHandler.removeCallbacksAndMessages(null);
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                manager.clearCommunicationDevice();
+            } else {
+                stopLegacyBluetooth(manager);
+                if (Boolean.TRUE.equals(previousBluetoothSco)) {
+                    try {
+                        manager.startBluetoothSco();
+                        manager.setBluetoothScoOn(true);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+
+            if (previousSpeakerphone != null) {
+                manager.setSpeakerphoneOn(previousSpeakerphone);
+            } else {
+                manager.setSpeakerphoneOn(false);
+            }
+
+            if (previousMode != null) {
+                manager.setMode(previousMode);
+            }
+        } catch (Exception ignored) {
+        }
+
+        previousMode = null;
+        previousSpeakerphone = null;
+        previousBluetoothSco = null;
     }
 
     @PluginMethod
     public void reset(PluginCall call) {
         AudioManager manager = audioManager();
         if (manager != null) {
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    manager.clearCommunicationDevice();
-                }
-                if (previousSpeakerphone != null) {
-                    manager.setSpeakerphoneOn(previousSpeakerphone);
-                } else {
-                    manager.setSpeakerphoneOn(false);
-                }
-                if (previousMode != null) {
-                    manager.setMode(previousMode);
-                }
-            } catch (Exception ignored) {
-            }
+            restoreState(manager);
         }
-
-        previousMode = null;
-        previousSpeakerphone = null;
 
         JSObject result = new JSObject();
         result.put("reset", true);
@@ -1924,22 +2183,23 @@ public class NativeAudioRoutePlugin extends Plugin {
     @Override
     protected void handleOnDestroy() {
         AudioManager manager = audioManager();
-        if (manager != null) {
+
+        if (
+            manager != null
+            && deviceCallback != null
+            && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+        ) {
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    manager.clearCommunicationDevice();
-                }
-                if (previousSpeakerphone != null) {
-                    manager.setSpeakerphoneOn(previousSpeakerphone);
-                }
-                if (previousMode != null) {
-                    manager.setMode(previousMode);
-                }
+                manager.unregisterAudioDeviceCallback(deviceCallback);
             } catch (Exception ignored) {
             }
         }
-        previousMode = null;
-        previousSpeakerphone = null;
+        deviceCallback = null;
+
+        if (manager != null) {
+            restoreState(manager);
+        }
+
         super.handleOnDestroy();
     }
 }

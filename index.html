@@ -3870,8 +3870,8 @@ function updateSpeakerButtons(){
     button.textContent=callSpeakerMode?'🔊':'🔈';
     button.classList.toggle('off',callSpeakerMode);
     button.title=callSpeakerMode
-      ?'Громкая связь включена · нажми для обычного режима'
-      :'Обычный режим · нажми для громкой связи'
+      ?'Громкая связь включена · нажми для авто-режима'
+      :'Авто: Bluetooth при подключении · иначе разговорный динамик'
   }
   syncNativeProximity().catch(()=>{})
 }
