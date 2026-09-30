@@ -65,11 +65,6 @@
 .admin-service strong,.admin-user-copy{min-width:0;flex:1}.admin-user-copy strong,.admin-user-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.admin-user-copy small{color:#8fa3be;margin-top:2px}
 .admin-service-state{font-size:11px;font-weight:800;padding:4px 8px;border-radius:999px;background:#35445a;color:#d5deeb}.admin-service-state.active{background:#214f39;color:#aef0c8}.admin-service-state.bad{background:#65313a;color:#ffd1d6}
 .admin-user-online{width:9px;height:9px;border-radius:50%;background:#55667e;flex:0 0 9px}.admin-user-online.on{background:#45d78e}.admin-user-edit{flex:0 0 auto;border:1px solid #31527a;background:#142a46;color:#dce8f8;border-radius:10px;width:36px;height:36px;padding:0;font-size:16px}.admin-user-edit:active{background:#21456f}
-.admin-ai-status{font-size:12px;color:#8fa3be;margin:0 0 8px}.admin-ai-status.ok{color:#74dda5}.admin-ai-status.error{color:#ffaaaa}
-.admin-ai-messages{height:320px;max-height:44dvh;overflow:auto;display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid #29415f;border-radius:15px;background:#0d1a2b}
-.admin-ai-message{max-width:88%;padding:10px 12px;border-radius:15px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.35;font-size:14px}.admin-ai-message.user{align-self:flex-end;background:#245a91}.admin-ai-message.assistant{align-self:flex-start;background:#1a2e47}.admin-ai-message.error{align-self:stretch;max-width:none;background:#5b2931;color:#ffd7dc}
-.admin-ai-form{display:flex;gap:8px;margin-top:9px;align-items:flex-end}.admin-ai-form textarea{min-width:0;flex:1;resize:none;min-height:46px;max-height:140px;border:1px solid #354b68;background:#0f1d30;color:#fff;border-radius:13px;padding:11px 12px;font:inherit}.admin-ai-form button{width:48px;height:48px;flex:0 0 48px;border:0;border-radius:14px;background:#2b86fa;color:#fff;font-size:22px}.admin-ai-form button:disabled{opacity:.5}
-.admin-ai-clear{border:0;border-radius:10px;background:#203552;color:#fff;padding:7px 10px;font-size:12px}
 .admin-stats-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}.admin-stats-head h3{margin:0}.admin-period-tabs{display:flex;gap:6px}.admin-period-tabs button{border:1px solid #31527a;background:#142a46;color:#aebfd4;border-radius:9px;padding:7px 10px;font-size:12px;font-weight:750}.admin-period-tabs button.active{background:#2b86fa;color:#fff;border-color:#2b86fa}
 .admin-chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.admin-chart-card{min-width:0;border:1px solid #29415f;background:#122238;border-radius:15px;padding:11px}.admin-chart-title{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:5px}.admin-chart-title strong{font-size:14px}.admin-chart-title span{font-size:12px;color:#9fb2ca;white-space:nowrap}.admin-chart-card svg{display:block;width:100%;height:165px;overflow:visible}.admin-chart-grid-line{stroke:#2a405c;stroke-width:1}.admin-chart-line{fill:none;stroke:#5da8ff;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.admin-chart-area{fill:#5da8ff18}.admin-chart-dot{fill:#8bc1ff;stroke:#122238;stroke-width:2}.admin-chart-axis{fill:#8599b4;font-size:10px}.admin-chart-empty{display:grid;place-items:center;height:165px;color:#8196b2;font-size:12px}.admin-stats-note{display:block;color:#8196b2;font-size:11px;margin:9px 2px 0}
 .edit-message-dialog{width:min(92vw,520px)}
@@ -504,18 +499,6 @@ body.drawer-open{overflow:hidden}
       <div id="adminServices" class="admin-services"></div>
     </section>
     <section class="admin-section">
-      <div class="admin-stats-head">
-        <h3>🤖 AI-помощник</h3>
-        <button id="adminAiClear" class="admin-ai-clear" type="button">Очистить</button>
-      </div>
-      <div id="adminAiStatus" class="admin-ai-status">Проверяем подключение…</div>
-      <div id="adminAiMessages" class="admin-ai-messages"></div>
-      <form id="adminAiForm" class="admin-ai-form">
-        <textarea id="adminAiInput" rows="2" maxlength="12000" placeholder="Напиши сообщение AI…"></textarea>
-        <button id="adminAiSend" type="submit" title="Отправить">↑</button>
-      </form>
-    </section>
-    <section class="admin-section">
       <h3>Последние пользователи</h3>
       <div id="adminUsers" class="admin-users"></div>
     </section>
@@ -571,8 +554,6 @@ let soundsEnabled=localStorage.getItem('svoi_sounds')!=='0',vibrationEnabled=loc
 let deferredInstallPrompt=null;
 let adminRefreshTimer=null;
 let adminStatsPeriod=localStorage.getItem('svoi_admin_stats_period')==='week'?'week':'day';
-let adminAiHistory=[];
-let adminAiBusy=false;
 let groupCallState=null;
 let minimizedCallKind=null;
 let groupMembersData=null;
@@ -1487,131 +1468,6 @@ function renderAdminUsers(items){
   }
 }
 
-function adminAiStorageKey(){
-  return me?.id?'svoi_admin_ai_history_'+me.id:'svoi_admin_ai_history'
-}
-
-function loadAdminAiHistory(){
-  try{
-    const parsed=JSON.parse(localStorage.getItem(adminAiStorageKey())||'[]');
-    adminAiHistory=Array.isArray(parsed)
-      ?parsed.filter(item=>
-        item
-        && ['user','assistant'].includes(item.role)
-        && typeof item.content==='string'
-      ).slice(-30)
-      :[]
-  }catch{
-    adminAiHistory=[]
-  }
-  renderAdminAiHistory()
-}
-
-function saveAdminAiHistory(){
-  try{
-    localStorage.setItem(
-      adminAiStorageKey(),
-      JSON.stringify(adminAiHistory.slice(-30))
-    )
-  }catch{}
-}
-
-function renderAdminAiHistory(){
-  const box=$('adminAiMessages');
-  if(!box)return;
-  box.replaceChildren();
-  if(!adminAiHistory.length){
-    const empty=document.createElement('div');
-    empty.className='muted';
-    empty.style.padding='8px 4px';
-    empty.textContent='История пуста. Напиши первое сообщение.';
-    box.append(empty)
-  }else{
-    for(const item of adminAiHistory){
-      const bubble=document.createElement('div');
-      bubble.className='admin-ai-message '+item.role;
-      bubble.textContent=item.content;
-      box.append(bubble)
-    }
-  }
-  requestAnimationFrame(()=>{box.scrollTop=box.scrollHeight})
-}
-
-function setAdminAiStatus(text,state=''){
-  const el=$('adminAiStatus');
-  if(!el)return;
-  el.className='admin-ai-status'+(state?' '+state:'');
-  el.textContent=text
-}
-
-async function loadAdminAiStatus(){
-  try{
-    const status=await api('/api/admin/ai/status');
-    if(status.configured){
-      const provider=status.provider?(' · '+status.provider):'';
-      const model=status.model?(' · '+status.model):'';
-      setAdminAiStatus('Подключено'+provider+model,'ok')
-    }else{
-      setAdminAiStatus('AI пока не настроен на сервере','error')
-    }
-  }catch(err){
-    setAdminAiStatus(err.message||'Не удалось проверить AI','error')
-  }
-}
-
-async function sendAdminAiMessage(text){
-  const message=String(text||'').trim();
-  if(!message||adminAiBusy)return;
-
-  adminAiBusy=true;
-  $('adminAiSend').disabled=true;
-  $('adminAiInput').disabled=true;
-
-  adminAiHistory.push({role:'user',content:message});
-  adminAiHistory=adminAiHistory.slice(-30);
-  saveAdminAiHistory();
-  renderAdminAiHistory();
-  $('adminAiInput').value='';
-  setAdminAiStatus('AI печатает…');
-
-  try{
-    const payload=adminAiHistory
-      .filter(item=>['user','assistant'].includes(item.role))
-      .slice(-24)
-      .map(item=>({role:item.role,content:item.content}));
-
-    const result=await api('/api/admin/ai/chat',{
-      method:'POST',
-      body:{messages:payload,temperature:0.7}
-    });
-
-    const reply=String(result?.reply||'').trim();
-    if(!reply)throw new Error('AI вернул пустой ответ');
-
-    adminAiHistory.push({role:'assistant',content:reply});
-    adminAiHistory=adminAiHistory.slice(-30);
-    saveAdminAiHistory();
-    renderAdminAiHistory();
-    setAdminAiStatus(
-      'Готово'+(result?.model?' · '+result.model:''),
-      'ok'
-    )
-  }catch(err){
-    const box=$('adminAiMessages');
-    const bubble=document.createElement('div');
-    bubble.className='admin-ai-message error';
-    bubble.textContent=err.message||'Ошибка AI';
-    box.append(bubble);
-    box.scrollTop=box.scrollHeight;
-    setAdminAiStatus(err.message||'Ошибка AI','error')
-  }finally{
-    adminAiBusy=false;
-    $('adminAiSend').disabled=false;
-    $('adminAiInput').disabled=false;
-    $('adminAiInput').focus()
-  }
-}
-
 async function loadAdminPanel(){
   const status=$('adminStatus');
   status.classList.remove('error');status.textContent='Обновляем данные…';
@@ -1621,7 +1477,6 @@ async function loadAdminPanel(){
       api('/api/admin/users?limit=50'),
       api('/api/admin/stats?period='+adminStatsPeriod)
     ]);
-    loadAdminAiStatus().catch(()=>{});
     renderAdminOverview(overview);renderAdminUsers(recentUsers);renderAdminStats(stats);
     const generated=overview.generated_at?new Date(overview.generated_at).toLocaleTimeString():'сейчас';
     status.textContent='Обновлено: '+generated+' · автообновление каждые 10 секунд'
@@ -6904,29 +6759,11 @@ $('callsDialog').addEventListener('click',event=>{
 $('openAdmin').onclick=async()=>{
   closeDrawer();
   if(!me?.is_server_admin)return;
-  loadAdminAiHistory();
   $('adminDialog').showModal();
   await loadAdminPanel();
   startAdminRefresh()
 };
 $('refreshAdmin').onclick=()=>loadAdminPanel();
-$('adminAiForm').onsubmit=event=>{
-  event.preventDefault();
-  sendAdminAiMessage($('adminAiInput').value)
-};
-$('adminAiInput').addEventListener('keydown',event=>{
-  if(event.key==='Enter'&&!event.shiftKey){
-    event.preventDefault();
-    sendAdminAiMessage($('adminAiInput').value)
-  }
-});
-$('adminAiClear').onclick=()=>{
-  adminAiHistory=[];
-  saveAdminAiHistory();
-  renderAdminAiHistory();
-  setAdminAiStatus('История очищена');
-  loadAdminAiStatus().catch(()=>{})
-};
 $('adminStatsDay').onclick=()=>setAdminStatsPeriod('day');
 $('adminStatsWeek').onclick=()=>setAdminStatsPeriod('week');
 $('closeAdmin').onclick=()=>$('adminDialog').close();
