@@ -69,7 +69,6 @@ if 'android:name=".SvoiFirebaseMessagingService"' not in text:
     text = text[:app_end] + firebase_service_decl + text[app_end:]
 
 
-
 if 'android:name=".CallForegroundService"' not in text:
     app_end = text.find("</application>")
     if app_end == -1:
@@ -174,19 +173,6 @@ gradle = Path("android/app/build.gradle")
 gradle_text = gradle.read_text()
 if "com.google.gms.google-services" not in gradle_text:
     gradle_text += "\napply plugin: 'com.google.gms.google-services'\n"
-webrtc_dependency = "implementation 'io.github.webrtc-sdk:android:150.7871.01'"
-if webrtc_dependency not in gradle_text:
-    marker = "dependencies {"
-    pos = gradle_text.find(marker)
-    if pos == -1:
-        raise SystemExit("android/app/build.gradle: dependencies block not found")
-    pos += len(marker)
-    gradle_text = (
-        gradle_text[:pos]
-        + "\n    "
-        + webrtc_dependency
-        + gradle_text[pos:]
-    )
 firebase_messaging_dependency = "implementation 'com.google.firebase:firebase-messaging:24.1.0'"
 if firebase_messaging_dependency not in gradle_text:
     marker = "dependencies {"
@@ -2332,5 +2318,6 @@ public class NativeProximityPlugin extends Plugin {
 }
 ''')
 
-print("Android permissions and updater patched.")
+print("Android permissions, updater and native call features patched.")
+
 
