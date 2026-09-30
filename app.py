@@ -663,6 +663,10 @@ class GroupRenameIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 
 
+class AdminUserRenameIn(BaseModel):
+    display_name: str = Field(min_length=1, max_length=60)
+
+
 class GroupMemberAddIn(BaseModel):
     tag: str = Field(min_length=1, max_length=33)
 
@@ -1482,6 +1486,43 @@ def admin_users(
         }
         for row in rows
     ]
+
+
+@app.patch("/api/admin/users/{target_user_id}/display-name")
+async def admin_rename_user(
+    target_user_id: int,
+    data: AdminUserRenameIn,
+    user=Depends(require_server_admin),
+    conn=Depends(db),
+):
+    display_name = data.display_name.strip()
+    if not display_name:
+        raise HTTPException(400, "Имя не может быть пустым")
+
+    target = conn.execute(
+        "SELECT id FROM users WHERE id=?",
+        (target_user_id,),
+    ).fetchone()
+    if not target:
+        raise HTTPException(404, "Пользователь не найден")
+
+    conn.execute(
+        "UPDATE users SET display_name=? WHERE id=?",
+        (display_name, target_user_id),
+    )
+    conn.commit()
+
+    row = conn.execute(
+        """SELECT u.id,u.username,u.display_name,
+                  a.stored_name AS avatar_stored_name
+           FROM users u
+           LEFT JOIN uploads a ON a.id=u.avatar_id
+           WHERE u.id=?""",
+        (target_user_id,),
+    ).fetchone()
+    user_data = user_json(row)
+    await _broadcast_profile(user_data)
+    return user_data
 
 
 @app.get("/api/turn")
