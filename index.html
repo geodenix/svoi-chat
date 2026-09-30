@@ -3876,7 +3876,7 @@ function updateSpeakerButtons(){
   syncNativeProximity().catch(()=>{})
 }
 
-function chooseSpeakerOutput(){
+async function chooseSpeakerOutput(){
   const nativePlugin=nativeAudioRoutePlugin();
 
   if(nativePlugin){
