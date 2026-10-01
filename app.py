@@ -283,6 +283,31 @@ def init_db():
       ON call_history(caller_id, id DESC);
     CREATE INDEX IF NOT EXISTS idx_call_history_callee
       ON call_history(callee_id, id DESC);
+    CREATE TABLE IF NOT EXISTS call_quality_samples (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      call_key TEXT NOT NULL,
+      call_type TEXT NOT NULL,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      peer_id INTEGER,
+      group_id INTEGER,
+      rtt_ms REAL,
+      packet_loss_pct REAL,
+      jitter_ms REAL,
+      available_outgoing_bitrate REAL,
+      video_bitrate_bps REAL,
+      video_width INTEGER,
+      video_height INTEGER,
+      video_fps REAL,
+      connection_quality TEXT,
+      end_reason TEXT,
+      recorded_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_call_quality_key
+      ON call_quality_samples(call_key, recorded_at);
+    CREATE INDEX IF NOT EXISTS idx_call_quality_time
+      ON call_quality_samples(recorded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_call_quality_user
+      ON call_quality_samples(user_id, recorded_at DESC);
     CREATE TABLE IF NOT EXISTS online_samples (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       recorded_at TEXT NOT NULL,
@@ -732,6 +757,23 @@ class GroupCallIn(BaseModel):
 
 class CallInviteActivateIn(BaseModel):
     invite_token: str = Field(min_length=16, max_length=160)
+
+
+class CallQualityIn(BaseModel):
+    call_key: str = Field(min_length=1, max_length=120)
+    call_type: str = Field(default="private", max_length=16)
+    peer_id: int | None = None
+    group_id: int | None = None
+    rtt_ms: float | None = Field(default=None, ge=0, le=60000)
+    packet_loss_pct: float | None = Field(default=None, ge=0, le=100)
+    jitter_ms: float | None = Field(default=None, ge=0, le=60000)
+    available_outgoing_bitrate: float | None = Field(default=None, ge=0)
+    video_bitrate_bps: float | None = Field(default=None, ge=0)
+    video_width: int | None = Field(default=None, ge=0, le=16384)
+    video_height: int | None = Field(default=None, ge=0, le=16384)
+    video_fps: float | None = Field(default=None, ge=0, le=240)
+    connection_quality: str | None = Field(default=None, max_length=24)
+    end_reason: str | None = Field(default=None, max_length=64)
 
 
 @app.get("/health")
@@ -5316,6 +5358,192 @@ def mark_call_video(call_id: str):
     )
     conn.commit()
     conn.close()
+
+
+@app.post("/api/calls/quality")
+def record_call_quality(
+    payload: CallQualityIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    call_type = payload.call_type.strip().lower()
+    if call_type not in {"private", "group", "link"}:
+        raise HTTPException(400, "Неизвестный тип звонка")
+
+    peer_id = payload.peer_id
+    group_id = payload.group_id
+
+    if call_type == "private":
+        row = conn.execute(
+            """SELECT caller_id,callee_id FROM call_history
+               WHERE call_id=?""",
+            (payload.call_key,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Звонок не найден")
+        if user["id"] not in (row["caller_id"], row["callee_id"]):
+            raise HTTPException(403, "Нет доступа к этому звонку")
+        peer_id = (
+            row["callee_id"]
+            if user["id"] == row["caller_id"]
+            else row["caller_id"]
+        )
+    elif call_type == "group":
+        if not group_id:
+            raise HTTPException(400, "Не указана группа")
+        membership = conn.execute(
+            """SELECT 1 FROM group_members
+               WHERE group_id=? AND user_id=?""",
+            (group_id, user["id"]),
+        ).fetchone()
+        if not membership:
+            raise HTTPException(403, "Нет доступа к группе")
+
+    quality = (payload.connection_quality or "").strip().lower()[:24] or None
+    reason = (payload.end_reason or "").strip().lower()[:64] or None
+    conn.execute(
+        """INSERT INTO call_quality_samples(
+             call_key,call_type,user_id,peer_id,group_id,
+             rtt_ms,packet_loss_pct,jitter_ms,
+             available_outgoing_bitrate,video_bitrate_bps,
+             video_width,video_height,video_fps,
+             connection_quality,end_reason,recorded_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            payload.call_key,
+            call_type,
+            user["id"],
+            peer_id,
+            group_id,
+            payload.rtt_ms,
+            payload.packet_loss_pct,
+            payload.jitter_ms,
+            payload.available_outgoing_bitrate,
+            payload.video_bitrate_bps,
+            payload.video_width,
+            payload.video_height,
+            payload.video_fps,
+            quality,
+            reason,
+            now_iso(),
+        ),
+    )
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    conn.execute(
+        "DELETE FROM call_quality_samples WHERE recorded_at<?",
+        (cutoff,),
+    )
+    conn.commit()
+    return {"ok": True}
+
+
+@app.get("/api/admin/call-quality")
+def admin_call_quality(
+    period: str = Query("day", max_length=12),
+    limit: int = Query(40, ge=1, le=100),
+    user=Depends(require_server_admin),
+    conn=Depends(db),
+):
+    period = period.strip().lower()
+    if period not in {"day", "week"}:
+        raise HTTPException(400, "Период должен быть day или week")
+
+    since = datetime.now(timezone.utc) - (
+        timedelta(hours=24) if period == "day" else timedelta(days=7)
+    )
+    since_iso = since.isoformat()
+
+    rows = conn.execute(
+        """SELECT
+             q.call_key,
+             q.call_type,
+             MIN(q.recorded_at) AS started_at,
+             MAX(q.recorded_at) AS last_at,
+             COUNT(*) AS sample_count,
+             GROUP_CONCAT(DISTINCT u.display_name) AS participants,
+             AVG(q.rtt_ms) AS avg_rtt_ms,
+             MAX(q.rtt_ms) AS max_rtt_ms,
+             AVG(q.packet_loss_pct) AS avg_packet_loss_pct,
+             MAX(q.packet_loss_pct) AS max_packet_loss_pct,
+             AVG(q.jitter_ms) AS avg_jitter_ms,
+             MAX(q.jitter_ms) AS max_jitter_ms,
+             AVG(q.available_outgoing_bitrate) AS avg_available_outgoing_bitrate,
+             AVG(q.video_bitrate_bps) AS avg_video_bitrate_bps,
+             MAX(q.video_width) AS max_video_width,
+             MAX(q.video_height) AS max_video_height,
+             AVG(q.video_fps) AS avg_video_fps,
+             MAX(CASE
+               WHEN q.end_reason IS NOT NULL AND q.end_reason<>''
+               THEN q.end_reason ELSE NULL END
+             ) AS end_reason
+           FROM call_quality_samples q
+           JOIN users u ON u.id=q.user_id
+           WHERE q.recorded_at>=?
+           GROUP BY q.call_key,q.call_type
+           ORDER BY last_at DESC
+           LIMIT ?""",
+        (since_iso, limit),
+    ).fetchall()
+
+    def rounded(value, digits=1):
+        return round(float(value), digits) if value is not None else None
+
+    calls = []
+    for row in rows:
+        calls.append({
+            "call_key": row["call_key"],
+            "call_type": row["call_type"],
+            "started_at": row["started_at"],
+            "last_at": row["last_at"],
+            "sample_count": int(row["sample_count"] or 0),
+            "participants": [
+                value for value in str(row["participants"] or "").split(",")
+                if value
+            ],
+            "avg_rtt_ms": rounded(row["avg_rtt_ms"]),
+            "max_rtt_ms": rounded(row["max_rtt_ms"]),
+            "avg_packet_loss_pct": rounded(row["avg_packet_loss_pct"], 2),
+            "max_packet_loss_pct": rounded(row["max_packet_loss_pct"], 2),
+            "avg_jitter_ms": rounded(row["avg_jitter_ms"]),
+            "max_jitter_ms": rounded(row["max_jitter_ms"]),
+            "avg_available_outgoing_bitrate": rounded(
+                row["avg_available_outgoing_bitrate"], 0
+            ),
+            "avg_video_bitrate_bps": rounded(
+                row["avg_video_bitrate_bps"], 0
+            ),
+            "max_video_width": row["max_video_width"],
+            "max_video_height": row["max_video_height"],
+            "avg_video_fps": rounded(row["avg_video_fps"]),
+            "end_reason": row["end_reason"],
+        })
+
+    valid_rtt = [item["avg_rtt_ms"] for item in calls if item["avg_rtt_ms"] is not None]
+    valid_loss = [
+        item["avg_packet_loss_pct"]
+        for item in calls
+        if item["avg_packet_loss_pct"] is not None
+    ]
+    valid_jitter = [
+        item["avg_jitter_ms"]
+        for item in calls
+        if item["avg_jitter_ms"] is not None
+    ]
+
+    return {
+        "period": period,
+        "calls": calls,
+        "summary": {
+            "calls_with_diagnostics": len(calls),
+            "avg_rtt_ms": rounded(sum(valid_rtt) / len(valid_rtt)) if valid_rtt else None,
+            "avg_packet_loss_pct": rounded(
+                sum(valid_loss) / len(valid_loss), 2
+            ) if valid_loss else None,
+            "avg_jitter_ms": rounded(
+                sum(valid_jitter) / len(valid_jitter)
+            ) if valid_jitter else None,
+        },
+    }
 
 
 @app.get("/api/calls/history")
