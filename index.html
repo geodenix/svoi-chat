@@ -473,6 +473,33 @@ body.drawer-open{overflow:hidden}
   font-size:8px
 }
 </style>
+<style>
+.tile-admin-mute{
+  position:absolute;
+  z-index:10;
+  right:8px;
+  top:44px;
+  width:30px;
+  height:30px;
+  border:1px solid #ff9ba655;
+  border-radius:999px;
+  display:grid;
+  place-items:center;
+  padding:0;
+  background:#8c2f3ccc;
+  color:#fff;
+  font-size:14px;
+  box-shadow:0 4px 14px #0007
+}
+.tile-admin-mute:disabled{opacity:.5}
+.group-call-strip .tile-admin-mute{
+  right:5px;
+  top:31px;
+  width:24px;
+  height:24px;
+  font-size:11px
+}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -5097,6 +5124,11 @@ function focusGroupTile(tile){
   })
 }
 
+function groupParticipantUserId(identity){
+  const match=String(identity||'').match(/^user-(\d+)$/);
+  return match?Number(match[1]):0
+}
+
 function groupTileId(identity){
   return 'group-tile-'+String(identity).replace(/[^a-zA-Z0-9_-]/g,'_')
 }
@@ -5494,7 +5526,43 @@ function ensureGroupTile(participant,isLocal=false){
   quality.className='tile-network-quality';
   quality.textContent='⚪';
   quality.title='Качество связи определяется';
+
+  const participantUserId=groupParticipantUserId(identity);
+  let adminMute=null;
+  if(
+    !isLocal
+    &&groupCallState?.isAdmin
+    &&participantUserId>0
+    &&participantUserId!==Number(me?.id)
+  ){
+    adminMute=document.createElement('button');
+    adminMute.type='button';
+    adminMute.className='tile-admin-mute';
+    adminMute.textContent='🔇';
+    adminMute.title='Заглушить участника';
+    adminMute.setAttribute('aria-label','Заглушить участника');
+    adminMute.onclick=event=>{
+      event.stopPropagation();
+      if(!groupCallState||!groupCallState.isAdmin)return;
+      adminMute.disabled=true;
+      try{
+        wsSend({
+          type:'group_force_mute',
+          group_id:groupCallState.groupId,
+          target_user_id:participantUserId
+        })
+      }catch(err){
+        adminMute.disabled=false;
+        alert(err.message||'Не удалось заглушить участника')
+      }
+      setTimeout(()=>{
+        if(adminMute?.isConnected)adminMute.disabled=false
+      },1200)
+    }
+  }
+
   tile.append(avatar,name,mic,speaking,ping,quality);
+  if(adminMute)tile.append(adminMute);
   tile.title='Нажмите, чтобы увеличить участника';
   tile.addEventListener('click',event=>{
     if(event.target.closest('button'))return;
@@ -5771,6 +5839,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
       room,
       groupId,
       video:!!video,
+      isAdmin:!!credentials.is_admin,
       connectedAt:0,
       muted:false,
       cameraOff:!video,
@@ -8102,6 +8171,39 @@ function connectWs(){
         const ping=Number(data.ping_ms);
         state.participantPings.set(identity,ping);
         updateGroupParticipantPing(identity,ping)
+      }
+      return
+    }
+    if(data.type==='group_force_mute'){
+      const state=groupCallState;
+      if(state&&Number(data.group_id)===Number(state.groupId)){
+        state.muted=true;
+        state.room.localParticipant
+          .setMicrophoneEnabled(false)
+          .then(()=>{
+            updateGroupMicBadge(
+              state.room.localParticipant,
+              true,
+              true
+            );
+            $('groupMuteBtn').classList.add('off');
+            $('groupMuteBtn').textContent='🔇';
+            setGroupCallStatus('Микрофон выключен администратором');
+            setTimeout(()=>{
+              if(groupCallState===state)refreshGroupCount()
+            },2200)
+          })
+          .catch(()=>{})
+      }
+      return
+    }
+    if(data.type==='group_force_mute_sent'){
+      const state=groupCallState;
+      if(state&&Number(data.group_id)===Number(state.groupId)){
+        setGroupCallStatus('Участник заглушён');
+        setTimeout(()=>{
+          if(groupCallState===state)refreshGroupCount()
+        },1600)
       }
       return
     }
