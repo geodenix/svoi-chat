@@ -3006,7 +3006,7 @@ def get_upload(stored_name: str, conn=Depends(db)):
 
 
 CHAT_GALLERY_KINDS = {"photos", "videos", "files", "links", "voice"}
-CHAT_GALLERY_LINK_RE = re.compile(r"https?://[^\\s<>\\"']+", re.IGNORECASE)
+CHAT_GALLERY_LINK_RE = re.compile(r"""https?://[^\s<>"']+""", re.IGNORECASE)
 
 
 def chat_gallery_links(body: str | None) -> list[str]:
