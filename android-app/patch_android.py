@@ -288,6 +288,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(NativeContactsPlugin.class);
         registerPlugin(NativeVibrationPlugin.class);
         registerPlugin(NativeBadgePlugin.class);
+        registerPlugin(NativeAppInfoPlugin.class);
         registerPlugin(NativePushPlugin.class);
         super.onCreate(savedInstanceState);
 
@@ -1037,6 +1038,57 @@ public class MainActivity extends BridgeActivity {
 }
 ''')
 
+
+
+
+app_info_plugin = Path(
+    "android/app/src/main/java/ru/svoi/mobile/NativeAppInfoPlugin.java"
+)
+app_info_plugin.write_text(r"""package ru.svoi.mobile;
+
+import android.content.pm.PackageInfo;
+import android.os.Build;
+
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+
+@CapacitorPlugin(name = "NativeAppInfo")
+public class NativeAppInfoPlugin extends Plugin {
+    @PluginMethod
+    public void getInfo(PluginCall call) {
+        try {
+            PackageInfo info = getContext()
+                .getPackageManager()
+                .getPackageInfo(getContext().getPackageName(), 0);
+
+            long versionCode;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                versionCode = info.getLongVersionCode();
+            } else {
+                versionCode = info.versionCode;
+            }
+
+            JSObject result = new JSObject();
+            result.put(
+                "versionName",
+                info.versionName == null ? "" : info.versionName
+            );
+            result.put("versionCode", versionCode);
+            result.put("packageName", getContext().getPackageName());
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject(
+                error.getMessage() != null
+                    ? error.getMessage()
+                    : "Не удалось определить версию приложения"
+            );
+        }
+    }
+}
+""")
 
 
 
