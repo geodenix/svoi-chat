@@ -6433,43 +6433,43 @@ function connectWs(){
     }
     if(data.type==='group_message'){
       const m=data.message;
+      const groupId=Number(m.group_id);
+      const mine=Number(m.sender_id)===Number(me?.id);
+      const activeHere=active?.type==='group'&&Number(active.data.id)===groupId;
       const shouldNotifyHere=!m.has_mentions||!!m.mentioned_me;
-      if(m.sender_id!==me?.id&&shouldNotifyHere&&!isChatMuted('group',m.group_id)){
+
+      if(!mine&&shouldNotifyHere&&!isChatMuted('group',groupId)){
         playMessageSound().catch(()=>{});
         vibrateMessage()
       }
-      if(active?.type==='group'&&m.group_id===active.data.id){
+
+      if(activeHere){
         appendMessage(m);
-        if(Number(m.sender_id)!==Number(me?.id)){
+        active.data={...active.data,unread_count:0};
+        if(!mine){
           api(
-            '/api/groups/'+m.group_id+'/messages/'+m.id+'/read',
+            '/api/groups/'+groupId+'/messages/'+m.id+'/read',
             {method:'POST'}
-          ).then(()=>{
-            if(active?.type==='group'&&Number(active.data.id)===Number(m.group_id)){
-              active.data={...active.data,unread_count:0};
-              groups=groups.map(item=>
-                Number(item.id)===Number(m.group_id)
-                  ?{...item,unread_count:0}
-                  :item
-              );
-              renderGroups();
-              updateAppBadge().catch(()=>{})
-            }
-          }).catch(()=>{})
+          ).catch(()=>{})
         }
       }
-      loadGroups().then(()=>{
-        if(active?.type==='group'&&Number(active.data.id)===Number(m.group_id)){
-          active.data={...active.data,unread_count:0};
-          groups=groups.map(item=>
-            Number(item.id)===Number(m.group_id)
-              ?{...item,unread_count:0}
-              :item
-          );
-          renderGroups();
-          updateAppBadge().catch(()=>{})
-        }
-      }).catch(()=>{})
+
+      const knownGroup=groups.some(item=>Number(item.id)===groupId);
+      if(knownGroup){
+        groups=groups.map(item=>{
+          if(Number(item.id)!==groupId)return item;
+          const unread=activeHere||mine
+            ?0
+            :Number(item.unread_count||0)+1;
+          return {...item,unread_count:unread}
+        });
+        renderGroups();
+        updateAppBadge().catch(()=>{})
+      }else{
+        // Fallback for a just-added group that has not reached local state yet.
+        loadGroups().catch(()=>{})
+      }
+      return
     }
     if(data.type==='group_message_edited'){
       const m=data.message;
@@ -6577,7 +6577,12 @@ function connectWs(){
     }
     if(data.type==='group_created')loadGroups().catch(()=>{})
   };
-  socket.onclose=()=>{if(currentCall||pendingCall)finishCall(false);clearTimeout(retry);if(token)retry=setTimeout(connectWs,2500)}
+  socket.onclose=()=>{
+    clearTimeout(retry);
+    // WebRTC media can stay alive when only the signaling WebSocket drops.
+    // Keep the call and reconnect signaling faster instead of hanging up.
+    if(token)retry=setTimeout(connectWs,(currentCall||pendingCall)?700:2500)
+  }
 }
 
 $('messageActionReply').onclick=()=>{
