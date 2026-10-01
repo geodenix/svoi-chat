@@ -1856,16 +1856,26 @@ public class NativeAudioRoutePlugin extends Plugin {
         }
 
         mainHandler.removeCallbacksAndMessages(null);
-        mainHandler.postDelayed(() -> {
-            AudioManager manager = audioManager();
-            if (manager == null || !routingActive || speakerForced) {
-                return;
-            }
-            try {
-                routePreferred(manager);
-            } catch (Exception ignored) {
-            }
-        }, 350);
+
+        // Bluetooth hands-free profiles, especially SCO on older Android,
+        // can become available a little later than the device callback.
+        // Retry briefly so calls automatically move to the headset instead
+        // of getting stuck on the phone earpiece.
+        long[] delays = new long[] {120L, 500L, 1400L};
+        for (long delay : delays) {
+            mainHandler.postDelayed(() -> {
+                AudioManager manager = audioManager();
+                if (manager == null || !routingActive || speakerForced) {
+                    return;
+                }
+                try {
+                    if (!"bluetooth".equals(currentRoute(manager))) {
+                        routePreferred(manager);
+                    }
+                } catch (Exception ignored) {
+                }
+            }, delay);
+        }
     }
 
     private void rememberState(AudioManager manager) {
@@ -2131,6 +2141,13 @@ public class NativeAudioRoutePlugin extends Plugin {
             }
 
             call.resolve(result);
+
+            // In automatic mode keep checking briefly: some Bluetooth
+            // headsets expose the communication route only after SCO/HFP
+            // negotiation has started.
+            if (!enabled) {
+                scheduleAutomaticRoute();
+            }
         } catch (Exception error) {
             call.reject(
                 error.getMessage() != null
