@@ -5061,6 +5061,7 @@ CALL_SIGNAL_TYPES = {
     "call_answer",
     "call_video_offer",
     "call_video_answer",
+    "call_mute",
     "ice_candidate",
     "call_reject",
     "call_end",
@@ -5401,6 +5402,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     "caller_ice": [],
                     "started_at": now_iso(),
                     "answered": False,
+                    "caller_muted": False,
+                    "callee_muted": False,
                     "missed_notified": False,
                     "action_token": secrets.token_urlsafe(24),
                 }
@@ -5426,6 +5429,45 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 continue
 
             call = active_calls.get(call_id)
+
+            if signal_type == "call_mute":
+                if not call:
+                    continue
+                participants = {call["caller_id"], call["callee_id"]}
+                if user_id not in participants or target_id not in participants:
+                    continue
+                if user_id == target_id:
+                    continue
+
+                muted = bool(data.get("muted", False))
+                sync = bool(data.get("sync", False))
+                if user_id == call["caller_id"]:
+                    call["caller_muted"] = muted
+                else:
+                    call["callee_muted"] = muted
+
+                payload["muted"] = muted
+                payload["sync"] = sync
+                await push(target_id, payload)
+
+                if sync:
+                    remote_muted = (
+                        bool(call.get("caller_muted", False))
+                        if target_id == call["caller_id"]
+                        else bool(call.get("callee_muted", False))
+                    )
+                    await push(
+                        user_id,
+                        {
+                            "type": "call_mute",
+                            "from_user_id": target_id,
+                            "from_name": "Собеседник",
+                            "call_id": call_id,
+                            "muted": remote_muted,
+                            "sync": True,
+                        },
+                    )
+                continue
 
             if signal_type in {"call_video_offer", "call_video_answer"}:
                 if not call or not call.get("answered"):
@@ -5458,6 +5500,43 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     call["answered_at"] = now_iso()
                     mark_call_answered(call_id)
                 await push(target_id, payload)
+                if call:
+                    await push(
+                        user_id,
+                        {
+                            "type": "call_mute",
+                            "from_user_id": target_id,
+                            "from_name": "Собеседник",
+                            "call_id": call_id,
+                            "muted": bool(
+                                call.get(
+                                    "caller_muted"
+                                    if target_id == call["caller_id"]
+                                    else "callee_muted",
+                                    False,
+                                )
+                            ),
+                            "sync": True,
+                        },
+                    )
+                    await push(
+                        target_id,
+                        {
+                            "type": "call_mute",
+                            "from_user_id": user_id,
+                            "from_name": display_name,
+                            "call_id": call_id,
+                            "muted": bool(
+                                call.get(
+                                    "caller_muted"
+                                    if user_id == call["caller_id"]
+                                    else "callee_muted",
+                                    False,
+                                )
+                            ),
+                            "sync": True,
+                        },
+                    )
                 continue
 
             if signal_type == "call_reject":
