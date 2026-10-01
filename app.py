@@ -16,6 +16,7 @@ from typing import Dict, Set
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from pywebpush import WebPushException, webpush
 from livekit import api as livekit_api
@@ -64,6 +65,7 @@ SERVER_ADMIN_IDS = {
 APP_STARTED_AT = time.time()
 
 app = FastAPI(title="Свои", version="0.1.0")
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 connections: Dict[int, Set[WebSocket]] = {}
 active_calls: dict[str, dict] = {}
 
@@ -160,6 +162,9 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_messages_pair
       ON messages(sender_id, recipient_id, id);
+    CREATE INDEX IF NOT EXISTS idx_messages_unread_recipient
+      ON messages(recipient_id, sender_id, id)
+      WHERE read_at IS NULL;
     CREATE TABLE IF NOT EXISTS chat_groups (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -172,6 +177,8 @@ def init_db():
       joined_at TEXT NOT NULL,
       PRIMARY KEY(group_id, user_id)
     );
+    CREATE INDEX IF NOT EXISTS idx_group_members_user
+      ON group_members(user_id, group_id);
     CREATE TABLE IF NOT EXISTS group_messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       group_id INTEGER NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
