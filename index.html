@@ -5157,7 +5157,10 @@ function handleGroupPingPong(data){
 
   const ping=Math.max(1,Math.round(performance.now()-started));
   const identity=String(state.room?.localParticipant?.identity||'');
-  if(identity)updateGroupParticipantPing(identity,ping);
+  if(identity){
+    state.participantPings.set(identity,ping);
+    updateGroupParticipantPing(identity,ping)
+  }
 
   try{
     wsSend({
