@@ -5091,6 +5091,59 @@ async function maybeAdaptPrivateVideo(call,network){
   await applyPrivateVideoTier(call,tier)
 }
 
+async function applyPrivateAudioTier(call,tier){
+  if(!call||currentCall!==call||!call.pc)return;
+  const sender=call.pc.getSenders().find(item=>item.track?.kind==='audio');
+  if(!sender?.track||typeof sender.getParameters!=='function'||typeof sender.setParameters!=='function')return;
+
+  const bitrates={
+    good:48000,
+    fair:36000,
+    poor:24000
+  };
+  const maxBitrate=bitrates[tier]||bitrates.good;
+
+  try{
+    const params=sender.getParameters();
+    if(!Array.isArray(params.encodings)||!params.encodings.length){
+      params.encodings=[{}]
+    }
+    for(const encoding of params.encodings){
+      encoding.maxBitrate=maxBitrate
+    }
+    await sender.setParameters(params);
+    if(currentCall===call){
+      call.appliedAudioTier=tier;
+      call.lastAudioTierChangeAt=Date.now()
+    }
+  }catch{}
+}
+
+async function maybeAdaptPrivateAudio(call,network){
+  if(!call||currentCall!==call)return;
+  const tier=privateVideoTierForNetwork(network);
+
+  if(tier===call.appliedAudioTier){
+    call.pendingAudioTier=null;
+    call.pendingAudioTierSamples=0;
+    return
+  }
+
+  if(call.pendingAudioTier===tier){
+    call.pendingAudioTierSamples=(call.pendingAudioTierSamples||0)+1
+  }else{
+    call.pendingAudioTier=tier;
+    call.pendingAudioTierSamples=1
+  }
+
+  if((call.pendingAudioTierSamples||0)<2)return;
+  if(call.lastAudioTierChangeAt&&Date.now()-call.lastAudioTierChangeAt<4000)return;
+
+  call.pendingAudioTier=null;
+  call.pendingAudioTierSamples=0;
+  await applyPrivateAudioTier(call,tier)
+}
+
 async function refreshCallPing(call){
   if(!call||currentCall!==call||call.pc?.connectionState!=='connected'){
     setCallPing(null);
@@ -5100,6 +5153,7 @@ async function refreshCallPing(call){
     const network=await readPeerNetworkStats(call.pc);
     if(currentCall!==call)return;
     setCallPing(network.rttMs);
+    maybeAdaptPrivateAudio(call,network).catch(()=>{});
     maybeAdaptPrivateVideo(call,network).catch(()=>{})
   }catch{
     if(currentCall===call)setCallPing(null)
@@ -5195,14 +5249,23 @@ function resetCallUi(){
   if(preparedMediaStream){try{preparedMediaStream.getTracks().forEach(t=>t.stop())}catch{}preparedMediaStream=null}
 }
 
+function getCallAudioConstraints(){
+  const supported=navigator.mediaDevices?.getSupportedConstraints?.()||{};
+  const audio={
+    echoCancellation:true,
+    noiseSuppression:true,
+    autoGainControl:true,
+    channelCount:{ideal:1}
+  };
+  if(supported.sampleRate)audio.sampleRate={ideal:48000};
+  if(supported.sampleSize)audio.sampleSize={ideal:16};
+  if(supported.latency)audio.latency={ideal:0.03};
+  return audio
+}
+
 async function getCallMedia(video){
   const request=navigator.mediaDevices.getUserMedia({
-    audio:{
-      echoCancellation:true,
-      noiseSuppression:true,
-      autoGainControl:true,
-      channelCount:{ideal:1}
-    },
+    audio:getCallAudioConstraints(),
     video:video?{
       facingMode:{ideal:cameraFacing},
       width:{ideal:1280,max:1280},
@@ -5330,7 +5393,7 @@ function schedulePrivateCallRecovery(call,delay=900){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks()){
     try{
@@ -5412,6 +5475,7 @@ async function createPeer(peerId,peerName,id,video,stream){
       call.answered=true;
       clearPrivateRecovery(call);
       startCallPing(call);
+      applyPrivateAudioTier(call,call.appliedAudioTier||'good').catch(()=>{});
       stopOutgoingTone();
       $('callStatus').textContent='Соединено';
       updateMiniCallBar();
