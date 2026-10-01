@@ -4441,26 +4441,62 @@ function groupVideoTargetForTile(tile){
     return {enabled:false,width:320,height:180,fps:12,label:'paused'}
   }
 
-  if(tile?.classList.contains('focused')){
-    return {enabled:true,width:1280,height:720,fps:24,label:'high'}
-  }
-
+  const networkCap=groupCallState?.videoNetworkCap||'high';
   const strip=$('groupCallStrip');
-  if(tile&&strip&&tile.parentElement===strip){
-    return {enabled:true,width:320,height:180,fps:15,label:'low'}
-  }
-
   const width=Math.max(0,Number(tile?.getBoundingClientRect?.().width)||0);
   const identity=tile?.dataset?.participantIdentity||'';
   const active=!!groupCallState?.activeSpeakerIds?.has(String(identity));
 
-  if(width>=420){
-    return {enabled:true,width:1280,height:720,fps:24,label:'high'}
+  let target;
+  if(tile?.classList.contains('focused')){
+    target={enabled:true,width:1280,height:720,fps:24,label:'high'}
+  }else if(tile&&strip&&tile.parentElement===strip){
+    target={enabled:true,width:320,height:180,fps:15,label:'low'}
+  }else if(width>=420){
+    target={enabled:true,width:1280,height:720,fps:24,label:'high'}
+  }else if(width>=190||active){
+    target={enabled:true,width:640,height:360,fps:20,label:'medium'}
+  }else{
+    target={enabled:true,width:320,height:180,fps:15,label:'low'}
   }
-  if(width>=190||active){
-    return {enabled:true,width:640,height:360,fps:20,label:'medium'}
+
+  // Audio has priority. When LiveKit reports a weak connection, clamp all
+  // remote video layers before touching speech.
+  if(networkCap==='low'){
+    return {enabled:true,width:320,height:180,fps:12,label:'low'}
   }
-  return {enabled:true,width:320,height:180,fps:15,label:'low'}
+  if(networkCap==='medium'&&target.label==='high'){
+    return {enabled:true,width:640,height:360,fps:18,label:'medium'}
+  }
+  return target
+}
+
+function normalizeLiveKitConnectionQuality(quality){
+  const raw=String(quality?.toString?.()??quality??'').toLowerCase();
+  if(raw.includes('poor')||raw==='2')return 'poor';
+  if(raw.includes('good')||raw==='1')return 'good';
+  if(raw.includes('excellent')||raw==='0')return 'excellent';
+  return 'unknown'
+}
+
+function updateGroupVideoNetworkCap(quality,participant){
+  const state=groupCallState;
+  if(!state?.room)return;
+
+  // Prefer the local participant's quality because this represents the
+  // device's own network path. Ignore unrelated remote-quality changes.
+  const localIdentity=String(state.room.localParticipant?.identity||'');
+  const participantIdentity=String(participant?.identity||'');
+  if(participantIdentity&&localIdentity&&participantIdentity!==localIdentity)return;
+
+  const normalized=normalizeLiveKitConnectionQuality(quality);
+  const next=normalized==='poor'
+    ?'low'
+    :(normalized==='good'?'medium':'high');
+
+  if(state.videoNetworkCap===next)return;
+  state.videoNetworkCap=next;
+  scheduleGroupRemoteVideoQualitySync()
 }
 
 function applyGroupRemoteVideoTarget(publication,tile){
@@ -4801,6 +4837,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
       lastParticipantCount:-1,
       speakerFrame:0,
       videoQualityFrame:0,
+      videoNetworkCap:'high',
       pendingSpeakers:[],
       activeSpeakerIds:new Set()
     };
@@ -4837,9 +4874,14 @@ async function joinGroupCall(groupId,video=false,invite=false){
       .on(LivekitClient.RoomEvent.ActiveSpeakersChanged,(speakers)=>{
         updateGroupActiveSpeakers(speakers)
       })
+      .on(LivekitClient.RoomEvent.ConnectionQualityChanged,(quality,participant)=>{
+        updateGroupVideoNetworkCap(quality,participant)
+      })
       .on(LivekitClient.RoomEvent.Reconnecting,()=>{
         if(groupCallState?.room===room){
           groupCallState.needsRecovery=false;
+          groupCallState.videoNetworkCap='low';
+          scheduleGroupRemoteVideoQualitySync();
           setGroupCallStatus('Восстанавливаем соединение…')
         }
       })
@@ -4848,6 +4890,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
           groupCallState.reconnectAttempts=0;
           groupCallState.recovering=false;
           groupCallState.needsRecovery=false;
+          groupCallState.videoNetworkCap='medium';
           groupCallState.lastParticipantCount=-1;
           refreshGroupCount();
           requestAnimationFrame(()=>scheduleGroupRemoteVideoQualitySync())
