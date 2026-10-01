@@ -660,6 +660,35 @@ body.drawer-open{overflow:hidden}
 .group-call-profile-actions button.danger{
   background:#7d3440
 }
+.group-call-profile-actions button.active{
+  background:#2f7556;
+  box-shadow:0 0 0 2px #62d99a44 inset
+}
+.tile-pin-status{
+  position:absolute;
+  z-index:11;
+  left:8px;
+  top:44px;
+  width:30px;
+  height:30px;
+  border-radius:999px;
+  display:grid;
+  place-items:center;
+  background:#245b45dd;
+  border:1px solid #76e2ad66;
+  color:#fff;
+  font-size:14px;
+  line-height:1;
+  box-shadow:0 4px 14px #0007;
+  pointer-events:none
+}
+.group-call-strip .tile-pin-status{
+  left:5px;
+  top:31px;
+  width:24px;
+  height:24px;
+  font-size:11px
+}
 </style>
 </head>
 <body>
@@ -908,6 +937,7 @@ body.drawer-open{overflow:hidden}
   </div>
   <div class="group-call-profile-actions">
     <button id="groupCallProfileFocus" type="button">⛶ Увеличить</button>
+    <button id="groupCallProfilePin" type="button">📌 Закрепить</button>
     <button id="groupCallProfileMessage" type="button">💬 Написать</button>
     <button id="groupCallProfileMute" class="danger hidden" type="button">🔇 Заглушить</button>
   </div>
@@ -5277,14 +5307,15 @@ function restoreGroupGridLayout(){
   scheduleGroupRemoteVideoQualitySync()
 }
 
-function focusGroupTile(tile){
-  if(!tile)return;
+function showGroupFocusedTile(tile){
+  if(!tile?.isConnected)return;
   const grid=$('groupCallGrid');
   const strip=$('groupCallStrip');
   if(!grid||!strip)return;
 
   if(tile.classList.contains('focused')){
-    restoreGroupGridLayout();
+    grid.classList.add('has-focus');
+    strip.classList.remove('hidden');
     return
   }
 
@@ -5294,7 +5325,6 @@ function focusGroupTile(tile){
     strip.append(currentFocused)
   }
 
-  // Если выбранная плитка была в нижней ленте — переносим её в основную область.
   if(tile.parentElement===strip){
     grid.append(tile)
   }
@@ -5303,7 +5333,6 @@ function focusGroupTile(tile){
   grid.classList.add('has-focus');
   strip.classList.remove('hidden');
 
-  // Все остальные плитки отправляем в компактную ленту.
   for(const other of [...grid.querySelectorAll('.group-tile')]){
     if(other!==tile)strip.append(other)
   }
@@ -5312,6 +5341,88 @@ function focusGroupTile(tile){
     strip.scrollLeft=0;
     scheduleGroupRemoteVideoQualitySync()
   })
+}
+
+function updateGroupPinnedUi(){
+  const state=groupCallState;
+  const pinned=String(state?.pinnedIdentity||'');
+
+  document.querySelectorAll('.group-tile').forEach(tile=>{
+    const isPinned=!!pinned&&String(tile.dataset.participantIdentity||'')===pinned;
+    tile.classList.toggle('pinned',isPinned);
+    tile.querySelector('.tile-pin-status')?.classList.toggle('hidden',!isPinned)
+  });
+
+  const button=$('groupCallProfilePin');
+  if(button){
+    const profileIdentity=String(groupCallProfileUser?.identity||'');
+    const isPinned=!!pinned&&profileIdentity===pinned;
+    button.textContent=isPinned?'📍 Открепить':'📌 Закрепить';
+    button.classList.toggle('active',isPinned)
+  }
+}
+
+function setGroupPinnedIdentity(identity=''){
+  const state=groupCallState;
+  if(!state)return;
+
+  const next=String(identity||'');
+  state.pinnedIdentity=next;
+
+  if(state.speakerFocusTimer){
+    clearTimeout(state.speakerFocusTimer);
+    state.speakerFocusTimer=null
+  }
+  state.autoSpeakerIdentity='';
+
+  updateGroupPinnedUi();
+
+  if(next){
+    const tile=$(groupTileId(next));
+    if(tile?.isConnected)showGroupFocusedTile(tile)
+  }
+}
+
+function scheduleGroupSpeakerFocus(identity){
+  const state=groupCallState;
+  if(!state||state.pinnedIdentity)return;
+
+  const next=String(identity||'');
+  if(!next)return;
+
+  const focused=$('groupCallGrid')?.querySelector('.group-tile.focused');
+  if(String(focused?.dataset?.participantIdentity||'')===next){
+    state.autoSpeakerIdentity=next;
+    return
+  }
+
+  if(state.autoSpeakerIdentity===next&&state.speakerFocusTimer)return;
+
+  if(state.speakerFocusTimer)clearTimeout(state.speakerFocusTimer);
+  state.autoSpeakerIdentity=next;
+  state.speakerFocusTimer=setTimeout(()=>{
+    if(groupCallState!==state||state.pinnedIdentity)return;
+    state.speakerFocusTimer=null;
+    const tile=$(groupTileId(next));
+    if(tile?.isConnected)showGroupFocusedTile(tile)
+  },650)
+}
+
+function focusGroupTile(tile){
+  if(!tile)return;
+  const state=groupCallState;
+  const identity=String(tile.dataset.participantIdentity||'');
+
+  if(tile.classList.contains('focused')){
+    if(state?.pinnedIdentity===identity)setGroupPinnedIdentity('');
+    restoreGroupGridLayout();
+    return
+  }
+
+  if(state?.pinnedIdentity&&state.pinnedIdentity!==identity){
+    setGroupPinnedIdentity('')
+  }
+  showGroupFocusedTile(tile)
 }
 
 function groupParticipantUserId(identity){
@@ -5762,6 +5873,7 @@ async function openGroupCallProfile(participant,tile){
     !state.isAdmin||userId===Number(me?.id)||!userId
   );
 
+  updateGroupPinnedUi();
   $('groupCallProfileDialog').showModal()
 }
 
@@ -5834,7 +5946,12 @@ function ensureGroupTile(participant,isLocal=false){
     }
   }
 
-  tile.append(avatar,name,mic,speaking,ping,quality);
+  const pin=document.createElement('div');
+  pin.className='tile-pin-status hidden';
+  pin.textContent='📌';
+  pin.title='Участник закреплён';
+
+  tile.append(avatar,name,mic,speaking,ping,quality,pin);
   if(adminMute)tile.append(adminMute);
   tile.title='Нажмите, чтобы увеличить участника';
   tile.addEventListener('click',event=>{
@@ -5853,6 +5970,7 @@ function ensureGroupTile(participant,isLocal=false){
   const knownPing=groupCallState?.participantPings?.get?.(String(identity));
   updateGroupParticipantPing(identity,knownPing??null);
   updateGroupParticipantQuality(identity,participant.connectionQuality);
+  updateGroupPinnedUi();
   return tile
 }
 
@@ -5961,6 +6079,21 @@ function updateGroupActiveSpeakers(speakers=[]){
       }
     }
     state.activeSpeakerIds=next;
+
+    const localIdentity=String(state.room?.localParticipant?.identity||'');
+    const primaryRemote=(state.pendingSpeakers||[]).find(participant=>{
+      const identity=String(participant?.identity||'');
+      return identity&&identity!==localIdentity
+    });
+
+    if(!state.pinnedIdentity&&primaryRemote){
+      scheduleGroupSpeakerFocus(primaryRemote.identity)
+    }else if(!primaryRemote&&state.speakerFocusTimer){
+      clearTimeout(state.speakerFocusTimer);
+      state.speakerFocusTimer=null;
+      state.autoSpeakerIdentity=''
+    }
+
     scheduleGroupRemoteVideoQualitySync()
   })
 }
@@ -6126,6 +6259,9 @@ async function joinGroupCall(groupId,video=false,invite=false){
       manualLeave:false,
       lastParticipantCount:-1,
       speakerFrame:0,
+      speakerFocusTimer:null,
+      autoSpeakerIdentity:'',
+      pinnedIdentity:'',
       videoQualityFrame:0,
       videoNetworkCap:'high',
       pendingSpeakers:[],
@@ -6188,8 +6324,11 @@ async function joinGroupCall(groupId,video=false,invite=false){
         refreshGroupCount();
       })
       .on(LivekitClient.RoomEvent.ParticipantDisconnected,(participant)=>{
-        const leavingTile=$(groupTileId(participant.identity));
+        const identity=String(participant.identity||'');
+        const leavingTile=$(groupTileId(identity));
         const wasFocused=!!leavingTile?.classList.contains('focused');
+        const wasPinned=groupCallState?.pinnedIdentity===identity;
+        if(wasPinned)setGroupPinnedIdentity('');
         leavingTile?.remove();
         if(wasFocused)restoreGroupGridLayout();
         refreshGroupCount()
@@ -6299,6 +6438,10 @@ function leaveGroupCall(disconnect=true){
       cancelAnimationFrame(state.speakerFrame);
       state.speakerFrame=0
     }
+    if(state.speakerFocusTimer){
+      clearTimeout(state.speakerFocusTimer);
+      state.speakerFocusTimer=null
+    }
     if(state.videoQualityFrame){
       cancelAnimationFrame(state.videoQualityFrame);
       state.videoQualityFrame=0
@@ -6383,6 +6526,14 @@ $('groupCallProfileFocus').onclick=()=>{
   const tile=groupCallProfileUser?.tile;
   $('groupCallProfileDialog').close();
   if(tile?.isConnected)focusGroupTile(tile)
+};
+
+$('groupCallProfilePin').onclick=()=>{
+  const identity=String(groupCallProfileUser?.identity||'');
+  if(!groupCallState||!identity)return;
+  const isPinned=groupCallState.pinnedIdentity===identity;
+  setGroupPinnedIdentity(isPinned?'':identity);
+  $('groupCallProfileDialog').close()
 };
 
 $('groupCallProfileMessage').onclick=async()=>{
