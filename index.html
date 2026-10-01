@@ -5200,17 +5200,25 @@ async function upgradeCurrentCallToVideo(){
 }
 
 let callPingTimer=null;
+const peerNetworkBaselines=new WeakMap();
 
-function setCallPing(value){
+function setCallPing(value,network=null){
   const badge=$('callPing');
   if(!badge)return;
   const ms=Number(value);
   if(!Number.isFinite(ms)||ms<0){
     badge.classList.add('hidden');
     badge.textContent='— мс';
+    badge.title='';
     return
   }
   badge.textContent=Math.max(1,Math.round(ms))+' мс';
+  const details=[];
+  const loss=Number(network?.packetLossPct);
+  const jitter=Number(network?.jitterMs);
+  if(Number.isFinite(loss))details.push('Потери '+loss.toFixed(loss>=10?0:1)+'%');
+  if(Number.isFinite(jitter))details.push('Jitter '+Math.round(jitter)+' мс');
+  badge.title=details.join(' · ');
   badge.classList.remove('hidden')
 }
 
@@ -5222,8 +5230,25 @@ function stopCallPing(){
   setCallPing(null)
 }
 
+function networkLossSample(previous,currentSent,currentLost,receivedMode=false){
+  if(!previous)return null;
+  const sentDelta=currentSent-previous.sent;
+  const lostDelta=currentLost-previous.lost;
+  if(sentDelta<0||lostDelta<0)return null;
+  const denominator=receivedMode?sentDelta+lostDelta:sentDelta;
+  if(denominator<20)return null;
+  return Math.max(0,Math.min(100,(lostDelta/Math.max(1,denominator))*100))
+}
+
 async function readPeerNetworkStats(pc){
-  if(!pc?.getStats)return {rttMs:null,availableOutgoingBitrate:null};
+  if(!pc?.getStats){
+    return {
+      rttMs:null,
+      availableOutgoingBitrate:null,
+      packetLossPct:null,
+      jitterMs:null
+    }
+  }
   const stats=await pc.getStats();
   let pair=null;
   let transportPairId=null;
@@ -5267,22 +5292,118 @@ async function readPeerNetworkStats(pc){
     })
   }
 
+  const previous=peerNetworkBaselines.get(pc)||new Map();
+  const next=new Map();
+  const remoteLoss=[];
+  const inboundLoss=[];
+  const remoteJitter=[];
+  const inboundJitter=[];
+
+  stats.forEach(report=>{
+    const kind=report.kind||report.mediaType;
+    if(kind!=='audio'&&kind!=='video')return;
+
+    if(report.type==='remote-inbound-rtp'){
+      const jitter=Number(report.jitter);
+      if(Number.isFinite(jitter)&&jitter>=0){
+        remoteJitter.push(jitter*1000)
+      }
+
+      const lost=Number(report.packetsLost);
+      const local=report.localId&&typeof stats.get==='function'
+        ?stats.get(report.localId)
+        :null;
+      const sent=Number(local?.packetsSent);
+      if(Number.isFinite(lost)&&Number.isFinite(sent)){
+        const key='remote:'+report.id;
+        const sample=networkLossSample(previous.get(key),sent,lost,false);
+        next.set(key,{sent,lost});
+        if(sample!=null)remoteLoss.push(sample)
+      }
+
+      const fraction=Number(report.fractionLost);
+      if(
+        !remoteLoss.length
+        && Number.isFinite(fraction)
+        && fraction>=0
+        && fraction<=1
+      ){
+        remoteLoss.push(fraction*100)
+      }
+      return
+    }
+
+    if(report.type==='inbound-rtp'){
+      const jitter=Number(report.jitter);
+      if(Number.isFinite(jitter)&&jitter>=0){
+        inboundJitter.push(jitter*1000)
+      }
+
+      const lost=Number(report.packetsLost);
+      const received=Number(report.packetsReceived);
+      if(Number.isFinite(lost)&&Number.isFinite(received)){
+        const key='inbound:'+report.id;
+        const sample=networkLossSample(previous.get(key),received,lost,true);
+        next.set(key,{sent:received,lost});
+        if(sample!=null)inboundLoss.push(sample)
+      }
+    }
+  });
+
+  peerNetworkBaselines.set(pc,next);
+
+  const lossSamples=remoteLoss.length?remoteLoss:inboundLoss;
+  const jitterSamples=remoteJitter.length?remoteJitter:inboundJitter;
   const outgoing=Number(pair?.availableOutgoingBitrate);
+
   return {
     rttMs,
-    availableOutgoingBitrate:Number.isFinite(outgoing)&&outgoing>0?outgoing:null
+    availableOutgoingBitrate:Number.isFinite(outgoing)&&outgoing>0?outgoing:null,
+    packetLossPct:lossSamples.length?Math.max(...lossSamples):null,
+    jitterMs:jitterSamples.length?Math.max(...jitterSamples):null
   }
 }
 
 function privateVideoTierForNetwork(network){
   const rtt=Number(network?.rttMs);
   const bandwidth=Number(network?.availableOutgoingBitrate);
+  const loss=Number(network?.packetLossPct);
+  const jitter=Number(network?.jitterMs);
   const hasRtt=Number.isFinite(rtt)&&rtt>=0;
   const hasBandwidth=Number.isFinite(bandwidth)&&bandwidth>0;
+  const hasLoss=Number.isFinite(loss)&&loss>=0;
+  const hasJitter=Number.isFinite(jitter)&&jitter>=0;
 
-  if((hasRtt&&rtt>=650)||(hasBandwidth&&bandwidth<350000))return 'poor';
-  if((hasRtt&&rtt>=350)||(hasBandwidth&&bandwidth<850000))return 'fair';
+  if(
+    (hasRtt&&rtt>=650)
+    ||(hasBandwidth&&bandwidth<350000)
+    ||(hasLoss&&loss>=8)
+    ||(hasJitter&&jitter>=80)
+  )return 'poor';
+
+  if(
+    (hasRtt&&rtt>=350)
+    ||(hasBandwidth&&bandwidth<850000)
+    ||(hasLoss&&loss>=3)
+    ||(hasJitter&&jitter>=35)
+  )return 'fair';
+
   return 'good'
+}
+
+function severePrivateNetworkProblem(network){
+  const rtt=Number(network?.rttMs);
+  const loss=Number(network?.packetLossPct);
+  const jitter=Number(network?.jitterMs);
+  return (
+    (Number.isFinite(rtt)&&rtt>=900)
+    ||(Number.isFinite(loss)&&loss>=15)
+    ||(Number.isFinite(jitter)&&jitter>=140)
+  )
+}
+
+function networkTierRank(tier){
+  return tier==='good'?2:(tier==='fair'?1:0)
 }
 
 async function applyPrivateVideoTier(call,tier){
@@ -5319,8 +5440,9 @@ async function applyPrivateVideoTier(call,tier){
 async function maybeAdaptPrivateVideo(call,network){
   if(!call||currentCall!==call||!call.video||call.cameraOff)return;
   const tier=privateVideoTierForNetwork(network);
+  const currentTier=call.appliedVideoTier||'good';
 
-  if(tier===call.appliedVideoTier){
+  if(tier===currentTier){
     call.pendingVideoTier=null;
     call.pendingVideoTierSamples=0;
     return
@@ -5333,8 +5455,14 @@ async function maybeAdaptPrivateVideo(call,network){
     call.pendingVideoTierSamples=1
   }
 
-  if((call.pendingVideoTierSamples||0)<2)return;
-  if(call.lastVideoTierChangeAt&&Date.now()-call.lastVideoTierChangeAt<5000)return;
+  const upgrading=networkTierRank(tier)>networkTierRank(currentTier);
+  const requiredSamples=upgrading
+    ?4
+    :(severePrivateNetworkProblem(network)?1:2);
+  if((call.pendingVideoTierSamples||0)<requiredSamples)return;
+
+  const minDelay=upgrading?7000:3000;
+  if(call.lastVideoTierChangeAt&&Date.now()-call.lastVideoTierChangeAt<minDelay)return;
 
   call.pendingVideoTier=null;
   call.pendingVideoTierSamples=0;
@@ -5402,7 +5530,7 @@ async function refreshCallPing(call){
   try{
     const network=await readPeerNetworkStats(call.pc);
     if(currentCall!==call)return;
-    setCallPing(network.rttMs);
+    setCallPing(network.rttMs,network);
     maybeAdaptPrivateAudio(call,network).catch(()=>{});
     maybeAdaptPrivateVideo(call,network).catch(()=>{})
   }catch{
