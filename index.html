@@ -5481,18 +5481,47 @@ function privateVideoTierForNetwork(network){
   const hasLoss=Number.isFinite(loss)&&loss>=0;
   const hasJitter=Number.isFinite(jitter)&&jitter>=0;
 
+  // Video yields first when the link starts getting unstable.
   if(
-    (hasRtt&&rtt>=650)
-    ||(hasBandwidth&&bandwidth<350000)
-    ||(hasLoss&&loss>=8)
-    ||(hasJitter&&jitter>=80)
+    (hasRtt&&rtt>=600)
+    ||(hasBandwidth&&bandwidth<420000)
+    ||(hasLoss&&loss>=7)
+    ||(hasJitter&&jitter>=70)
   )return 'poor';
 
   if(
-    (hasRtt&&rtt>=350)
-    ||(hasBandwidth&&bandwidth<850000)
-    ||(hasLoss&&loss>=3)
-    ||(hasJitter&&jitter>=35)
+    (hasRtt&&rtt>=300)
+    ||(hasBandwidth&&bandwidth<1000000)
+    ||(hasLoss&&loss>=2.5)
+    ||(hasJitter&&jitter>=30)
+  )return 'fair';
+
+  return 'good'
+}
+
+function privateAudioTierForNetwork(network){
+  const rtt=Number(network?.rttMs);
+  const bandwidth=Number(network?.availableOutgoingBitrate);
+  const loss=Number(network?.packetLossPct);
+  const jitter=Number(network?.jitterMs);
+  const hasRtt=Number.isFinite(rtt)&&rtt>=0;
+  const hasBandwidth=Number.isFinite(bandwidth)&&bandwidth>0;
+  const hasLoss=Number.isFinite(loss)&&loss>=0;
+  const hasJitter=Number.isFinite(jitter)&&jitter>=0;
+
+  // Keep speech quality high until the connection is genuinely constrained.
+  if(
+    (hasRtt&&rtt>=1100)
+    ||(hasBandwidth&&bandwidth<120000)
+    ||(hasLoss&&loss>=18)
+    ||(hasJitter&&jitter>=160)
+  )return 'poor';
+
+  if(
+    (hasRtt&&rtt>=700)
+    ||(hasBandwidth&&bandwidth<240000)
+    ||(hasLoss&&loss>=9)
+    ||(hasJitter&&jitter>=90)
   )return 'fair';
 
   return 'good'
@@ -5513,17 +5542,26 @@ function networkTierRank(tier){
   return tier==='good'?2:(tier==='fair'?1:0)
 }
 
-async function applyPrivateVideoTier(call,tier){
+async function applyPrivateVideoTier(call,tier,network=null){
   if(!call||currentCall!==call||!call.pc)return;
   const sender=call.pc.getSenders().find(item=>item.track?.kind==='video');
   if(!sender?.track||typeof sender.getParameters!=='function'||typeof sender.setParameters!=='function')return;
 
   const profiles={
     good:{maxBitrate:1400000,maxFramerate:24,scaleResolutionDownBy:1},
-    fair:{maxBitrate:650000,maxFramerate:20,scaleResolutionDownBy:1.5},
-    poor:{maxBitrate:320000,maxFramerate:15,scaleResolutionDownBy:2}
+    fair:{maxBitrate:520000,maxFramerate:18,scaleResolutionDownBy:1.75},
+    poor:{maxBitrate:220000,maxFramerate:12,scaleResolutionDownBy:2.75}
   };
   const profile=profiles[tier]||profiles.good;
+  let maxBitrate=profile.maxBitrate;
+
+  const bandwidth=Number(network?.availableOutgoingBitrate);
+  if(Number.isFinite(bandwidth)&&bandwidth>0){
+    // Reserve room for Opus speech, RTCP and short bandwidth estimation spikes.
+    const reservedForAudioAndOverhead=160000;
+    const videoBudget=Math.max(120000,bandwidth-reservedForAudioAndOverhead);
+    maxBitrate=Math.min(maxBitrate,videoBudget)
+  }
 
   try{
     const params=sender.getParameters();
@@ -5531,7 +5569,7 @@ async function applyPrivateVideoTier(call,tier){
       params.encodings=[{}]
     }
     for(const encoding of params.encodings){
-      encoding.maxBitrate=profile.maxBitrate;
+      encoding.maxBitrate=maxBitrate;
       encoding.maxFramerate=profile.maxFramerate;
       encoding.scaleResolutionDownBy=profile.scaleResolutionDownBy
     }
@@ -5539,6 +5577,7 @@ async function applyPrivateVideoTier(call,tier){
     await sender.setParameters(params);
     if(currentCall===call){
       call.appliedVideoTier=tier;
+      call.appliedVideoBitrate=maxBitrate;
       call.lastVideoTierChangeAt=Date.now()
     }
   }catch{}
@@ -5546,12 +5585,26 @@ async function applyPrivateVideoTier(call,tier){
 
 async function maybeAdaptPrivateVideo(call,network){
   if(!call||currentCall!==call||!call.video||call.cameraOff)return;
-  const tier=privateVideoTierForNetwork(network);
+  const tier=privateAudioTierForNetwork(network);
   const currentTier=call.appliedVideoTier||'good';
 
   if(tier===currentTier){
     call.pendingVideoTier=null;
     call.pendingVideoTierSamples=0;
+    const bandwidth=Number(network?.availableOutgoingBitrate);
+    if(Number.isFinite(bandwidth)&&bandwidth>0){
+      const desiredCap=Math.min(
+        tier==='good'?1400000:(tier==='fair'?520000:220000),
+        Math.max(120000,bandwidth-160000)
+      );
+      const currentCap=Number(call.appliedVideoBitrate)||0;
+      if(
+        !currentCap
+        ||Math.abs(desiredCap-currentCap)>=Math.max(80000,currentCap*0.22)
+      ){
+        await applyPrivateVideoTier(call,tier,network)
+      }
+    }
     return
   }
 
@@ -5573,7 +5626,7 @@ async function maybeAdaptPrivateVideo(call,network){
 
   call.pendingVideoTier=null;
   call.pendingVideoTierSamples=0;
-  await applyPrivateVideoTier(call,tier)
+  await applyPrivateVideoTier(call,tier,network)
 }
 
 async function applyPrivateAudioTier(call,tier){
@@ -5583,8 +5636,8 @@ async function applyPrivateAudioTier(call,tier){
 
   const bitrates={
     good:48000,
-    fair:36000,
-    poor:24000
+    fair:40000,
+    poor:32000
   };
   const maxBitrate=bitrates[tier]||bitrates.good;
 
@@ -5621,8 +5674,11 @@ async function maybeAdaptPrivateAudio(call,network){
     call.pendingAudioTierSamples=1
   }
 
-  if((call.pendingAudioTierSamples||0)<2)return;
-  if(call.lastAudioTierChangeAt&&Date.now()-call.lastAudioTierChangeAt<4000)return;
+  const currentTier=call.appliedAudioTier||'good';
+  const upgrading=networkTierRank(tier)>networkTierRank(currentTier);
+  const requiredSamples=upgrading?5:3;
+  if((call.pendingAudioTierSamples||0)<requiredSamples)return;
+  if(call.lastAudioTierChangeAt&&Date.now()-call.lastAudioTierChangeAt<(upgrading?9000:5500))return;
 
   call.pendingAudioTier=null;
   call.pendingAudioTierSamples=0;
@@ -5878,7 +5934,7 @@ function schedulePrivateCallRecovery(call,delay=900){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks()){
     try{
@@ -5886,6 +5942,7 @@ async function createPeer(peerId,peerName,id,video,stream){
     }catch{}
     pc.addTrack(track,stream)
   }
+  applyPrivateAudioTier(currentCall,'good').catch(()=>{});
   if(video)applyPrivateVideoTier(currentCall,'good').catch(()=>{});
   $('localVideo').srcObject=stream;
   updatePrivateLocalMirror();
