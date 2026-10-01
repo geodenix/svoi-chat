@@ -12156,7 +12156,7 @@ function gatherIceCandidate(config,relayOnly=false,timeoutMs=4500){
           clearTimeout(timer);finish({ok:false,type:null});return
         }
         const text=String(candidate.candidate||'');
-        const match=text.match(/typs+(w+)/);
+        const match=text.match(/\btyp\s+(\w+)/);
         const type=match?.[1]||candidate.type||'candidate';
         if(!relayOnly||type==='relay'){
           clearTimeout(timer);finish({ok:true,type})
