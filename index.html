@@ -869,6 +869,7 @@ body.drawer-open{overflow:hidden}
     <button id="groupMuteBtn" type="button" title="Микрофон">🎤</button>
     <button id="groupSpeakerBtn" type="button" title="Аудиовыход: обычный">🔈</button>
     <button id="groupCameraBtn" type="button" title="Камера">📷</button>
+    <button id="groupInviteLinkBtn" class="hidden" type="button" title="Пригласить по ссылке">🔗</button>
     <button id="groupSwitchCameraBtn" type="button" title="Сменить камеру">🔄</button>
     <button id="groupEndBtn" class="end" type="button" title="Выйти">☎</button>
   </div>
@@ -898,6 +899,7 @@ body.drawer-open{overflow:hidden}
       <button id="earModeBtn" class="round-call" type="button" title="Режим у уха">👂</button>
       <button id="privateSizeDown" class="round-call video-size-btn hidden" type="button" title="Уменьшить видео">−</button>
       <button id="privateSizeUp" class="round-call video-size-btn hidden" type="button" title="Увеличить видео">+</button>
+      <button id="privateInviteCall" class="round-call hidden" type="button" title="Пригласить по ссылке">🔗</button>
       <button id="cameraCall" class="round-call" type="button" title="Камера">📷</button>
       <button id="switchCamera" class="round-call" type="button" title="Сменить камеру">🔄</button>
       <button id="endCall" class="round-call end" type="button" title="Завершить">☎</button>
@@ -923,6 +925,25 @@ body.drawer-open{overflow:hidden}
     <small id="earLockText">Экран заблокирован. Чтобы разблокировать — удерживайте экран 2 секунды.</small>
   </div>
 </div>
+
+<dialog id="callInviteDialog" class="call-invite-dialog">
+  <div class="chat-menu-head">
+    <div>
+      <h2>Пригласить в звонок</h2>
+      <small class="muted">Ссылка действует до 2 часов. Войти сможет пользователь «Своих».</small>
+    </div>
+    <button id="closeCallInvite" class="chat-menu-close" type="button" aria-label="Закрыть">×</button>
+  </div>
+  <div class="field">
+    <label>Ссылка на звонок</label>
+    <input id="callInviteUrl" type="text" readonly>
+  </div>
+  <div id="callInviteStatus" class="muted" style="min-height:20px"></div>
+  <div class="dialog-actions">
+    <button id="copyCallInvite" type="button">📋 Копировать</button>
+    <button id="shareCallInvite" class="primary" type="button">↗️ Поделиться</button>
+  </div>
+</dialog>
 
 <dialog id="groupCallProfileDialog" class="group-call-profile-dialog">
   <button id="closeGroupCallProfile" class="group-call-profile-close" type="button" aria-label="Закрыть">×</button>
@@ -1888,6 +1909,7 @@ async function enter(){
     connectWs();
     resumeIncomingCallFromUrl().catch(()=>{});
     resumeGroupCallFromUrl().catch(()=>{});
+    resumeCallInviteFromUrl().catch(()=>{});
 
     const usersLoad=loadUsers();
     const groupsLoad=loadGroups();
@@ -5813,11 +5835,13 @@ async function openGroupCallProfile(participant,tile){
     user=users.find(item=>Number(item.id)===userId)||null
   }
 
-  try{
-    const members=await api('/api/groups/'+state.groupId+'/members');
-    const member=members?.members?.find(item=>Number(item.id)===userId);
-    if(member)user={...(user||{}),...member}
-  }catch{}
+  if(state.kind==='group'){
+    try{
+      const members=await api('/api/groups/'+state.groupId+'/members');
+      const member=members?.members?.find(item=>Number(item.id)===userId);
+      if(member)user={...(user||{}),...member}
+    }catch{}
+  }
 
   if(!user){
     user={
@@ -6129,7 +6153,10 @@ async function recoverGroupCall(state){
   }
 
   try{
-    const credentials=await api('/api/groups/'+state.groupId+'/call-token',{
+    const tokenEndpoint=state.kind==='link'
+      ?'/api/call-links/'+encodeURIComponent(state.inviteToken)+'/token'
+      :'/api/groups/'+state.groupId+'/call-token';
+    const credentials=await api(tokenEndpoint,{
       method:'POST',
       body:{video:!state.cameraOff,invite:false}
     });
@@ -6197,7 +6224,7 @@ async function renderGroupLocalTracks(){
   updateGroupMicBadge(p,true)
 }
 
-async function joinGroupCall(groupId,video=false,invite=false){
+async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
   if(groupCallState)return;
   if(currentCall||pendingCall){
     alert('Сначала заверши текущий личный звонок');return
@@ -6208,10 +6235,14 @@ async function joinGroupCall(groupId,video=false,invite=false){
 
   let room=null;
   try{
-    const credentials=await api('/api/groups/'+groupId+'/call-token',{
+    const tokenEndpoint=linkedToken
+      ?'/api/call-links/'+encodeURIComponent(linkedToken)+'/token'
+      :'/api/groups/'+groupId+'/call-token';
+    const credentials=await api(tokenEndpoint,{
       method:'POST',
       body:{video:!!video,invite:!!invite}
     });
+    const callVideo=linkedToken?!!credentials.video:!!video;
 
     room=new LivekitClient.Room({
       adaptiveStream:true,
@@ -6246,12 +6277,14 @@ async function joinGroupCall(groupId,video=false,invite=false){
 
     groupCallState={
       room,
-      groupId,
-      video:!!video,
+      groupId:linkedToken?null:groupId,
+      kind:linkedToken?'link':'group',
+      inviteToken:linkedToken||'',
+      video:callVideo,
       isAdmin:!!credentials.is_admin,
       connectedAt:0,
       muted:false,
-      cameraOff:!video,
+      cameraOff:!callVideo,
       facing:'user',
       reconnectAttempts:0,
       recovering:false,
@@ -6288,17 +6321,18 @@ async function joinGroupCall(groupId,video=false,invite=false){
     $('groupCallGrid').classList.add('layout-1');
     $('groupCallName').textContent=credentials.group_name;
     $('groupCallStatus').textContent='Подключение…';
+    $('groupInviteLinkBtn').classList.toggle('hidden',!linkedToken);
     $('groupCallDuration').textContent='00:00';
     $('groupCallDuration').classList.add('hidden');
     $('groupCallOverlay').classList.remove('hidden');
     applyGroupAutoLayout();
     updateSpeakerButtons();
-    $('groupCameraBtn').classList.toggle('off',!video);
-    $('groupCameraBtn').textContent=video?'📷':'🎥';
-    $('groupCameraBtn').title=video
+    $('groupCameraBtn').classList.toggle('off',!callVideo);
+    $('groupCameraBtn').textContent=callVideo?'📷':'🎥';
+    $('groupCameraBtn').title=callVideo
       ?'Переключить в аудиорежим'
       :'Переключить в видеорежим';
-    $('groupSwitchCameraBtn').classList.toggle('hidden',!video);
+    $('groupSwitchCameraBtn').classList.toggle('hidden',!callVideo);
 
     room
       .on(LivekitClient.RoomEvent.TrackSubscribed,(track,publication,participant)=>{
@@ -6406,11 +6440,11 @@ async function joinGroupCall(groupId,video=false,invite=false){
     await room.localParticipant.setMicrophoneEnabled(true);
     groupCallState.muted=false;
     updateGroupMicBadge(room.localParticipant,true,false);
-    await startNativeCallService(credentials.group_name,!!video,true).catch(()=>{});
+    await startNativeCallService(credentials.group_name,callVideo,true).catch(()=>{});
     if(nativeAudioRoutePlugin()){
       await applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
     }
-    if(video)await room.localParticipant.setCameraEnabled(true);
+    if(callVideo)await room.localParticipant.setCameraEnabled(true);
 
     await renderGroupLocalTracks();
     refreshGroupCount();
@@ -6467,6 +6501,7 @@ function leaveGroupCall(disconnect=true){
   $('groupCallDuration').textContent='00:00';
   $('groupCallDuration').classList.add('hidden');
   $('groupCallOverlay').classList.add('hidden');
+  $('groupInviteLinkBtn').classList.add('hidden');
   stopLiveCallDurationTimerIfIdle()
 }
 
@@ -6569,6 +6604,54 @@ $('groupCallProfileMute').onclick=()=>{
   }catch{}
 };
 
+
+$('privateInviteCall').onclick=()=>createAndOpenPrivateInvite();
+
+$('groupInviteLinkBtn').onclick=()=>{
+  const token=groupCallState?.kind==='link'
+    ?groupCallState.inviteToken
+    :'';
+  if(token)openCallInviteDialog(token,'Ссылка готова к отправке')
+};
+
+$('closeCallInvite').onclick=()=>$('callInviteDialog').close();
+$('callInviteDialog').addEventListener('click',event=>{
+  if(event.target===$('callInviteDialog'))$('callInviteDialog').close()
+});
+
+$('copyCallInvite').onclick=async()=>{
+  const url=$('callInviteUrl').value;
+  if(!url)return;
+  try{
+    await navigator.clipboard.writeText(url);
+    $('callInviteStatus').textContent='Ссылка скопирована'
+  }catch{
+    $('callInviteUrl').focus();
+    $('callInviteUrl').select();
+    document.execCommand?.('copy');
+    $('callInviteStatus').textContent='Ссылка скопирована'
+  }
+};
+
+$('shareCallInvite').onclick=async()=>{
+  const url=$('callInviteUrl').value;
+  if(!url)return;
+  if(typeof navigator.share==='function'){
+    try{
+      await navigator.share({
+        title:'Приглашение в звонок «Свои»',
+        text:'Присоединяйся к звонку',
+        url
+      });
+      $('callInviteStatus').textContent='Окно отправки открыто'
+      return
+    }catch(err){
+      if(err?.name==='AbortError')return
+    }
+  }
+  $('copyCallInvite').click()
+};
+
 $('groupMuteBtn').onclick=async()=>{
   if(!groupCallState)return;
   try{
@@ -6630,6 +6713,27 @@ async function resumeGroupCallFromUrl(){
   const video=params.get('video')==='1';
   history.replaceState({},'',location.pathname);
   await joinGroupCall(groupId,video,false)
+}
+
+async function resumeCallInviteFromUrl(){
+  const params=new URLSearchParams(location.search);
+  const inviteToken=String(params.get('call_invite')||'').trim();
+  if(!inviteToken)return;
+
+  history.replaceState({},'',location.pathname);
+  if(currentCall||pendingCall||groupCallState){
+    alert('Сначала заверши текущий звонок');
+    return
+  }
+
+  const join=confirm('Присоединиться к звонку по приглашению?');
+  if(!join)return;
+
+  try{
+    await joinGroupCall(null,false,false,inviteToken)
+  }catch(err){
+    alert(err?.message||'Не удалось присоединиться по ссылке')
+  }
 }
 
 let rtcConfigCache=null,rtcConfigFetchedAt=0;
@@ -7562,6 +7666,15 @@ function sendPrivateVideoState(sync=false){
   }
 }
 
+function updatePrivateInviteButton(){
+  const button=$('privateInviteCall');
+  if(!button)return;
+  button.classList.toggle(
+    'hidden',
+    !currentCall?.answered||!!pendingCall||!!groupCallState
+  )
+}
+
 function showCallUi(name,status,video,incoming=false,avatarUrl=null,nativeSystemControls=false){
   clearRemoteVideoFrame();
   $('callOverlay').classList.remove('hidden');
@@ -7580,7 +7693,8 @@ function showCallUi(name,status,video,incoming=false,avatarUrl=null,nativeSystem
     applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
   }
   $('cameraCall').classList.remove('hidden');
-  updatePrivateVideoControls()
+  updatePrivateVideoControls();
+  updatePrivateInviteButton()
 }
 
 function resetCallUi(){
@@ -7598,7 +7712,7 @@ function resetCallUi(){
   $('callAvatar').classList.remove('hidden');
   setRemoteCallMuted(false);
   $('incomingActions').classList.add('hidden');$('activeCallControls').classList.add('hidden');$('mediaPermission').classList.add('hidden');
-  $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');$('cameraCall').disabled=false;updateSpeakerButtons();updatePrivateVideoControls();applyPrivateParticipantSize();
+  $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');$('cameraCall').disabled=false;updateSpeakerButtons();updatePrivateVideoControls();updatePrivateInviteButton();applyPrivateParticipantSize();
   if(preparedMediaStream){try{preparedMediaStream.getTracks().forEach(t=>t.stop())}catch{}preparedMediaStream=null}
 }
 
@@ -7830,7 +7944,8 @@ async function createPeer(peerId,peerName,id,video,stream){
       stopOutgoingTone();
       $('callStatus').textContent='Соединено';
       updateMiniCallBar();
-      updateEarModeButton()
+      updateEarModeButton();
+      updatePrivateInviteButton()
     }else if(state==='connecting'){
       stopCallPing();
       $('callStatus').textContent='Соединение…';
@@ -8053,6 +8168,93 @@ async function rejectIncomingCall(){
   setTimeout(()=>loadCallHistory().catch(()=>{}),500)
 }
 
+
+function closePrivateCallForConference(){
+  const call=currentCall;
+  if(!call)return null;
+  clearPrivateRecovery(call);
+  stopCallPing();
+  stopOutgoingTone();
+  try{
+    call.pc.onicecandidate=null;
+    call.pc.ontrack=null;
+    call.pc.close()
+  }catch{}
+  try{call.localStream?.getTracks().forEach(track=>track.stop())}catch{}
+  currentCall=null;
+  pendingCall=null;
+  pendingIce=[];
+  acceptingCall=false;
+  resetCallUi();
+  return call
+}
+
+function callInviteUrl(inviteToken){
+  return new URL(
+    '/?call_invite='+encodeURIComponent(inviteToken),
+    location.origin
+  ).href
+}
+
+function openCallInviteDialog(inviteToken,status=''){
+  if(!inviteToken)return;
+  $('callInviteUrl').value=callInviteUrl(inviteToken);
+  $('callInviteStatus').textContent=status;
+  if(!$('callInviteDialog').open)$('callInviteDialog').showModal()
+}
+
+async function promotePrivateCallToConference(inviteToken,video=false){
+  const call=currentCall;
+  if(!call?.answered)throw new Error('Личный звонок уже завершён');
+  const callId=call.callId;
+  const callVideo=!!(video||call.video);
+  closePrivateCallForConference();
+  try{
+    await joinGroupCall(null,callVideo,false,inviteToken);
+    return {callId,video:callVideo}
+  }catch(err){
+    throw err
+  }
+}
+
+async function createAndOpenPrivateInvite(){
+  const button=$('privateInviteCall');
+  const call=currentCall;
+  if(!call?.answered||button?.disabled)return;
+
+  if(button)button.disabled=true;
+  try{
+    $('callStatus').textContent='Создаём ссылку…';
+    const result=await api(
+      '/api/calls/'+encodeURIComponent(call.callId)+'/invite-link',
+      {method:'POST'}
+    );
+
+    $('callStatus').textContent='Переводим звонок в конференцию…';
+    const promoted=await promotePrivateCallToConference(
+      result.invite_token,
+      !!result.video
+    );
+
+    await api(
+      '/api/calls/'+encodeURIComponent(promoted.callId)+'/activate-conference',
+      {
+        method:'POST',
+        body:{invite_token:result.invite_token}
+      }
+    );
+
+    openCallInviteDialog(
+      result.invite_token,
+      'Готово · можно отправить ссылку дополнительному участнику'
+    )
+  }catch(err){
+    alert(err?.message||'Не удалось создать приглашение в звонок')
+  }finally{
+    if(button)button.disabled=false
+  }
+}
+
 function finishCall(notify=true){
   const endingCallId=currentCall?.callId||pendingCall?.call_id||null;
   if(endingCallId)clearNativeCallNotification(endingCallId);
@@ -8191,6 +8393,7 @@ async function handleCallSignal(data){
     sendPrivateVideoState(true);
     updateMiniCallBar();
     updateEarModeButton();
+    updatePrivateInviteButton();
 
     // Cold-start Android acceptance can deliver the same answer more than
     // once through reconnect/restore paths. A duplicate answer in stable
@@ -8698,6 +8901,21 @@ function connectWs(){
         setTimeout(()=>{
           if(groupCallState===state)refreshGroupCount()
         },1600)
+      }
+      return
+    }
+
+    if(data.type==='private_call_room_upgrade'){
+      if(
+        currentCall
+        &&currentCall.callId===data.call_id
+        &&data.invite_token
+      ){
+        const video=!!data.video;
+        promotePrivateCallToConference(data.invite_token,video)
+          .catch(err=>{
+            alert(err?.message||'Не удалось перейти в конференцию')
+          })
       }
       return
     }
