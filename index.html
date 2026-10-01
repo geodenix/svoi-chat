@@ -397,6 +397,45 @@ body.drawer-open{overflow:hidden}
   white-space:nowrap
 }
 </style>
+<style>
+/* Square participant tiles in group calls. */
+.group-call-grid:not(.has-focus){
+  grid-auto-rows:auto!important
+}
+.group-call-grid:not(.has-focus) .group-tile{
+  aspect-ratio:1/1;
+  height:auto!important;
+  min-height:0!important
+}
+.group-call-strip .group-tile{
+  flex:0 0 96px!important;
+  width:96px!important;
+  height:96px!important;
+  min-height:96px!important;
+  aspect-ratio:1/1
+}
+.group-call-grid.has-focus .group-tile.focused{
+  width:min(100%,calc(100dvh - 205px),720px)!important;
+  height:auto!important;
+  min-height:0!important;
+  aspect-ratio:1/1;
+  align-self:center
+}
+
+/* Movable self-preview in a private video call. */
+.local-video{
+  right:auto!important;
+  touch-action:none;
+  user-select:none;
+  -webkit-user-select:none;
+  cursor:grab
+}
+.local-video.dragging{
+  cursor:grabbing;
+  transition:none!important;
+  box-shadow:0 10px 32px #000b
+}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -906,6 +945,18 @@ let chatGalleryState={
 const outboxDeliveries=new Map();
 let privateParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_private_video_size')||1)));
 let groupParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_group_video_size')||1)));
+let privateLocalVideoPosition=(()=>{
+  try{
+    const saved=JSON.parse(localStorage.getItem('svoi_private_pip_position')||'null');
+    if(saved&&Number.isFinite(saved.x)&&Number.isFinite(saved.y)){
+      return {
+        x:Math.max(0,Math.min(1,saved.x)),
+        y:Math.max(0,Math.min(1,saved.y))
+      }
+    }
+  }catch{}
+  return {x:1,y:0}
+})();
 
 function setDrawerButton(button,icon,label,value){
   if(!button)return;
@@ -4885,9 +4936,7 @@ function applyGroupParticipantSize(){
   if(!grid)return;
 
   const mins=[125,175,255];
-  const heights=[145,200,285];
   grid.style.setProperty('--tile-min',mins[groupParticipantSize]+'px');
-  grid.style.setProperty('--tile-height',heights[groupParticipantSize]+'px');
 
   if(down)down.disabled=groupParticipantSize<=0;
   if(up)up.disabled=groupParticipantSize>=2;
@@ -5741,7 +5790,10 @@ function leaveGroupCall(disconnect=true){
 }
 
 window.addEventListener('resize',()=>{
-  if(groupCallState) scheduleGroupRemoteVideoQualitySync()
+  if(groupCallState) scheduleGroupRemoteVideoQualitySync();
+  if(currentCall&&localVideoTrack()){
+    requestAnimationFrame(()=>applyPrivateLocalVideoPosition())
+  }
 },{passive:true});
 
 window.addEventListener('offline',()=>{
@@ -5886,6 +5938,126 @@ function privateVideoAvailable(){
   )
 }
 
+function applyPrivateLocalVideoPosition(){
+  const stage=document.querySelector('#callOverlay .call-stage');
+  const local=$('localVideo');
+  if(!stage||!local)return;
+
+  const stageRect=stage.getBoundingClientRect();
+  const localRect=local.getBoundingClientRect();
+  if(!stageRect.width||!stageRect.height||!localRect.width||!localRect.height)return;
+
+  const padding=10;
+  const maxLeft=Math.max(
+    padding,
+    stageRect.width-localRect.width-padding
+  );
+  const maxTop=Math.max(
+    padding,
+    stageRect.height-localRect.height-padding
+  );
+  const availableX=Math.max(0,maxLeft-padding);
+  const availableY=Math.max(0,maxTop-padding);
+  const left=padding+availableX*privateLocalVideoPosition.x;
+  const top=padding+availableY*privateLocalVideoPosition.y;
+
+  local.style.left=Math.round(left)+'px';
+  local.style.top=Math.round(top)+'px'
+}
+
+function savePrivateLocalVideoPosition(left,top){
+  const stage=document.querySelector('#callOverlay .call-stage');
+  const local=$('localVideo');
+  if(!stage||!local)return;
+
+  const stageRect=stage.getBoundingClientRect();
+  const localRect=local.getBoundingClientRect();
+  const padding=10;
+  const maxLeft=Math.max(padding,stageRect.width-localRect.width-padding);
+  const maxTop=Math.max(padding,stageRect.height-localRect.height-padding);
+  const availableX=Math.max(1,maxLeft-padding);
+  const availableY=Math.max(1,maxTop-padding);
+
+  privateLocalVideoPosition={
+    x:Math.max(0,Math.min(1,(left-padding)/availableX)),
+    y:Math.max(0,Math.min(1,(top-padding)/availableY))
+  };
+  localStorage.setItem(
+    'svoi_private_pip_position',
+    JSON.stringify(privateLocalVideoPosition)
+  )
+}
+
+function bindPrivateLocalVideoDrag(){
+  const local=$('localVideo');
+  const stage=document.querySelector('#callOverlay .call-stage');
+  if(!local||!stage||local.dataset.dragBound==='1')return;
+  local.dataset.dragBound='1';
+
+  let drag=null;
+
+  local.addEventListener('pointerdown',event=>{
+    if(event.button!=null&&event.button!==0)return;
+    if(local.classList.contains('hidden'))return;
+
+    const localRect=local.getBoundingClientRect();
+    const stageRect=stage.getBoundingClientRect();
+    drag={
+      pointerId:event.pointerId,
+      offsetX:event.clientX-localRect.left,
+      offsetY:event.clientY-localRect.top,
+      stageRect
+    };
+
+    local.classList.add('dragging');
+    try{local.setPointerCapture(event.pointerId)}catch{}
+    event.preventDefault()
+  });
+
+  local.addEventListener('pointermove',event=>{
+    if(!drag||event.pointerId!==drag.pointerId)return;
+    const localRect=local.getBoundingClientRect();
+    const padding=10;
+    const maxLeft=Math.max(
+      padding,
+      drag.stageRect.width-localRect.width-padding
+    );
+    const maxTop=Math.max(
+      padding,
+      drag.stageRect.height-localRect.height-padding
+    );
+    const left=Math.max(
+      padding,
+      Math.min(maxLeft,event.clientX-drag.stageRect.left-drag.offsetX)
+    );
+    const top=Math.max(
+      padding,
+      Math.min(maxTop,event.clientY-drag.stageRect.top-drag.offsetY)
+    );
+
+    local.style.left=Math.round(left)+'px';
+    local.style.top=Math.round(top)+'px';
+    event.preventDefault()
+  },{passive:false});
+
+  const finish=event=>{
+    if(!drag||event.pointerId!==drag.pointerId)return;
+    const left=parseFloat(local.style.left)||10;
+    const top=parseFloat(local.style.top)||10;
+    savePrivateLocalVideoPosition(left,top);
+    drag=null;
+    local.classList.remove('dragging')
+  };
+
+  local.addEventListener('pointerup',finish);
+  local.addEventListener('pointercancel',event=>{
+    if(!drag||event.pointerId!==drag.pointerId)return;
+    drag=null;
+    local.classList.remove('dragging');
+    applyPrivateLocalVideoPosition()
+  })
+}
+
 function applyPrivateParticipantSize(){
   const remote=$('remoteVideo');
   const local=$('localVideo');
@@ -5908,7 +6080,8 @@ function applyPrivateParticipantSize(){
   }
   if(local){
     local.style.width=localWidths[privateParticipantSize];
-    local.style.maxWidth=localMax[privateParticipantSize]
+    local.style.maxWidth=localMax[privateParticipantSize];
+    requestAnimationFrame(()=>applyPrivateLocalVideoPosition())
   }
 }
 
@@ -6060,7 +6233,10 @@ function updatePrivateVideoControls(){
   switchButton.classList.toggle('hidden',!hasVideo);
   preview.classList.toggle('hidden',!hasVideo||!enabled);
   updateEarModeButton();
-  applyPrivateParticipantSize()
+  applyPrivateParticipantSize();
+  if(hasVideo&&enabled){
+    requestAnimationFrame(()=>applyPrivateLocalVideoPosition())
+  }
 }
 
 async function upgradeCurrentCallToVideo(){
@@ -7345,6 +7521,8 @@ earLock.addEventListener('pointerleave',event=>{
   if(event.pointerType!=='touch')cancelEarUnlock()
 });
 earLock.addEventListener('contextmenu',event=>event.preventDefault());
+
+bindPrivateLocalVideoDrag();
 
 $('cameraCall').onclick=async()=>{
   if(!currentCall)return;
