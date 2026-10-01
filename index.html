@@ -162,6 +162,116 @@ body.drawer-open{overflow:hidden}
   box-shadow:0 5px 18px #2387ff66
 }
 </style>
+<style>
+.chat-gallery-dialog{
+  width:min(96vw,820px);
+  max-height:90dvh;
+  padding:0;
+  overflow:hidden
+}
+.chat-gallery-tabs{
+  display:flex;
+  gap:7px;
+  padding:10px 12px;
+  overflow-x:auto;
+  border-bottom:1px solid #26364d
+}
+.chat-gallery-tabs button{
+  flex:0 0 auto;
+  border:1px solid #31527a;
+  background:#142a46;
+  color:#b8c9de;
+  border-radius:999px;
+  padding:8px 12px;
+  font-size:13px;
+  font-weight:750
+}
+.chat-gallery-tabs button.active{
+  background:#2b86fa;
+  color:#fff;
+  border-color:#2b86fa
+}
+.chat-gallery-content{
+  min-height:180px;
+  max-height:calc(90dvh - 165px);
+  overflow:auto;
+  padding:12px
+}
+.chat-gallery-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(120px,1fr));
+  gap:8px
+}
+.chat-gallery-media{
+  position:relative;
+  min-width:0;
+  border-radius:14px;
+  overflow:hidden;
+  background:#101e31;
+  border:1px solid #29415f
+}
+.chat-gallery-media img,
+.chat-gallery-media video{
+  display:block;
+  width:100%;
+  aspect-ratio:1/1;
+  object-fit:cover;
+  background:#050b14
+}
+.chat-gallery-media video{object-fit:contain}
+.chat-gallery-meta{
+  display:flex;
+  justify-content:space-between;
+  gap:8px;
+  padding:7px 8px;
+  color:#91a5bf;
+  font-size:10px
+}
+.chat-gallery-list{display:grid;gap:8px}
+.chat-gallery-row{
+  min-width:0;
+  padding:11px 12px;
+  border:1px solid #29415f;
+  border-radius:13px;
+  background:#14263d
+}
+.chat-gallery-row strong,
+.chat-gallery-row small{
+  display:block;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis
+}
+.chat-gallery-row small{
+  color:#91a5bf;
+  margin-top:4px
+}
+.chat-gallery-row a{
+  color:#9fd0ff;
+  text-decoration:none;
+  overflow-wrap:anywhere
+}
+.chat-gallery-row audio{
+  width:100%;
+  margin-top:8px
+}
+.chat-gallery-empty,
+.chat-gallery-loading{
+  padding:34px 12px;
+  text-align:center;
+  color:#91a5bf
+}
+.chat-gallery-more{
+  width:calc(100% - 24px);
+  margin:0 12px 12px;
+  border:0;
+  border-radius:12px;
+  padding:11px 12px;
+  background:#244f7e;
+  color:#fff;
+  font-weight:750
+}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -402,11 +512,31 @@ body.drawer-open{overflow:hidden}
     <button id="groupMembersBtn" class="hidden" type="button">👥 Участники</button>
     <button id="addParticipantBtn" type="button">➕ Добавить участника</button>
     <button id="searchMessagesBtn" type="button">🔎 Поиск по сообщениям</button>
+    <button id="chatGalleryBtn" type="button">🗂 Медиа и файлы</button>
     <button id="chatBackgroundBtn" type="button">🖼 Фон чата</button>
     <button id="muteChatBtn" type="button">🔔 Уведомления</button>
     <button id="videoCallBtn" type="button">🎥 Видеозвонок</button>
     <button id="blockUserBtn" class="danger hidden" type="button">🚫 Заблокировать</button>
   </div>
+</dialog>
+
+<dialog id="chatGalleryDialog" class="chat-gallery-dialog">
+  <div class="chat-menu-head">
+    <div>
+      <h2 id="chatGalleryTitle">Медиа и файлы</h2>
+      <small id="chatGalleryStatus" class="muted"></small>
+    </div>
+    <button id="closeChatGallery" class="chat-menu-close" type="button" aria-label="Закрыть">×</button>
+  </div>
+  <div id="chatGalleryTabs" class="chat-gallery-tabs">
+    <button data-gallery-kind="photos" type="button">Фото</button>
+    <button data-gallery-kind="videos" type="button">Видео</button>
+    <button data-gallery-kind="files" type="button">Файлы</button>
+    <button data-gallery-kind="links" type="button">Ссылки</button>
+    <button data-gallery-kind="voice" type="button">Голосовые</button>
+  </div>
+  <div id="chatGalleryContent" class="chat-gallery-content"></div>
+  <button id="chatGalleryMore" class="chat-gallery-more hidden" type="button">Показать ещё</button>
 </dialog>
 
 <dialog id="muteChatDialog" class="mute-dialog">
@@ -633,6 +763,14 @@ let groupCallState=null;
 let minimizedCallKind=null;
 let groupMembersData=null;
 let addParticipantContext=null;
+let chatGalleryState={
+  kind:'photos',
+  items:[],
+  nextBeforeId:null,
+  loading:false,
+  requestId:0,
+  targetKey:''
+};
 const outboxDeliveries=new Map();
 let privateParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_private_video_size')||1)));
 let groupParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_group_video_size')||1)));
@@ -7560,6 +7698,230 @@ $('messageSearchInput').oninput=()=>performMessageSearch($('messageSearchInput')
 $('closeMessageSearch').onclick=()=>$('messageSearchDialog').close();
 $('messageSearchDialog').addEventListener('click',event=>{
   if(event.target===$('messageSearchDialog'))$('messageSearchDialog').close()
+});
+
+function chatGalleryTargetKey(){
+  if(!active?.data?.id)return '';
+  return active.type+':'+Number(active.data.id)
+}
+
+function galleryDate(value){
+  const date=new Date(value);
+  if(Number.isNaN(date.getTime()))return '';
+  return date.toLocaleString('ru-RU',{
+    day:'2-digit',
+    month:'2-digit',
+    year:'2-digit',
+    hour:'2-digit',
+    minute:'2-digit'
+  })
+}
+
+function renderChatGallery(){
+  const box=$('chatGalleryContent');
+  const kind=chatGalleryState.kind;
+  const items=chatGalleryState.items;
+  box.replaceChildren();
+  box.className='chat-gallery-content';
+
+  $('chatGalleryTabs').querySelectorAll('[data-gallery-kind]').forEach(button=>{
+    button.classList.toggle('active',button.dataset.galleryKind===kind)
+  });
+
+  if(!items.length){
+    const empty=document.createElement('div');
+    empty.className='chat-gallery-empty';
+    empty.textContent=chatGalleryState.loading?'Загрузка…':'Здесь пока ничего нет';
+    box.append(empty)
+  }else if(kind==='photos'||kind==='videos'){
+    const grid=document.createElement('div');
+    grid.className='chat-gallery-grid';
+    for(const item of items){
+      const card=document.createElement('div');
+      card.className='chat-gallery-media';
+      const attachment=item.attachment;
+      if(kind==='photos'){
+        const link=document.createElement('a');
+        link.href=attachment.url;
+        link.target='_blank';
+        link.rel='noopener';
+        const img=document.createElement('img');
+        img.src=attachment.url;
+        img.alt=attachment.name||'Фото';
+        img.loading='lazy';
+        img.decoding='async';
+        link.append(img);
+        card.append(link)
+      }else{
+        const video=document.createElement('video');
+        video.src=attachment.url;
+        video.controls=true;
+        video.preload='none';
+        video.playsInline=true;
+        card.append(video)
+      }
+      const meta=document.createElement('div');
+      meta.className='chat-gallery-meta';
+      const who=document.createElement('span');
+      who.textContent=item.sender_name||'Участник';
+      const when=document.createElement('span');
+      when.textContent=galleryDate(item.created_at);
+      meta.append(who,when);
+      card.append(meta);
+      grid.append(card)
+    }
+    box.append(grid)
+  }else{
+    const list=document.createElement('div');
+    list.className='chat-gallery-list';
+    for(const item of items){
+      const row=document.createElement('div');
+      row.className='chat-gallery-row';
+
+      if(kind==='files'){
+        const a=document.createElement('a');
+        a.href=item.attachment.url;
+        a.target='_blank';
+        a.rel='noopener';
+        a.textContent='📄 '+(item.attachment.name||'Файл');
+        row.append(a);
+        const size=document.createElement('small');
+        size.textContent=formatSize(item.attachment.size||0);
+        row.append(size)
+      }else if(kind==='voice'){
+        const title=document.createElement('strong');
+        title.textContent='🎙 Голосовое сообщение';
+        row.append(title);
+        const audio=document.createElement('audio');
+        audio.controls=true;
+        audio.preload='none';
+        audio.src=item.attachment.url;
+        row.append(audio)
+      }else{
+        for(const url of item.links||[]){
+          const a=document.createElement('a');
+          a.href=url;
+          a.target='_blank';
+          a.rel='noopener noreferrer';
+          a.textContent=url;
+          row.append(a)
+        }
+        if(item.body){
+          const preview=document.createElement('small');
+          preview.textContent=item.body.length>180
+            ?item.body.slice(0,177)+'…'
+            :item.body;
+          row.append(preview)
+        }
+      }
+
+      const meta=document.createElement('small');
+      meta.textContent=(item.sender_name||'Участник')+' · '+galleryDate(item.created_at);
+      row.append(meta);
+      list.append(row)
+    }
+    box.append(list)
+  }
+
+  $('chatGalleryStatus').textContent=items.length
+    ?('Показано: '+items.length)
+    :'';
+  $('chatGalleryMore').classList.toggle(
+    'hidden',
+    !chatGalleryState.nextBeforeId||chatGalleryState.loading
+  )
+}
+
+async function loadChatGallery(reset=false){
+  if(!active||chatGalleryState.loading)return;
+  const key=chatGalleryTargetKey();
+  if(!key)return;
+
+  if(reset){
+    chatGalleryState.items=[];
+    chatGalleryState.nextBeforeId=null
+  }
+
+  const requestId=++chatGalleryState.requestId;
+  const kind=chatGalleryState.kind;
+  const targetType=active.type;
+  const targetId=Number(active.data.id);
+  const before=reset?null:chatGalleryState.nextBeforeId;
+
+  chatGalleryState.loading=true;
+  chatGalleryState.targetKey=key;
+  renderChatGallery();
+
+  try{
+    let path='/api/chat-gallery?chat_type='+encodeURIComponent(targetType)
+      +'&chat_id='+encodeURIComponent(targetId)
+      +'&kind='+encodeURIComponent(kind)
+      +'&limit=30';
+    if(before)path+='&before_id='+encodeURIComponent(before);
+
+    const data=await api(path);
+    if(
+      requestId!==chatGalleryState.requestId
+      ||chatGalleryTargetKey()!==key
+      ||chatGalleryState.kind!==kind
+    )return;
+
+    chatGalleryState.items=reset
+      ?(data.items||[])
+      :[...chatGalleryState.items,...(data.items||[])];
+    chatGalleryState.nextBeforeId=data.next_before_id||null
+  }catch(err){
+    if(requestId===chatGalleryState.requestId){
+      $('chatGalleryStatus').textContent=err.message||'Не удалось загрузить галерею'
+    }
+  }finally{
+    if(requestId===chatGalleryState.requestId){
+      chatGalleryState.loading=false;
+      renderChatGallery()
+    }
+  }
+}
+
+function setChatGalleryKind(kind){
+  if(!['photos','videos','files','links','voice'].includes(kind))return;
+  if(chatGalleryState.kind===kind&&chatGalleryState.items.length)return;
+  chatGalleryState.kind=kind;
+  chatGalleryState.items=[];
+  chatGalleryState.nextBeforeId=null;
+  chatGalleryState.requestId++;
+  chatGalleryState.loading=false;
+  loadChatGallery(true).catch(()=>{})
+}
+
+function openChatGallery(){
+  if(!active)return;
+  if($('chatMenuDialog').open)$('chatMenuDialog').close();
+  const title=active.type==='group'
+    ?(active.data.name||'Группа')
+    :(active.data.display_name||'Чат');
+  $('chatGalleryTitle').textContent='Медиа · '+title;
+  chatGalleryState.kind='photos';
+  chatGalleryState.items=[];
+  chatGalleryState.nextBeforeId=null;
+  chatGalleryState.requestId++;
+  chatGalleryState.loading=false;
+  $('chatGalleryDialog').showModal();
+  loadChatGallery(true).catch(()=>{})
+}
+
+$('chatGalleryBtn').onclick=openChatGallery;
+$('chatGalleryTabs').onclick=event=>{
+  const button=event.target.closest('[data-gallery-kind]');
+  if(button)setChatGalleryKind(button.dataset.galleryKind)
+};
+$('chatGalleryMore').onclick=()=>loadChatGallery(false).catch(()=>{});
+$('closeChatGallery').onclick=()=>$('chatGalleryDialog').close();
+$('chatGalleryDialog').addEventListener('click',event=>{
+  if(event.target===$('chatGalleryDialog'))$('chatGalleryDialog').close()
+});
+$('chatGalleryDialog').addEventListener('close',()=>{
+  chatGalleryState.requestId++;
+  chatGalleryState.loading=false
 });
 
 $('chatBackgroundBtn').onclick=()=>{
