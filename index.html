@@ -4219,7 +4219,8 @@ function minimizeGroupCall(){
     'group',
     $('groupCallName').textContent||'Групповой звонок',
     $('groupCallStatus').textContent||'Звонок активен'
-  )
+  );
+  scheduleGroupRemoteVideoQualitySync()
 }
 
 function restoreMinimizedCall(){
@@ -4227,6 +4228,7 @@ function restoreMinimizedCall(){
     $('groupCallOverlay').classList.remove('call-minimized');
     $('callMiniBar').classList.add('hidden');
     minimizedCallKind=null;
+    requestAnimationFrame(()=>scheduleGroupRemoteVideoQualitySync());
     return
   }
   if(minimizedCallKind==='private'&&currentCall){
@@ -4362,7 +4364,8 @@ function applyGroupParticipantSize(){
   grid.style.setProperty('--tile-height',heights[groupParticipantSize]+'px');
 
   if(down)down.disabled=groupParticipantSize<=0;
-  if(up)up.disabled=groupParticipantSize>=2
+  if(up)up.disabled=groupParticipantSize>=2;
+  scheduleGroupRemoteVideoQualitySync()
 }
 
 function changeGroupParticipantSize(delta){
@@ -4386,7 +4389,8 @@ function restoreGroupGridLayout(){
     .forEach(tile=>tile.classList.remove('focused'));
   grid.classList.remove('has-focus');
   strip.classList.add('hidden');
-  applyGroupParticipantSize()
+  applyGroupParticipantSize();
+  scheduleGroupRemoteVideoQualitySync()
 }
 
 function focusGroupTile(tile){
@@ -4421,12 +4425,97 @@ function focusGroupTile(tile){
   }
 
   requestAnimationFrame(()=>{
-    strip.scrollLeft=0
+    strip.scrollLeft=0;
+    scheduleGroupRemoteVideoQualitySync()
   })
 }
 
 function groupTileId(identity){
   return 'group-tile-'+String(identity).replace(/[^a-zA-Z0-9_-]/g,'_')
+}
+
+function groupVideoTargetForTile(tile){
+  const minimized=minimizedCallKind==='group'
+    ||$('groupCallOverlay')?.classList.contains('call-minimized');
+  if(minimized){
+    return {enabled:false,width:320,height:180,fps:12,label:'paused'}
+  }
+
+  if(tile?.classList.contains('focused')){
+    return {enabled:true,width:1280,height:720,fps:24,label:'high'}
+  }
+
+  const strip=$('groupCallStrip');
+  if(tile&&strip&&tile.parentElement===strip){
+    return {enabled:true,width:320,height:180,fps:15,label:'low'}
+  }
+
+  const width=Math.max(0,Number(tile?.getBoundingClientRect?.().width)||0);
+  const identity=tile?.dataset?.participantIdentity||'';
+  const active=!!groupCallState?.activeSpeakerIds?.has(String(identity));
+
+  if(width>=420){
+    return {enabled:true,width:1280,height:720,fps:24,label:'high'}
+  }
+  if(width>=190||active){
+    return {enabled:true,width:640,height:360,fps:20,label:'medium'}
+  }
+  return {enabled:true,width:320,height:180,fps:15,label:'low'}
+}
+
+function applyGroupRemoteVideoTarget(publication,tile){
+  if(!publication)return;
+  const kind=publication.kind;
+  if(kind!==LivekitClient.Track.Kind.Video&&kind!=='video')return;
+
+  const target=groupVideoTargetForTile(tile);
+  const previous=publication.__svoiVideoTarget||'';
+  const signature=[
+    target.enabled?1:0,
+    target.width,
+    target.height,
+    target.fps
+  ].join(':');
+  if(previous===signature)return;
+
+  try{
+    if(typeof publication.setEnabled==='function'){
+      publication.setEnabled(target.enabled)
+    }
+    if(target.enabled&&typeof publication.setVideoDimensions==='function'){
+      publication.setVideoDimensions({
+        width:target.width,
+        height:target.height
+      })
+    }
+    if(target.enabled&&typeof publication.setVideoFPS==='function'){
+      publication.setVideoFPS(target.fps)
+    }
+    publication.__svoiVideoTarget=signature
+  }catch{}
+}
+
+function syncGroupRemoteVideoQuality(){
+  const state=groupCallState;
+  if(!state?.room)return;
+
+  for(const participant of state.room.remoteParticipants.values()){
+    const tile=$(groupTileId(participant.identity));
+    for(const publication of participant.videoTrackPublications.values()){
+      applyGroupRemoteVideoTarget(publication,tile)
+    }
+  }
+}
+
+function scheduleGroupRemoteVideoQualitySync(){
+  const state=groupCallState;
+  if(!state)return;
+  if(state.videoQualityFrame)return;
+  state.videoQualityFrame=requestAnimationFrame(()=>{
+    if(groupCallState!==state)return;
+    state.videoQualityFrame=0;
+    syncGroupRemoteVideoQuality()
+  })
 }
 
 function ensureGroupTile(participant,isLocal=false){
@@ -4437,6 +4526,7 @@ function ensureGroupTile(participant,isLocal=false){
 
   tile=document.createElement('div');
   tile.id=id;tile.className='group-tile';
+  tile.dataset.participantIdentity=String(identity);
   const avatar=document.createElement('div');avatar.className='tile-avatar';avatar.textContent=initials(participant.name||identity);
   const name=document.createElement('div');name.className='tile-name';name.textContent=(participant.name||identity)+(isLocal?' · вы':'');
   tile.append(avatar,name);
@@ -4483,7 +4573,12 @@ function attachGroupTrack(track,participant,isLocal=false,publication=null){
       const frontCamera=(groupCallState?.facing||'user')==='user';
       element.classList.toggle('local-mirrored',frontCamera)
     }
-    tile.prepend(element)
+    tile.prepend(element);
+    if(!isLocal&&publication){
+      requestAnimationFrame(()=>{
+        applyGroupRemoteVideoTarget(publication,tile)
+      })
+    }
   }else if(track.kind===LivekitClient.Track.Kind.Audio){
     // После реконнекта LiveKit может быстро переиздать аудиотрек.
     // Оставляем в плитке только один audio-элемент, иначе возможны эхо
@@ -4547,7 +4642,8 @@ function updateGroupActiveSpeakers(speakers=[]){
         $(groupTileId(identity))?.classList.add('speaking')
       }
     }
-    state.activeSpeakerIds=next
+    state.activeSpeakerIds=next;
+    scheduleGroupRemoteVideoQualitySync()
   })
 }
 
@@ -4619,7 +4715,8 @@ async function recoverGroupCall(state){
     state.needsRecovery=false;
     state.recovering=false;
     await renderGroupLocalTracks();
-    refreshGroupCount()
+    refreshGroupCount();
+    requestAnimationFrame(()=>scheduleGroupRemoteVideoQualitySync())
   }catch(err){
     state.recovering=false;
     state.needsRecovery=true;
@@ -4703,6 +4800,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
       manualLeave:false,
       lastParticipantCount:-1,
       speakerFrame:0,
+      videoQualityFrame:0,
       pendingSpeakers:[],
       activeSpeakerIds:new Set()
     };
@@ -4751,7 +4849,8 @@ async function joinGroupCall(groupId,video=false,invite=false){
           groupCallState.recovering=false;
           groupCallState.needsRecovery=false;
           groupCallState.lastParticipantCount=-1;
-          refreshGroupCount()
+          refreshGroupCount();
+          requestAnimationFrame(()=>scheduleGroupRemoteVideoQualitySync())
         }
       })
       .on(LivekitClient.RoomEvent.Disconnected,()=>{
@@ -4806,6 +4905,10 @@ function leaveGroupCall(disconnect=true){
       cancelAnimationFrame(state.speakerFrame);
       state.speakerFrame=0
     }
+    if(state.videoQualityFrame){
+      cancelAnimationFrame(state.videoQualityFrame);
+      state.videoQualityFrame=0
+    }
   }
   groupCallState=null;
   if(state&&disconnect){
@@ -4817,6 +4920,10 @@ function leaveGroupCall(disconnect=true){
   $('groupCallGrid').classList.remove('has-focus');
   $('groupCallOverlay').classList.add('hidden')
 }
+
+window.addEventListener('resize',()=>{
+  if(groupCallState) scheduleGroupRemoteVideoQualitySync()
+},{passive:true});
 
 window.addEventListener('offline',()=>{
   if(groupCallState){
