@@ -5070,6 +5070,7 @@ async def group_call_token(
         "group_id": group_id,
         "group_name": group["name"],
         "video": bool(data.video),
+        "is_admin": bool(group["is_admin"]),
         "max_participants": 10,
     }
 
@@ -5448,6 +5449,51 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                             "nonce": nonce,
                         }
                     )
+                continue
+
+            if signal_type == "group_force_mute":
+                try:
+                    group_id = int(data.get("group_id"))
+                    target_user_id = int(data.get("target_user_id"))
+                except (TypeError, ValueError):
+                    continue
+                if target_user_id == user_id:
+                    continue
+
+                check = connect_db()
+                actor = check.execute(
+                    """SELECT gm.is_admin
+                       FROM group_members gm
+                       WHERE gm.group_id=? AND gm.user_id=?""",
+                    (group_id, user_id),
+                ).fetchone()
+                target = check.execute(
+                    """SELECT 1
+                       FROM group_members
+                       WHERE group_id=? AND user_id=?""",
+                    (group_id, target_user_id),
+                ).fetchone()
+                check.close()
+
+                if not actor or not bool(actor["is_admin"]) or not target:
+                    continue
+
+                await push(
+                    target_user_id,
+                    {
+                        "type": "group_force_mute",
+                        "group_id": group_id,
+                        "from_user_id": user_id,
+                        "from_name": display_name,
+                    },
+                )
+                await websocket.send_json(
+                    {
+                        "type": "group_force_mute_sent",
+                        "group_id": group_id,
+                        "target_user_id": target_user_id,
+                    }
+                )
                 continue
 
             if signal_type == "group_call_ping":
