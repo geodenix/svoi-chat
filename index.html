@@ -103,7 +103,7 @@
 .edit-message-dialog .edit-hint{font-size:12px;color:#8fa3be;margin-top:4px}
 .edited-label{font-size:10px;color:#9db1ca;white-space:nowrap}
 .message-actions-dialog{width:min(92vw,430px);padding:0;overflow:hidden;border-radius:20px}.message-actions-head{padding:16px 16px 12px;border-bottom:1px solid #2a3e59}.message-actions-head strong{display:block;font-size:15px}.message-actions-head small{display:block;color:#91a5bf;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.message-actions-list{display:grid;padding:8px}.message-actions-list button{border:0;background:transparent;color:#fff;border-radius:12px;padding:13px 12px;text-align:left;font-size:15px;font-weight:700;display:flex;align-items:center;gap:10px}.message-actions-list button:hover,.message-actions-list button:active{background:#1d334f}.message-actions-list button.danger{color:#ffb8bd}.message-actions-list button.hidden{display:none}.message-actions-close{margin:0 8px 8px;border:1px solid #304866;background:#172a42;color:#dce8f8;border-radius:12px;padding:11px;font-weight:750}
-.seen-dialog{width:min(92vw,460px);padding:0;overflow:hidden;border-radius:20px}.seen-list{display:grid;gap:7px;padding:12px;max-height:62dvh;overflow:auto}.seen-entry{display:flex;align-items:center;gap:10px;background:#17283f;border-radius:13px;padding:10px 12px}.seen-copy{min-width:0;flex:1}.seen-copy strong,.seen-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.seen-copy small{color:#8fa3be;margin-top:2px}.seen-empty{padding:24px;text-align:center;color:#8fa3be}
+.seen-dialog{width:min(92vw,460px);padding:0;overflow:hidden;border-radius:20px}.seen-list{display:grid;gap:7px;padding:12px;max-height:62dvh;overflow:auto}.seen-entry{display:flex;align-items:center;gap:10px;background:#17283f;border-radius:13px;padding:10px 12px}.seen-copy{min-width:0;flex:1}.seen-copy strong,.seen-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.seen-copy small{color:#8fa3be;margin-top:2px}.seen-empty{padding:24px;text-align:center;color:#8fa3be}.receipt-details{border:0;background:transparent;color:inherit;font:inherit;padding:0;cursor:pointer;text-decoration:none}.receipt-details:hover,.receipt-details:active{text-decoration:underline}.seen-entry.read .seen-copy small{color:#8ec4ff}.seen-entry.delivered .seen-copy small{color:#9fc8a9}.seen-entry.waiting .seen-copy small{color:#8fa3be}
 .phone-contacts-dialog{width:min(94vw,520px)}
 .phone-status{padding:12px 14px;border:1px solid #304866;background:#101f33;border-radius:13px;margin:10px 0 14px}
 .phone-status strong,.phone-status small{display:block}
@@ -1104,7 +1104,7 @@ body.drawer-open{overflow:hidden}
 <dialog id="seenByDialog" class="seen-dialog">
   <div class="chat-menu-head">
     <div>
-      <h2>Кто просмотрел</h2>
+      <h2 id="seenByTitle">Кто просмотрел</h2>
       <small id="seenByCount" class="muted"></small>
     </div>
     <button id="closeSeenBy" class="chat-menu-close" type="button" aria-label="Закрыть">×</button>
@@ -1319,6 +1319,7 @@ let chatGalleryState={
   targetKey:''
 };
 const outboxDeliveries=new Map();
+const pendingGroupReceiptSummaries=new Map();
 let outboxFlushTimer=null;
 let outboxFlushRunning=false;
 let outboxRetryStep=0;
@@ -3583,6 +3584,18 @@ function receiptLabel(m){
   if(m.outbox_state==='waiting')return '⏳ Ожидает сети';
   if(m.outbox_state==='sending')return '↻ Отправляется…';
   if(m.outbox_state==='failed')return '⚠ Не отправлено';
+
+  if(active?.type==='group'&&Number(m.sender_id)===Number(me?.id)){
+    const summary=m.receipt_summary||{};
+    const total=Math.max(0,Number(summary.total_recipients)||0);
+    const delivered=Math.max(0,Number(summary.delivered_count)||0);
+    const read=Math.max(0,Number(summary.read_count)||0);
+    if(total>0){
+      return 'Доставлено '+delivered+' из '+total+' · Прочитали '+read
+    }
+    return 'Нет получателей'
+  }
+
   if(active?.type!=='user'||m.sender_id!==me.id)return '';
   if(m.read_at)return '✓✓ прочитано';
   if(m.delivered_at)return '✓✓';
@@ -3639,6 +3652,10 @@ function resetLazyChatMediaObserver(){
 }
 
 function replaceMessageNode(message){
+  const previous=currentMessages.find(item=>Number(item.id)===Number(message.id));
+  if(previous?.receipt_summary&&!message.receipt_summary){
+    message={...message,receipt_summary:previous.receipt_summary}
+  }
   currentMessages=currentMessages.map(item=>Number(item.id)===Number(message.id)?message:item);
   const node=document.querySelector('.bubble[data-message-id="'+message.id+'"]');
   if(node)node.replaceWith(msgNode(message));
@@ -4173,9 +4190,76 @@ async function deleteMessageForAllFromMenu(){
   }
 }
 
-function renderSeenBy(viewers){
+function formatReceiptTime(value){
+  if(!value)return '';
+  return new Date(value).toLocaleString(
+    'ru-RU',
+    {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}
+  )
+}
+
+function renderSeenBy(data){
   const box=$('seenByList');box.replaceChildren();
-  const items=Array.isArray(viewers)?viewers:[];
+  const recipients=Array.isArray(data?.recipients)?data.recipients:null;
+
+  if(recipients){
+    const summary=data?.summary||{};
+    const total=Math.max(0,Number(summary.total_recipients)||0);
+    const delivered=Math.max(0,Number(summary.delivered_count)||0);
+    const read=Math.max(0,Number(summary.read_count)||0);
+    $('seenByTitle').textContent='Доставка сообщения';
+    $('seenByCount').textContent=
+      'Доставлено '+delivered+' из '+total+' · Прочитали '+read;
+
+    if(!recipients.length){
+      const empty=document.createElement('div');
+      empty.className='seen-empty';
+      empty.textContent='У сообщения нет других получателей.';
+      box.append(empty);
+      return
+    }
+
+    for(const viewer of recipients){
+      const state=viewer.read_at
+        ?'read'
+        :(viewer.delivered_at?'delivered':'waiting');
+      const row=document.createElement('div');
+      row.className='seen-entry '+state;
+
+      const avatar=document.createElement('span');
+      avatar.className='avatar';
+      setAvatar(avatar,viewer);
+
+      const copy=document.createElement('div');
+      copy.className='seen-copy';
+      const name=document.createElement('strong');
+      name.textContent=
+        Number(viewer.id)===Number(me?.id)
+          ?'Вы'
+          :viewer.display_name;
+
+      const meta=document.createElement('small');
+      if(viewer.read_at){
+        meta.textContent=
+          '✓✓ Прочитано · '+formatReceiptTime(viewer.read_at)
+      }else if(viewer.delivered_at){
+        meta.textContent=
+          '✓ Доставлено · '+formatReceiptTime(viewer.delivered_at)
+      }else{
+        meta.textContent='○ Ожидает доставки'
+      }
+
+      copy.append(name,meta);
+      row.append(avatar,copy);
+      box.append(row)
+    }
+    return
+  }
+
+  const items=Array.isArray(data?.viewers)
+    ?data.viewers
+    :(Array.isArray(data)?data:[]);
+  $('seenByTitle').textContent='Кто просмотрел';
   $('seenByCount').textContent='Просмотрели: '+items.length;
 
   if(!items.length){
@@ -4187,7 +4271,7 @@ function renderSeenBy(viewers){
   }
 
   for(const viewer of items){
-    const row=document.createElement('div');row.className='seen-entry';
+    const row=document.createElement('div');row.className='seen-entry read';
     const avatar=document.createElement('span');avatar.className='avatar';
     setAvatar(avatar,viewer);
     const copy=document.createElement('div');copy.className='seen-copy';
@@ -4196,15 +4280,14 @@ function renderSeenBy(viewers){
     const meta=document.createElement('small');
     meta.textContent='@'+viewer.username+' · '+(
       viewer.read_at
-        ?new Date(viewer.read_at).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})
+        ?formatReceiptTime(viewer.read_at)
         :'просмотрено'
     );
     copy.append(name,meta);row.append(avatar,copy);box.append(row)
   }
 }
 
-async function openSeenBy(){
-  const source=messageActionSource;
+async function openSeenBySource(source){
   if(!source)return;
   const path=source.type==='group'
     ?'/api/groups/'+source.chat_id+'/messages/'+source.message.id+'/seen-by'
@@ -4213,11 +4296,24 @@ async function openSeenBy(){
   try{
     const result=await api(path);
     if($('messageActionsDialog').open)$('messageActionsDialog').close();
-    renderSeenBy(result.viewers||[]);
+    renderSeenBy(result);
     $('seenByDialog').showModal()
   }catch(err){
-    alert(err.message||'Не удалось получить просмотры')
+    alert(err.message||'Не удалось получить статусы')
   }
+}
+
+async function openSeenBy(){
+  return openSeenBySource(messageActionSource)
+}
+
+async function openSeenByForMessage(message){
+  if(!active||!message)return;
+  return openSeenBySource({
+    type:active.type,
+    chat_id:Number(active.data.id),
+    message
+  })
 }
 
 function renderForwardTargets(){
@@ -4722,12 +4818,27 @@ function msgNode(m){
   const t=document.createElement('time');t.textContent=new Date(m.created_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});meta.append(t);
   const label=receiptLabel(m);
   if(label){
-    const r=document.createElement('span');
+    const canOpenReceiptDetails=(
+      active?.type==='group'
+      &&Number(m.sender_id)===Number(me?.id)
+      &&Number(m.id)>0
+      &&!!m.receipt_summary
+    );
+    const r=document.createElement(canOpenReceiptDetails?'button':'span');
+    if(canOpenReceiptDetails)r.type='button';
     r.className='receipt'
       +(m.read_at?' read':'')
-      +(m.outbox_state?' '+m.outbox_state:'');
+      +(m.outbox_state?' '+m.outbox_state:'')
+      +(canOpenReceiptDetails?' receipt-details':'');
     r.textContent=label;
     if(m.outbox_error)r.title=m.outbox_error;
+    if(canOpenReceiptDetails){
+      r.title='Показать доставку и прочтение';
+      r.onclick=event=>{
+        event.stopPropagation();
+        openSeenByForMessage(m).catch(()=>{})
+      }
+    }
     meta.append(r)
   }
   d.append(meta);return d
@@ -9902,6 +10013,69 @@ async function resumeIncomingCallFromUrl(){
   }
 }
 
+function groupReceiptUpdateKey(groupId,messageId){
+  return String(Number(groupId)||0)+':'+String(Number(messageId)||0)
+}
+
+function updateGroupReceiptSummary(groupId,messageId,summary){
+  const key=groupReceiptUpdateKey(groupId,messageId);
+  if(
+    active?.type!=='group'
+    ||Number(active.data.id)!==Number(groupId)
+  ){
+    return
+  }
+
+  const index=currentMessages.findIndex(
+    item=>Number(item.id)===Number(messageId)
+  );
+  if(index<0){
+    pendingGroupReceiptSummaries.set(key,{...(summary||{})});
+    if(pendingGroupReceiptSummaries.size>100){
+      const oldest=pendingGroupReceiptSummaries.keys().next().value;
+      if(oldest)pendingGroupReceiptSummaries.delete(oldest)
+    }
+    return
+  }
+
+  pendingGroupReceiptSummaries.delete(key);
+  const updated={
+    ...currentMessages[index],
+    receipt_summary:{...(summary||{})}
+  };
+  currentMessages[index]=updated;
+  const node=document.querySelector(
+    '.bubble[data-message-id="'+String(messageId)+'"]'
+  );
+  if(node)node.replaceWith(msgNode(updated))
+}
+
+function applyGroupReceiptUpdates(data){
+  const groupId=Number(data?.group_id);
+  const updates=Array.isArray(data?.updates)?data.updates:[];
+  for(const update of updates){
+    updateGroupReceiptSummary(
+      groupId,
+      Number(update?.message_id),
+      update?.summary||{}
+    )
+  }
+}
+
+function ackGroupMessageDelivered(message){
+  const groupId=Number(message?.group_id);
+  const messageId=Number(message?.id);
+  if(
+    !groupId
+    ||!messageId
+    ||Number(message?.sender_id)===Number(me?.id)
+  )return;
+  api(
+    '/api/groups/'+groupId+'/messages/'+messageId+'/delivered',
+    {method:'POST'}
+  ).catch(()=>{})
+}
+
 function connectWs(){
   if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';
   socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));
@@ -10222,12 +10396,31 @@ function connectWs(){
       }
       return
     }
+    if(data.type==='group_receipt_updates'){
+      applyGroupReceiptUpdates(data);
+      return
+    }
     if(data.type==='group_message'){
-      const m=data.message;
+      let m=data.message;
       const groupId=Number(m.group_id);
       const mine=Number(m.sender_id)===Number(me?.id);
+      if(mine){
+        const pendingSummary=pendingGroupReceiptSummaries.get(
+          groupReceiptUpdateKey(groupId,m.id)
+        );
+        if(pendingSummary){
+          m={...m,receipt_summary:pendingSummary};
+          pendingGroupReceiptSummaries.delete(
+            groupReceiptUpdateKey(groupId,m.id)
+          )
+        }
+      }
       const activeHere=active?.type==='group'&&Number(active.data.id)===groupId;
       const shouldNotifyHere=!m.has_mentions||!!m.mentioned_me;
+
+      if(!mine){
+        ackGroupMessageDelivered(m)
+      }
 
       if(!mine&&shouldNotifyHere&&!isChatMuted('group',groupId)){
         playMessageSound().catch(()=>{});
