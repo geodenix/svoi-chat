@@ -97,6 +97,7 @@
 .admin-user-online{width:9px;height:9px;border-radius:50%;background:#55667e;flex:0 0 9px}.admin-user-online.on{background:#45d78e}.admin-user-edit{flex:0 0 auto;border:1px solid #31527a;background:#142a46;color:#dce8f8;border-radius:10px;width:36px;height:36px;padding:0;font-size:16px}.admin-user-edit:active{background:#21456f}
 .admin-stats-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}.admin-stats-head h3{margin:0}.admin-period-tabs{display:flex;gap:6px}.admin-period-tabs button{border:1px solid #31527a;background:#142a46;color:#aebfd4;border-radius:9px;padding:7px 10px;font-size:12px;font-weight:750}.admin-period-tabs button.active{background:#2b86fa;color:#fff;border-color:#2b86fa}
 .admin-chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.admin-chart-card{min-width:0;border:1px solid #29415f;background:#122238;border-radius:15px;padding:11px}.admin-chart-title{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:5px}.admin-chart-title strong{font-size:14px}.admin-chart-title span{font-size:12px;color:#9fb2ca;white-space:nowrap}.admin-chart-card svg{display:block;width:100%;height:165px;overflow:visible}.admin-chart-grid-line{stroke:#2a405c;stroke-width:1}.admin-chart-line{fill:none;stroke:#5da8ff;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.admin-chart-area{fill:#5da8ff18}.admin-chart-dot{fill:#8bc1ff;stroke:#122238;stroke-width:2}.admin-chart-axis{fill:#8599b4;font-size:10px}.admin-chart-empty{display:grid;place-items:center;height:165px;color:#8196b2;font-size:12px}.admin-stats-note{display:block;color:#8196b2;font-size:11px;margin:9px 2px 0}
+.admin-call-quality-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:9px}.admin-quality-card{border:1px solid #29415f;background:#122238;border-radius:13px;padding:10px;min-width:0}.admin-quality-card small{display:block;color:#8fa3be;font-size:11px}.admin-quality-card strong{display:block;margin-top:4px;font-size:17px;overflow-wrap:anywhere}.admin-call-quality-list{display:grid;gap:8px}.admin-call-quality-row{border:1px solid #29415f;background:#14263d;border-radius:14px;padding:11px}.admin-call-quality-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.admin-call-quality-head strong{min-width:0;overflow-wrap:anywhere}.admin-call-quality-head small{color:#8fa3be;white-space:nowrap}.admin-call-quality-meta{color:#9fb2ca;font-size:11px;margin-top:4px;overflow-wrap:anywhere}.admin-call-quality-metrics{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.admin-call-quality-metrics span{border-radius:999px;background:#1c3554;padding:5px 8px;font-size:11px;color:#dce8f8}.admin-call-quality-reason{margin-top:8px;font-size:11px;color:#d7b9c0}.admin-call-quality-empty{padding:14px;color:#8fa3be;text-align:center;border:1px dashed #29415f;border-radius:13px}
 .edit-message-dialog{width:min(92vw,520px)}
 .edit-message-dialog textarea{width:100%;min-height:130px;max-height:48dvh;resize:vertical;border:1px solid #354b68;background:#0f1d30;color:#fff;border-radius:14px;padding:12px 13px;margin:12px 0;line-height:1.4}
 .edit-message-dialog .edit-hint{font-size:12px;color:#8fa3be;margin-top:4px}
@@ -1189,6 +1190,14 @@ body.drawer-open{overflow:hidden}
       <small id="adminStatsNote" class="admin-stats-note"></small>
     </section>
     <section class="admin-section">
+      <div class="admin-stats-head">
+        <h3>Качество звонков</h3>
+      </div>
+      <div id="adminCallQualitySummary" class="admin-call-quality-summary"></div>
+      <div id="adminCallQualityList" class="admin-call-quality-list"></div>
+      <small id="adminCallQualityNote" class="admin-stats-note"></small>
+    </section>
+    <section class="admin-section">
       <h3>Службы</h3>
       <div id="adminServices" class="admin-services"></div>
     </section>
@@ -2181,6 +2190,99 @@ function renderAdminStats(data){
   }
 }
 
+function formatQualityBitrate(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)||n<=0)return '—';
+  if(n>=1000000)return (n/1000000).toFixed(n>=10000000?0:1)+' Мбит/с';
+  return Math.round(n/1000)+' кбит/с'
+}
+
+function callEndReasonLabel(reason){
+  const labels={
+    local_hangup:'завершил пользователь',
+    remote_hangup:'завершил собеседник',
+    rejected:'отклонён',
+    unavailable:'недоступен',
+    setup_error:'ошибка запуска',
+    accept_error:'ошибка принятия',
+    connection_closed:'соединение закрыто',
+    promoted_to_conference:'переведён в конференцию',
+    local_leave:'выход из группового звонка',
+    logout:'выход из аккаунта',
+    recovery_failed:'не удалось восстановить связь'
+  };
+  return labels[String(reason||'')]||String(reason||'')
+}
+
+function renderAdminCallQuality(data){
+  const summaryBox=$('adminCallQualitySummary');
+  const list=$('adminCallQualityList');
+  const note=$('adminCallQualityNote');
+  summaryBox.replaceChildren();list.replaceChildren();
+
+  const summary=data?.summary||{};
+  const cards=[
+    ['Диагностировано',summary.calls_with_diagnostics??0],
+    ['Средний пинг',summary.avg_rtt_ms==null?'—':Math.round(summary.avg_rtt_ms)+' мс'],
+    ['Средние потери',summary.avg_packet_loss_pct==null?'—':Number(summary.avg_packet_loss_pct).toFixed(1)+'%']
+  ];
+  for(const [label,value] of cards){
+    const card=document.createElement('div');card.className='admin-quality-card';
+    const small=document.createElement('small');small.textContent=label;
+    const strong=document.createElement('strong');strong.textContent=String(value);
+    card.append(small,strong);summaryBox.append(card)
+  }
+
+  const calls=Array.isArray(data?.calls)?data.calls:[];
+  if(!calls.length){
+    const empty=document.createElement('div');
+    empty.className='admin-call-quality-empty';
+    empty.textContent='Диагностика появится после следующего звонка.';
+    list.append(empty);
+    note.textContent='Снимки качества сохраняются примерно раз в 10 секунд и хранятся 30 дней.';
+    return
+  }
+
+  for(const call of calls){
+    const row=document.createElement('div');row.className='admin-call-quality-row';
+    const head=document.createElement('div');head.className='admin-call-quality-head';
+    const title=document.createElement('strong');
+    const names=(call.participants||[]).join(', ')||'Участник';
+    title.textContent=(call.call_type==='private'?'📞 ':'👥 ')+names;
+    const when=document.createElement('small');
+    when.textContent=call.last_at?new Date(call.last_at).toLocaleString('ru-RU'):'';
+    head.append(title,when);
+
+    const meta=document.createElement('div');meta.className='admin-call-quality-meta';
+    meta.textContent=(call.call_type==='private'?'Личный звонок':'Групповая диагностика')
+      +' · замеров: '+(call.sample_count||0);
+
+    const metrics=document.createElement('div');metrics.className='admin-call-quality-metrics';
+    const values=[
+      'Ping '+(call.avg_rtt_ms==null?'—':Math.round(call.avg_rtt_ms)+' мс'),
+      'Потери '+(call.avg_packet_loss_pct==null?'—':Number(call.avg_packet_loss_pct).toFixed(1)+'%'),
+      'Jitter '+(call.avg_jitter_ms==null?'—':Math.round(call.avg_jitter_ms)+' мс'),
+      'Видео '+formatQualityBitrate(call.avg_video_bitrate_bps)
+    ];
+    if(call.max_video_width&&call.max_video_height){
+      values.push(call.max_video_width+'×'+call.max_video_height
+        +(call.avg_video_fps==null?'':' · '+Math.round(call.avg_video_fps)+' FPS'))
+    }
+    for(const value of values){
+      const chip=document.createElement('span');chip.textContent=value;metrics.append(chip)
+    }
+
+    row.append(head,meta,metrics);
+    if(call.end_reason){
+      const reason=document.createElement('div');reason.className='admin-call-quality-reason';
+      reason.textContent='Причина завершения: '+callEndReasonLabel(call.end_reason);
+      row.append(reason)
+    }
+    list.append(row)
+  }
+  note.textContent='Показываются средние показатели за выбранный период. Диагностика хранится 30 дней.'
+}
+
 async function setAdminStatsPeriod(period){
   if(!['day','week'].includes(period)||adminStatsPeriod===period)return;
   adminStatsPeriod=period;
@@ -2188,10 +2290,15 @@ async function setAdminStatsPeriod(period){
   $('adminStatsDay').classList.toggle('active',period==='day');
   $('adminStatsWeek').classList.toggle('active',period==='week');
   try{
-    const stats=await api('/api/admin/stats?period='+period);
-    renderAdminStats(stats)
+    const [stats,quality]=await Promise.all([
+      api('/api/admin/stats?period='+period),
+      api('/api/admin/call-quality?period='+period+'&limit=40')
+    ]);
+    renderAdminStats(stats);
+    renderAdminCallQuality(quality)
   }catch(err){
-    $('adminStatsNote').textContent=err.message||'Не удалось загрузить статистику'
+    $('adminStatsNote').textContent=err.message||'Не удалось загрузить статистику';
+    $('adminCallQualityNote').textContent=err.message||'Не удалось загрузить диагностику звонков'
   }
 }
 
@@ -2271,12 +2378,13 @@ async function loadAdminPanel(){
   const status=$('adminStatus');
   status.classList.remove('error');status.textContent='Обновляем данные…';
   try{
-    const [overview,recentUsers,stats]=await Promise.all([
+    const [overview,recentUsers,stats,quality]=await Promise.all([
       api('/api/admin/overview'),
       api('/api/admin/users?limit=50'),
-      api('/api/admin/stats?period='+adminStatsPeriod)
+      api('/api/admin/stats?period='+adminStatsPeriod),
+      api('/api/admin/call-quality?period='+adminStatsPeriod+'&limit=40')
     ]);
-    renderAdminOverview(overview);renderAdminUsers(recentUsers);renderAdminStats(stats);
+    renderAdminOverview(overview);renderAdminUsers(recentUsers);renderAdminStats(stats);renderAdminCallQuality(quality);
     const generated=overview.generated_at?new Date(overview.generated_at).toLocaleTimeString():'сейчас';
     status.textContent='Обновлено: '+generated+' · автообновление каждые 10 секунд'
   }catch(err){
@@ -5793,6 +5901,50 @@ function updateGroupParticipantPing(identity,value){
   updateGroupParticipantQuality(identity)
 }
 
+function groupAveragePing(state){
+  const values=[...(state?.participantPings?.values?.()||[])]
+    .map(Number)
+    .filter(value=>Number.isFinite(value)&&value>=0);
+  return values.length?values.reduce((sum,value)=>sum+value,0)/values.length:null
+}
+
+async function reportGroupCallQuality(state,endReason='',force=false){
+  if(!state?.qualityKey)return;
+  const now=Date.now();
+  if(!force&&now-(state.lastQualityReportAt||0)<9500)return;
+  state.lastQualityReportAt=now;
+  const localQuality=normalizeLiveKitConnectionQuality(
+    state.room?.localParticipant?.connectionQuality
+  );
+  await api('/api/calls/quality',{
+    method:'POST',
+    body:{
+      call_key:state.qualityKey,
+      call_type:state.kind==='link'?'link':'group',
+      group_id:state.groupId||null,
+      rtt_ms:groupAveragePing(state),
+      connection_quality:localQuality==='unknown'?null:localQuality,
+      end_reason:endReason||null
+    }
+  })
+}
+
+function startGroupQualityMonitoring(state=groupCallState){
+  if(!state)return;
+  if(state.qualityTimer)clearInterval(state.qualityTimer);
+  reportGroupCallQuality(state).catch(()=>{});
+  state.qualityTimer=setInterval(()=>{
+    if(groupCallState===state)reportGroupCallQuality(state).catch(()=>{})
+  },10000)
+}
+
+function stopGroupQualityMonitoring(state=groupCallState){
+  if(state?.qualityTimer){
+    clearInterval(state.qualityTimer);
+    state.qualityTimer=null
+  }
+}
+
 function stopGroupPingMonitoring(state=groupCallState){
   if(!state)return;
   if(state.pingTimer){
@@ -6343,7 +6495,10 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
       participantPings:new Map(),
       pingPending:new Map(),
       pingSeq:0,
-      pingTimer:null
+      pingTimer:null,
+      qualityKey:(linkedToken?'link':'group')+':'+String(credentials.room_name||groupId||'call')+':'+(crypto.randomUUID?crypto.randomUUID():(Date.now()+'-'+Math.random().toString(16).slice(2))),
+      qualityTimer:null,
+      lastQualityReportAt:0
     };
 
     $('groupCallGrid').replaceChildren();
@@ -6489,6 +6644,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
     await renderGroupLocalTracks();
     refreshGroupCount();
     startGroupPingMonitoring(groupCallState);
+    startGroupQualityMonitoring(groupCallState);
     return true
   }catch(err){
     try{room?.disconnect()}catch{}
@@ -6501,15 +6657,17 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
   }
 }
 
-function leaveGroupCall(disconnect=true){
+function leaveGroupCall(disconnect=true,endReason='local_leave'){
   if($('groupCallProfileDialog')?.open)$('groupCallProfileDialog').close();
   hideMiniCallBar();
   stopNativeCallService().catch(()=>{});
   resetNativeAudioRoute().catch(()=>{});
   const state=groupCallState;
   if(state){
+    reportGroupCallQuality(state,endReason,true).catch(()=>{});
     state.manualLeave=true;
     stopGroupPingMonitoring(state);
+    stopGroupQualityMonitoring(state);
     if(state.speakerFrame){
       cancelAnimationFrame(state.speakerFrame);
       state.speakerFrame=0
@@ -7196,6 +7354,7 @@ async function upgradeCurrentCallToVideo(){
 
 let callPingTimer=null;
 const peerNetworkBaselines=new WeakMap();
+const peerMediaBaselines=new WeakMap();
 
 function setCallPing(value,network=null){
   const badge=$('callPing');
@@ -7289,6 +7448,12 @@ async function readPeerNetworkStats(pc){
 
   const previous=peerNetworkBaselines.get(pc)||new Map();
   const next=new Map();
+  const previousMedia=peerMediaBaselines.get(pc)||new Map();
+  const nextMedia=new Map();
+  let videoBitrateBps=null;
+  let videoWidth=null;
+  let videoHeight=null;
+  let videoFps=null;
   const remoteLoss=[];
   const inboundLoss=[];
   const remoteJitter=[];
@@ -7297,6 +7462,31 @@ async function readPeerNetworkStats(pc){
   stats.forEach(report=>{
     const kind=report.kind||report.mediaType;
     if(kind!=='audio'&&kind!=='video')return;
+
+    if(report.type==='outbound-rtp'&&kind==='video'){
+      const bytes=Number(report.bytesSent);
+      const timestamp=Number(report.timestamp);
+      const key='out-video:'+report.id;
+      const prev=previousMedia.get(key);
+      if(
+        prev
+        &&Number.isFinite(bytes)
+        &&Number.isFinite(timestamp)
+        &&bytes>=prev.bytes
+        &&timestamp>prev.timestamp
+      ){
+        videoBitrateBps=((bytes-prev.bytes)*8)/((timestamp-prev.timestamp)/1000)
+      }
+      if(Number.isFinite(bytes)&&Number.isFinite(timestamp)){
+        nextMedia.set(key,{bytes,timestamp})
+      }
+      const width=Number(report.frameWidth);
+      const height=Number(report.frameHeight);
+      const fps=Number(report.framesPerSecond);
+      if(Number.isFinite(width)&&width>0)videoWidth=width;
+      if(Number.isFinite(height)&&height>0)videoHeight=height;
+      if(Number.isFinite(fps)&&fps>=0)videoFps=fps
+    }
 
     if(report.type==='remote-inbound-rtp'){
       const jitter=Number(report.jitter);
@@ -7346,6 +7536,17 @@ async function readPeerNetworkStats(pc){
   });
 
   peerNetworkBaselines.set(pc,next);
+  peerMediaBaselines.set(pc,nextMedia);
+
+  const localVideo=currentCall?.pc===pc?localVideoTrack():null;
+  if(localVideo){
+    try{
+      const settings=localVideo.getSettings?.()||{};
+      if(videoWidth==null&&Number(settings.width)>0)videoWidth=Number(settings.width);
+      if(videoHeight==null&&Number(settings.height)>0)videoHeight=Number(settings.height);
+      if(videoFps==null&&Number(settings.frameRate)>=0)videoFps=Number(settings.frameRate)
+    }catch{}
+  }
 
   const lossSamples=remoteLoss.length?remoteLoss:inboundLoss;
   const jitterSamples=remoteJitter.length?remoteJitter:inboundJitter;
@@ -7355,7 +7556,11 @@ async function readPeerNetworkStats(pc){
     rttMs,
     availableOutgoingBitrate:Number.isFinite(outgoing)&&outgoing>0?outgoing:null,
     packetLossPct:lossSamples.length?Math.max(...lossSamples):null,
-    jitterMs:jitterSamples.length?Math.max(...jitterSamples):null
+    jitterMs:jitterSamples.length?Math.max(...jitterSamples):null,
+    videoBitrateBps:Number.isFinite(videoBitrateBps)&&videoBitrateBps>=0?videoBitrateBps:null,
+    videoWidth:Number.isFinite(videoWidth)&&videoWidth>0?Math.round(videoWidth):null,
+    videoHeight:Number.isFinite(videoHeight)&&videoHeight>0?Math.round(videoHeight):null,
+    videoFps:Number.isFinite(videoFps)&&videoFps>=0?videoFps:null
   }
 }
 
@@ -7586,6 +7791,8 @@ async function refreshCallPing(call){
     const network=await readPeerNetworkStats(call.pc);
     if(currentCall!==call)return;
     setCallPing(network.rttMs,network);
+    call.lastNetworkStats=network;
+    reportPrivateCallQuality(call,network).catch(()=>{});
     maybeAdaptPrivateAudio(call,network).catch(()=>{});
     maybeAdaptPrivateVideo(call,network).catch(()=>{})
   }catch{
@@ -7598,6 +7805,32 @@ function startCallPing(call){
   if(!call||currentCall!==call)return;
   refreshCallPing(call);
   callPingTimer=setInterval(()=>refreshCallPing(call),1500)
+}
+
+async function reportPrivateCallQuality(call,network=null,endReason='',force=false){
+  if(!call?.callId)return;
+  const now=Date.now();
+  if(!force&&now-(call.lastQualityReportAt||0)<9500)return;
+  call.lastQualityReportAt=now;
+  const stats=network||call.lastNetworkStats||{};
+  await api('/api/calls/quality',{
+    method:'POST',
+    body:{
+      call_key:call.callId,
+      call_type:'private',
+      peer_id:call.peerId||null,
+      rtt_ms:Number.isFinite(Number(stats.rttMs))?Number(stats.rttMs):null,
+      packet_loss_pct:Number.isFinite(Number(stats.packetLossPct))?Number(stats.packetLossPct):null,
+      jitter_ms:Number.isFinite(Number(stats.jitterMs))?Number(stats.jitterMs):null,
+      available_outgoing_bitrate:Number.isFinite(Number(stats.availableOutgoingBitrate))?Number(stats.availableOutgoingBitrate):null,
+      video_bitrate_bps:Number.isFinite(Number(stats.videoBitrateBps))?Number(stats.videoBitrateBps):null,
+      video_width:Number.isFinite(Number(stats.videoWidth))?Math.round(Number(stats.videoWidth)):null,
+      video_height:Number.isFinite(Number(stats.videoHeight))?Math.round(Number(stats.videoHeight)):null,
+      video_fps:Number.isFinite(Number(stats.videoFps))?Number(stats.videoFps):null,
+      connection_quality:privateVideoTierForNetwork(stats),
+      end_reason:endReason||null
+    }
+  })
 }
 
 function callVisualUrl(avatarUrl){
@@ -7906,7 +8139,7 @@ function schedulePrivateCallRecovery(call,delay=900){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,remoteMuted:false,cameraOff:!video,remoteCameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,connectedAt:0,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,remoteMuted:false,cameraOff:!video,remoteCameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,connectedAt:0,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0,lastQualityReportAt:0,lastNetworkStats:null};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks()){
     try{
@@ -8218,6 +8451,7 @@ async function rejectIncomingCall(){
 function closePrivateCallForConference(){
   const call=currentCall;
   if(!call)return null;
+  reportPrivateCallQuality(call,call.lastNetworkStats,'promoted_to_conference',true).catch(()=>{});
   clearPrivateRecovery(call);
   stopCallPing();
   stopOutgoingTone();
@@ -8302,7 +8536,7 @@ async function createAndOpenPrivateInvite(){
   }
 }
 
-function finishCall(notify=true){
+function finishCall(notify=true,endReason='local_hangup'){
   const endingCallId=currentCall?.callId||pendingCall?.call_id||null;
   if(endingCallId)clearNativeCallNotification(endingCallId);
   if(notify&&currentCall){
@@ -8312,6 +8546,12 @@ function finishCall(notify=true){
   }
   if(currentCall){
     const finishingCall=currentCall;
+    reportPrivateCallQuality(
+      finishingCall,
+      finishingCall.lastNetworkStats,
+      endReason,
+      true
+    ).catch(()=>{});
     clearPrivateRecovery(finishingCall);
     try{finishingCall.pc.onicecandidate=null;finishingCall.pc.ontrack=null;finishingCall.pc.close()}catch{}
     try{finishingCall.localStream?.getTracks().forEach(t=>t.stop())}catch{}
@@ -8369,11 +8609,11 @@ async function handleCallSignal(data){
     return
   }
   if(data.type==='call_reject'){
-    if(currentCall&&currentCall.callId===data.call_id){stopOutgoingTone();$('callStatus').textContent='Звонок отклонён';setTimeout(()=>finishCall(false),900)}
+    if(currentCall&&currentCall.callId===data.call_id){stopOutgoingTone();$('callStatus').textContent='Звонок отклонён';setTimeout(()=>finishCall(false,'rejected'),900)}
     return
   }
   if(data.type==='call_end'){
-    if((currentCall&&currentCall.callId===data.call_id)||(pendingCall&&pendingCall.call_id===data.call_id)){finishCall(false)}
+    if((currentCall&&currentCall.callId===data.call_id)||(pendingCall&&pendingCall.call_id===data.call_id)){finishCall(false,'remote_hangup')}
     return
   }
   if(data.type==='ice_candidate'){
