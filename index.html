@@ -5981,13 +5981,22 @@ function groupVideoTargetForTile(tile){
     target={enabled:true,width:320,height:180,fps:15,label:'low'}
   }
 
-  // Audio has priority. When LiveKit reports a weak connection, clamp all
-  // remote video layers before touching speech.
+  // Audio has priority. On a weak link keep the focused/active speaker
+  // readable while aggressively shrinking background thumbnails.
   if(networkCap==='low'){
-    return {enabled:true,width:320,height:180,fps:12,label:'low'}
+    if(tile?.classList.contains('focused')||active){
+      return {enabled:true,width:640,height:360,fps:15,label:'medium'}
+    }
+    return {enabled:true,width:320,height:180,fps:10,label:'low'}
   }
-  if(networkCap==='medium'&&target.label==='high'){
-    return {enabled:true,width:640,height:360,fps:18,label:'medium'}
+  if(networkCap==='medium'){
+    if(target.label==='high'){
+      return {enabled:true,width:640,height:360,fps:18,label:'medium'}
+    }
+    if(target.label==='medium'){
+      return {enabled:true,width:640,height:360,fps:18,label:'medium'}
+    }
+    return {enabled:true,width:320,height:180,fps:12,label:'low'}
   }
   return target
 }
@@ -6031,6 +6040,27 @@ function setGroupConnectionQuality(level){
   }
 }
 
+function groupVideoNetworkCapRank(value){
+  return value==='high'?2:(value==='medium'?1:0)
+}
+
+function groupVideoNetworkCapForQuality(quality,current='medium'){
+  const normalized=normalizeLiveKitConnectionQuality(quality);
+  if(normalized==='poor')return 'low';
+  if(normalized==='good')return 'medium';
+  if(normalized==='excellent')return 'high';
+  return current||'medium'
+}
+
+function applyGroupVideoNetworkCap(state,next){
+  if(!state||groupCallState!==state)return;
+  state.pendingVideoNetworkCap='';
+  if(state.videoNetworkCap===next)return;
+  state.videoNetworkCap=next;
+  state.lastVideoNetworkCapChangeAt=Date.now();
+  scheduleGroupRemoteVideoQualitySync()
+}
+
 function updateGroupVideoNetworkCap(quality,participant){
   const state=groupCallState;
   if(!state?.room)return;
@@ -6044,15 +6074,31 @@ function updateGroupVideoNetworkCap(quality,participant){
   const normalized=normalizeLiveKitConnectionQuality(quality);
   setGroupConnectionQuality(normalized);
 
-  const next=normalized==='poor'
-    ?'low'
-    :(normalized==='good'
-      ?'medium'
-      :(normalized==='excellent'?'high':state.videoNetworkCap||'medium'));
+  const current=state.videoNetworkCap||'medium';
+  const next=groupVideoNetworkCapForQuality(normalized,current);
+  if(next===current){
+    state.pendingVideoNetworkCap='';
+    if(state.videoNetworkCapTimer){
+      clearTimeout(state.videoNetworkCapTimer);
+      state.videoNetworkCapTimer=null
+    }
+    return
+  }
 
-  if(state.videoNetworkCap===next)return;
-  state.videoNetworkCap=next;
-  scheduleGroupRemoteVideoQualitySync()
+  if(state.pendingVideoNetworkCap===next&&state.videoNetworkCapTimer)return;
+  if(state.videoNetworkCapTimer)clearTimeout(state.videoNetworkCapTimer);
+  state.pendingVideoNetworkCap=next;
+
+  const degrading=groupVideoNetworkCapRank(next)<groupVideoNetworkCapRank(current);
+  const delay=degrading
+    ?(next==='low'?350:1200)
+    :(next==='high'?6500:3500);
+
+  state.videoNetworkCapTimer=setTimeout(()=>{
+    state.videoNetworkCapTimer=null;
+    if(groupCallState!==state||state.pendingVideoNetworkCap!==next)return;
+    applyGroupVideoNetworkCap(state,next)
+  },delay)
 }
 
 function applyGroupRemoteVideoTarget(publication,tile){
@@ -6855,6 +6901,9 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
       groupFocusSource:'',
       videoQualityFrame:0,
       videoNetworkCap:'high',
+      pendingVideoNetworkCap:'',
+      videoNetworkCapTimer:null,
+      lastVideoNetworkCapChangeAt:0,
       pendingSpeakers:[],
       activeSpeakerIds:new Set(),
       participantQualities:new Map(),
@@ -6938,6 +6987,11 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
       .on(LivekitClient.RoomEvent.Reconnecting,()=>{
         if(groupCallState?.room===room){
           groupCallState.needsRecovery=false;
+          if(groupCallState.videoNetworkCapTimer){
+            clearTimeout(groupCallState.videoNetworkCapTimer);
+            groupCallState.videoNetworkCapTimer=null
+          }
+          groupCallState.pendingVideoNetworkCap='';
           groupCallState.videoNetworkCap='low';
           setGroupConnectionQuality('poor');
           scheduleGroupRemoteVideoQualitySync();
@@ -6949,6 +7003,11 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
           groupCallState.reconnectAttempts=0;
           groupCallState.recovering=false;
           groupCallState.needsRecovery=false;
+          if(groupCallState.videoNetworkCapTimer){
+            clearTimeout(groupCallState.videoNetworkCapTimer);
+            groupCallState.videoNetworkCapTimer=null
+          }
+          groupCallState.pendingVideoNetworkCap='';
           groupCallState.videoNetworkCap='medium';
           setGroupConnectionQuality('good');
           groupCallState.lastParticipantCount=-1;
@@ -7046,6 +7105,11 @@ function leaveGroupCall(disconnect=true,endReason='local_leave'){
       cancelAnimationFrame(state.videoQualityFrame);
       state.videoQualityFrame=0
     }
+    if(state.videoNetworkCapTimer){
+      clearTimeout(state.videoNetworkCapTimer);
+      state.videoNetworkCapTimer=null
+    }
+    state.pendingVideoNetworkCap=''
   }
   groupCallState=null;
   if(state&&disconnect){
@@ -7955,21 +8019,20 @@ function privateVideoTierForNetwork(network){
   const hasLoss=Number.isFinite(loss)&&loss>=0;
   const hasJitter=Number.isFinite(jitter)&&jitter>=0;
 
-  // Keep private-call video sharp. Do not drop a quality tier because of
-  // a short bandwidth-estimator dip; degrade only when the link is
-  // meaningfully constrained.
+  // Video yields before speech. These thresholds are intentionally lower
+  // than the audio thresholds so a congested link first sheds pixels/FPS.
   if(
-    (hasRtt&&rtt>=850)
-    ||(hasBandwidth&&bandwidth<320000)
-    ||(hasLoss&&loss>=11)
-    ||(hasJitter&&jitter>=110)
+    (hasRtt&&rtt>=720)
+    ||(hasBandwidth&&bandwidth<520000)
+    ||(hasLoss&&loss>=9)
+    ||(hasJitter&&jitter>=90)
   )return 'poor';
 
   if(
-    (hasRtt&&rtt>=480)
-    ||(hasBandwidth&&bandwidth<760000)
-    ||(hasLoss&&loss>=5)
-    ||(hasJitter&&jitter>=55)
+    (hasRtt&&rtt>=340)
+    ||(hasBandwidth&&bandwidth<1250000)
+    ||(hasLoss&&loss>=3.5)
+    ||(hasJitter&&jitter>=42)
   )return 'fair';
 
   return 'good'
@@ -8005,12 +8068,14 @@ function privateAudioTierForNetwork(network){
 
 function severePrivateNetworkProblem(network){
   const rtt=Number(network?.rttMs);
+  const bandwidth=Number(network?.availableOutgoingBitrate);
   const loss=Number(network?.packetLossPct);
   const jitter=Number(network?.jitterMs);
   return (
-    (Number.isFinite(rtt)&&rtt>=900)
-    ||(Number.isFinite(loss)&&loss>=15)
-    ||(Number.isFinite(jitter)&&jitter>=140)
+    (Number.isFinite(rtt)&&rtt>=850)
+    ||(Number.isFinite(bandwidth)&&bandwidth>0&&bandwidth<300000)
+    ||(Number.isFinite(loss)&&loss>=14)
+    ||(Number.isFinite(jitter)&&jitter>=125)
   )
 }
 
@@ -8024,39 +8089,59 @@ async function applyPrivateVideoTier(call,tier,network=null){
   if(!sender?.track||typeof sender.getParameters!=='function'||typeof sender.setParameters!=='function')return;
 
   const profiles={
-    good:{maxBitrate:2600000,maxFramerate:30,scaleResolutionDownBy:1},
-    fair:{maxBitrate:1100000,maxFramerate:22,scaleResolutionDownBy:1},
-    poor:{maxBitrate:460000,maxFramerate:15,scaleResolutionDownBy:1.5}
+    // Source is 1280x720. scaleResolutionDownBy affects only the encoded
+    // stream, so the local preview can remain sharp.
+    good:{
+      maxBitrate:2800000,
+      maxFramerate:30,
+      scaleResolutionDownBy:1
+    },
+    fair:{
+      maxBitrate:1350000,
+      maxFramerate:24,
+      scaleResolutionDownBy:1.35
+    },
+    poor:{
+      maxBitrate:560000,
+      maxFramerate:15,
+      scaleResolutionDownBy:2
+    }
   };
   const profile=profiles[tier]||profiles.good;
   let maxBitrate=profile.maxBitrate;
 
   const bandwidth=Number(network?.availableOutgoingBitrate);
   if(Number.isFinite(bandwidth)&&bandwidth>0){
-    // Reserve enough room for speech/RTCP without starving the video track.
-    const reservedForAudioAndOverhead=110000;
-    const videoBudget=Math.max(280000,bandwidth-reservedForAudioAndOverhead);
+    // Always leave room for Opus, RTCP and retransmissions. On a very weak
+    // link the video budget is allowed to fall far enough to protect speech.
+    const reservedForAudioAndOverhead=105000;
+    const videoBudget=Math.max(
+      90000,
+      bandwidth-reservedForAudioAndOverhead
+    );
     maxBitrate=Math.min(maxBitrate,videoBudget)
   }
 
   try{
+    const previousTier=call.appliedVideoTier||null;
     const params=sender.getParameters();
     if(!Array.isArray(params.encodings)||!params.encodings.length){
       params.encodings=[{}]
     }
     for(const encoding of params.encodings){
-      encoding.maxBitrate=maxBitrate;
+      encoding.maxBitrate=Math.round(maxBitrate);
       encoding.maxFramerate=profile.maxFramerate;
       encoding.scaleResolutionDownBy=profile.scaleResolutionDownBy
     }
-    // Prefer keeping image resolution in a 1-to-1 video call.
-    // WebRTC may reduce frame rate before making the picture blurry.
-    params.degradationPreference='maintain-resolution';
+    // balanced lets WebRTC trade both resolution and frame rate instead of
+    // holding 720p until latency becomes visibly bad.
+    params.degradationPreference='balanced';
     await sender.setParameters(params);
     if(currentCall===call){
       call.appliedVideoTier=tier;
-      call.appliedVideoBitrate=maxBitrate;
-      call.lastVideoTierChangeAt=Date.now()
+      call.appliedVideoBitrate=Math.round(maxBitrate);
+      call.lastVideoBudgetChangeAt=Date.now();
+      if(previousTier!==tier)call.lastVideoTierChangeAt=Date.now()
     }
   }catch{}
 }
@@ -8071,14 +8156,25 @@ async function maybeAdaptPrivateVideo(call,network){
     call.pendingVideoTierSamples=0;
     const bandwidth=Number(network?.availableOutgoingBitrate);
     if(Number.isFinite(bandwidth)&&bandwidth>0){
+      const profile=tier==='good'
+        ?{max:2800000}
+        :(tier==='fair'
+          ?{max:1350000}
+          :{max:560000});
       const desiredCap=Math.min(
-        tier==='good'?2600000:(tier==='fair'?1100000:460000),
-        Math.max(280000,bandwidth-110000)
+        profile.max,
+        Math.max(90000,bandwidth-105000)
       );
       const currentCap=Number(call.appliedVideoBitrate)||0;
+      const budgetOldEnough=
+        !call.lastVideoBudgetChangeAt
+        ||Date.now()-call.lastVideoBudgetChangeAt>=4000;
       if(
-        !currentCap
-        ||Math.abs(desiredCap-currentCap)>=Math.max(80000,currentCap*0.22)
+        budgetOldEnough
+        &&(
+          !currentCap
+          ||Math.abs(desiredCap-currentCap)>=Math.max(100000,currentCap*0.25)
+        )
       ){
         await applyPrivateVideoTier(call,tier,network)
       }
@@ -8095,11 +8191,11 @@ async function maybeAdaptPrivateVideo(call,network){
 
   const upgrading=networkTierRank(tier)>networkTierRank(currentTier);
   const requiredSamples=upgrading
-    ?2
-    :(severePrivateNetworkProblem(network)?1:3);
+    ?5
+    :(severePrivateNetworkProblem(network)?1:2);
   if((call.pendingVideoTierSamples||0)<requiredSamples)return;
 
-  const minDelay=upgrading?2800:4500;
+  const minDelay=upgrading?8000:2200;
   if(call.lastVideoTierChangeAt&&Date.now()-call.lastVideoTierChangeAt<minDelay)return;
 
   call.pendingVideoTier=null;
@@ -8520,7 +8616,7 @@ function schedulePrivateCallRecovery(call,delay=900){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,remoteMuted:false,cameraOff:!video,remoteCameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,connectedAt:0,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0,lastQualityReportAt:0,lastNetworkStats:null};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,remoteMuted:false,cameraOff:!video,remoteCameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,connectedAt:0,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,lastVideoBudgetChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0,lastQualityReportAt:0,lastNetworkStats:null};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks()){
     try{
