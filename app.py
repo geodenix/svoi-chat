@@ -162,9 +162,6 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_messages_pair
       ON messages(sender_id, recipient_id, id);
-    CREATE INDEX IF NOT EXISTS idx_messages_unread_recipient
-      ON messages(recipient_id, sender_id, id)
-      WHERE read_at IS NULL;
     CREATE TABLE IF NOT EXISTS chat_groups (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -339,6 +336,11 @@ def init_db():
                     "ALTER TABLE group_messages ADD COLUMN forwarded INTEGER NOT NULL DEFAULT 0"
                 )
 
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_messages_unread_recipient
+           ON messages(recipient_id, sender_id, id)
+           WHERE read_at IS NULL"""
+    )
     conn.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_message
            ON messages(sender_id, client_message_id)
