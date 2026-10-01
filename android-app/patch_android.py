@@ -231,6 +231,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.ComponentName;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.ResolveInfo;
 import android.database.Cursor;
 import android.net.Uri;
@@ -262,6 +263,16 @@ public class MainActivity extends BridgeActivity {
     private static final String PREF_PENDING_INSTALL = "pending_install";
     private static final String PREF_DOWNLOAD_VERSION_CODE = "download_version_code";
     private static final String PREF_DOWNLOAD_VERSION_NAME = "download_version_name";
+    private static final String PREF_LAST_CHECK_AT = "last_check_at";
+    private static final String PREF_DISMISSED_VERSION_CODE = "dismissed_version_code";
+    private static final String PREF_DISMISSED_AT = "dismissed_at";
+    private static final String PREF_INSTALL_REMIND_AT = "install_remind_at";
+    private static final long UPDATE_CHECK_INTERVAL_MS =
+        6L * 60L * 60L * 1000L;
+    private static final long UPDATE_DISMISS_INTERVAL_MS =
+        24L * 60L * 60L * 1000L;
+    private static final long INSTALL_REMIND_INTERVAL_MS =
+        12L * 60L * 60L * 1000L;
 
     private SharedPreferences updaterPrefs;
     private BroadcastReceiver downloadReceiver;
@@ -399,10 +410,8 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
-        if (updaterPrefs != null
-                && updaterPrefs.getBoolean(PREF_PENDING_INSTALL, false)
-                && canInstallPackages()) {
-            installDownloadedUpdate();
+        if (updaterPrefs != null) {
+            resumePendingUpdate();
         }
         checkForUpdates();
     }
@@ -419,10 +428,35 @@ public class MainActivity extends BridgeActivity {
     }
 
     private int currentVersionCode() {
-        return SvoiVersion.VERSION_CODE;
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(
+                getPackageName(),
+                0
+            );
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                long value = info.getLongVersionCode();
+                if (value > Integer.MAX_VALUE) {
+                    return Integer.MAX_VALUE;
+                }
+                return (int) value;
+            }
+            return info.versionCode;
+        } catch (Exception ignored) {
+            return SvoiVersion.VERSION_CODE;
+        }
     }
 
     private String currentVersionName() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(
+                getPackageName(),
+                0
+            );
+            if (info.versionName != null && !info.versionName.isEmpty()) {
+                return info.versionName;
+            }
+        } catch (Exception ignored) {
+        }
         return SvoiVersion.VERSION_NAME;
     }
 
@@ -536,16 +570,59 @@ public class MainActivity extends BridgeActivity {
             .remove(PREF_PENDING_INSTALL)
             .remove(PREF_DOWNLOAD_VERSION_CODE)
             .remove(PREF_DOWNLOAD_VERSION_NAME)
+            .remove(PREF_INSTALL_REMIND_AT)
+            .apply();
+    }
+
+    private boolean updateWasRecentlyDismissed(int versionCode) {
+        int dismissedVersion = updaterPrefs.getInt(
+            PREF_DISMISSED_VERSION_CODE,
+            -1
+        );
+        long dismissedAt = updaterPrefs.getLong(PREF_DISMISSED_AT, 0L);
+        return dismissedVersion == versionCode
+            && System.currentTimeMillis() - dismissedAt
+                < UPDATE_DISMISS_INTERVAL_MS;
+    }
+
+    private void rememberUpdateDismissed(int versionCode) {
+        updaterPrefs.edit()
+            .putInt(PREF_DISMISSED_VERSION_CODE, versionCode)
+            .putLong(PREF_DISMISSED_AT, System.currentTimeMillis())
+            .apply();
+    }
+
+    private boolean installReminderIsDue() {
+        long remindAt = updaterPrefs.getLong(PREF_INSTALL_REMIND_AT, 0L);
+        return remindAt <= 0L || System.currentTimeMillis() >= remindAt;
+    }
+
+    private void snoozeInstallReminder() {
+        updaterPrefs.edit()
+            .putLong(
+                PREF_INSTALL_REMIND_AT,
+                System.currentTimeMillis() + INSTALL_REMIND_INTERVAL_MS
+            )
             .apply();
     }
 
     private void checkForUpdates() {
         long now = System.currentTimeMillis();
-        if (updateCheckRunning || now - lastUpdateCheckAt < 10000L) {
+        long lastPersistentCheck = updaterPrefs == null
+            ? 0L
+            : updaterPrefs.getLong(PREF_LAST_CHECK_AT, 0L);
+        if (
+            updateCheckRunning
+            || now - lastUpdateCheckAt < 10000L
+            || now - lastPersistentCheck < UPDATE_CHECK_INTERVAL_MS
+        ) {
             return;
         }
         updateCheckRunning = true;
         lastUpdateCheckAt = now;
+        updaterPrefs.edit()
+            .putLong(PREF_LAST_CHECK_AT, now)
+            .apply();
 
         new Thread(() -> {
             HttpURLConnection connection = null;
@@ -599,6 +676,10 @@ public class MainActivity extends BridgeActivity {
                 }
 
                 if (hasCurrentDownloadForVersion(latestCode)) {
+                    return;
+                }
+
+                if (updateWasRecentlyDismissed(latestCode)) {
                     return;
                 }
 
@@ -659,7 +740,11 @@ public class MainActivity extends BridgeActivity {
                 "\n\nНажми «Скачать». После загрузки Android " +
                 "предложит установить обновление."
             )
-            .setNegativeButton("Позже", null)
+            .setNegativeButton(
+                "Позже",
+                (dialogInterface, which) ->
+                    rememberUpdateDismissed(versionCode)
+            )
             .setPositiveButton(
                 "Скачать",
                 (dialogInterface, which) -> startUpdateDownload(
@@ -712,6 +797,9 @@ public class MainActivity extends BridgeActivity {
                 .putBoolean(PREF_PENDING_INSTALL, false)
                 .putInt(PREF_DOWNLOAD_VERSION_CODE, versionCode)
                 .putString(PREF_DOWNLOAD_VERSION_NAME, versionName)
+                .remove(PREF_DISMISSED_VERSION_CODE)
+                .remove(PREF_DISMISSED_AT)
+                .remove(PREF_INSTALL_REMIND_AT)
                 .apply();
 
             Toast.makeText(
@@ -771,7 +859,9 @@ public class MainActivity extends BridgeActivity {
                     false
                 );
                 if (installerAlreadyShown) {
-                    showDownloadedUpdateDialog();
+                    if (installReminderIsDue()) {
+                        showDownloadedUpdateDialog();
+                    }
                 } else {
                     installDownloadedUpdate();
                 }
@@ -799,7 +889,10 @@ public class MainActivity extends BridgeActivity {
                 "Версия " + versionName +
                 " уже загружена. Повторно скачивать её не нужно."
             )
-            .setNegativeButton("Позже", null)
+            .setNegativeButton(
+                "Позже",
+                (dialogInterface, which) -> snoozeInstallReminder()
+            )
             .setPositiveButton(
                 "Установить",
                 (dialogInterface, which) -> installDownloadedUpdate()
@@ -828,6 +921,10 @@ public class MainActivity extends BridgeActivity {
         if (!canInstallPackages()) {
             updaterPrefs.edit()
                 .putBoolean(PREF_PENDING_INSTALL, true)
+                .putLong(
+                    PREF_INSTALL_REMIND_AT,
+                    System.currentTimeMillis() + INSTALL_REMIND_INTERVAL_MS
+                )
                 .apply();
 
             new AlertDialog.Builder(this)
@@ -853,6 +950,10 @@ public class MainActivity extends BridgeActivity {
             // from offering the same APK for download again after reopening.
             updaterPrefs.edit()
                 .putBoolean(PREF_PENDING_INSTALL, true)
+                .putLong(
+                    PREF_INSTALL_REMIND_AT,
+                    System.currentTimeMillis() + INSTALL_REMIND_INTERVAL_MS
+                )
                 .apply();
 
             Intent install = new Intent(Intent.ACTION_VIEW);
