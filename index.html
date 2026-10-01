@@ -5585,7 +5585,7 @@ async function applyPrivateVideoTier(call,tier,network=null){
 
 async function maybeAdaptPrivateVideo(call,network){
   if(!call||currentCall!==call||!call.video||call.cameraOff)return;
-  const tier=privateAudioTierForNetwork(network);
+  const tier=privateVideoTierForNetwork(network);
   const currentTier=call.appliedVideoTier||'good';
 
   if(tier===currentTier){
@@ -5659,7 +5659,7 @@ async function applyPrivateAudioTier(call,tier){
 
 async function maybeAdaptPrivateAudio(call,network){
   if(!call||currentCall!==call)return;
-  const tier=privateVideoTierForNetwork(network);
+  const tier=privateAudioTierForNetwork(network);
 
   if(tier===call.appliedAudioTier){
     call.pendingAudioTier=null;
