@@ -378,6 +378,25 @@ body.drawer-open{overflow:hidden}
   font-size:8px
 }
 </style>
+<style>
+.live-call-duration{
+  display:inline-flex!important;
+  align-items:center;
+  justify-content:center;
+  min-width:48px;
+  padding:4px 7px;
+  border-radius:999px;
+  background:#07101e99;
+  border:1px solid #ffffff24;
+  color:#dce9f8!important;
+  font-size:11px!important;
+  font-weight:800;
+  line-height:1;
+  font-variant-numeric:tabular-nums;
+  text-shadow:none;
+  white-space:nowrap
+}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -546,6 +565,7 @@ body.drawer-open{overflow:hidden}
       <strong id="groupCallName">Групповой звонок</strong>
       <div class="group-call-meta-row">
         <small id="groupCallStatus" class="muted">Подключение…</small>
+        <span id="groupCallDuration" class="live-call-duration hidden">00:00</span>
         <span id="groupConnectionQuality" class="group-connection-quality checking">Связь: проверяем</span>
       </div>
     </div>
@@ -569,7 +589,7 @@ body.drawer-open{overflow:hidden}
       <video id="remoteVideo" class="remote-video" autoplay playsinline></video>
       <div id="callAvatar" class="call-avatar"><img src="/icon-512.svg" alt="Свои"></div>
       <video id="localVideo" class="local-video hidden" autoplay muted playsinline></video>
-      <div class="call-info"><strong id="callName">Звонок</strong><div class="call-meta"><span id="callStatus">Соединение…</span><span id="remoteMuteStatus" class="private-remote-mute hidden">🔇 микрофон выключен</span><span id="callPing" class="call-ping hidden">— мс</span></div></div>
+      <div class="call-info"><strong id="callName">Звонок</strong><div class="call-meta"><span id="callStatus">Соединение…</span><span id="callDuration" class="live-call-duration hidden">00:00</span><span id="remoteMuteStatus" class="private-remote-mute hidden">🔇 микрофон выключен</span><span id="callPing" class="call-ping hidden">— мс</span></div></div>
     </div>
     <div id="incomingActions" class="incoming-actions hidden">
       <button id="rejectCall" class="reject-call" type="button" title="Отклонить">✕</button>
@@ -4625,6 +4645,66 @@ async function stopNativeCallService(){
   try{await plugin.stop()}catch{}
 }
 
+let liveCallDurationTimer=null;
+
+function formatLiveCallDuration(ms){
+  const total=Math.max(0,Math.floor(Number(ms||0)/1000));
+  const hours=Math.floor(total/3600);
+  const minutes=Math.floor((total%3600)/60);
+  const seconds=total%60;
+  const mm=String(minutes).padStart(2,'0');
+  const ss=String(seconds).padStart(2,'0');
+  return hours>0?hours+':'+mm+':'+ss:mm+':'+ss
+}
+
+function refreshLiveCallDurations(){
+  const privateStarted=currentCall?.connectedAt||0;
+  const privateBadge=$('callDuration');
+  if(privateBadge){
+    privateBadge.classList.toggle('hidden',!privateStarted);
+    privateBadge.textContent=privateStarted
+      ?formatLiveCallDuration(Date.now()-privateStarted)
+      :'00:00'
+  }
+
+  const groupStarted=groupCallState?.connectedAt||0;
+  const groupBadge=$('groupCallDuration');
+  if(groupBadge){
+    groupBadge.classList.toggle('hidden',!groupStarted);
+    groupBadge.textContent=groupStarted
+      ?formatLiveCallDuration(Date.now()-groupStarted)
+      :'00:00'
+  }
+
+  updateMiniCallBar()
+}
+
+function ensureLiveCallDurationTimer(){
+  refreshLiveCallDurations();
+  if(liveCallDurationTimer)return;
+  liveCallDurationTimer=setInterval(()=>{
+    if(!currentCall?.connectedAt&&!groupCallState?.connectedAt){
+      clearInterval(liveCallDurationTimer);
+      liveCallDurationTimer=null;
+      refreshLiveCallDurations();
+      return
+    }
+    refreshLiveCallDurations()
+  },1000)
+}
+
+function stopLiveCallDurationTimerIfIdle(){
+  if(currentCall?.connectedAt||groupCallState?.connectedAt){
+    refreshLiveCallDurations();
+    return
+  }
+  if(liveCallDurationTimer){
+    clearInterval(liveCallDurationTimer);
+    liveCallDurationTimer=null
+  }
+  refreshLiveCallDurations()
+}
+
 function hideMiniCallBar(){
   minimizedCallKind=null;
   $('callMiniBar')?.classList.add('hidden');
@@ -4678,12 +4758,19 @@ function restoreMinimizedCall(){
 function updateMiniCallBar(){
   if(minimizedCallKind==='private'&&currentCall){
     $('miniCallName').textContent=currentCall.peerName||'Звонок';
+    const duration=currentCall.connectedAt
+      ?formatLiveCallDuration(Date.now()-currentCall.connectedAt)
+      :'';
     $('miniCallStatus').textContent=currentCall.answered
-      ?('Звонок активен'+(currentCall.remoteMuted?' · 🔇 собеседник':''))
+      ?('Звонок активен'+(duration?' · '+duration:'')+(currentCall.remoteMuted?' · 🔇 собеседник':''))
       :'Вызов…'
   }else if(minimizedCallKind==='group'&&groupCallState){
     $('miniCallName').textContent=$('groupCallName').textContent||'Групповой звонок';
-    $('miniCallStatus').textContent=$('groupCallStatus').textContent||'Звонок активен'
+    const duration=groupCallState.connectedAt
+      ?formatLiveCallDuration(Date.now()-groupCallState.connectedAt)
+      :'';
+    const status=$('groupCallStatus').textContent||'Звонок активен';
+    $('miniCallStatus').textContent=status+(duration?' · '+duration:'')
   }
 }
 
@@ -5471,6 +5558,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
       room,
       groupId,
       video:!!video,
+      connectedAt:0,
       muted:false,
       cameraOff:!video,
       facing:'user',
@@ -5496,6 +5584,8 @@ async function joinGroupCall(groupId,video=false,invite=false){
     $('groupCallGrid').classList.remove('has-focus');
     $('groupCallName').textContent=credentials.group_name;
     $('groupCallStatus').textContent='Подключение…';
+    $('groupCallDuration').textContent='00:00';
+    $('groupCallDuration').classList.add('hidden');
     $('groupCallOverlay').classList.remove('hidden');
     applyGroupParticipantSize();
     updateSpeakerButtons();
@@ -5581,6 +5671,11 @@ async function joinGroupCall(groupId,video=false,invite=false){
       credentials.participant_token
     );
 
+    if(groupCallState&&!groupCallState.connectedAt){
+      groupCallState.connectedAt=Date.now();
+      ensureLiveCallDurationTimer()
+    }
+
     ensureGroupTile(room.localParticipant,true);
     updateGroupVideoNetworkCap(
       room.localParticipant.connectionQuality,
@@ -5639,7 +5734,10 @@ function leaveGroupCall(disconnect=true){
   $('groupCallStrip').classList.add('hidden');
   $('groupCallGrid').classList.remove('has-focus');
   setGroupConnectionQuality('unknown');
-  $('groupCallOverlay').classList.add('hidden')
+  $('groupCallDuration').textContent='00:00';
+  $('groupCallDuration').classList.add('hidden');
+  $('groupCallOverlay').classList.add('hidden');
+  stopLiveCallDurationTimerIfIdle()
 }
 
 window.addEventListener('resize',()=>{
@@ -6734,7 +6832,7 @@ function schedulePrivateCallRecovery(call,delay=900){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,remoteMuted:false,cameraOff:!video,remoteCameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,remoteMuted:false,cameraOff:!video,remoteCameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,connectedAt:0,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks()){
     try{
@@ -6810,6 +6908,8 @@ async function createPeer(peerId,peerName,id,video,stream){
 
     if(state==='connected'){
       call.answered=true;
+      if(!call.connectedAt)call.connectedAt=Date.now();
+      ensureLiveCallDurationTimer();
       clearPrivateRecovery(call);
       startCallPing(call);
       applyPrivateAudioTier(call,call.appliedAudioTier||'good').catch(()=>{});
@@ -7053,7 +7153,9 @@ function finishCall(notify=true){
     try{finishingCall.pc.onicecandidate=null;finishingCall.pc.ontrack=null;finishingCall.pc.close()}catch{}
     try{finishingCall.localStream?.getTracks().forEach(t=>t.stop())}catch{}
   }
-  acceptingCall=false;currentCall=null;pendingCall=null;pendingIce=[];resetCallUi();
+  acceptingCall=false;currentCall=null;pendingCall=null;pendingIce=[];
+  stopLiveCallDurationTimerIfIdle();
+  resetCallUi();
   syncNativeProximity().catch(()=>{});
   setTimeout(()=>loadCallHistory().catch(()=>{}),500)
 }
