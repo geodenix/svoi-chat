@@ -557,10 +557,12 @@ body.drawer-open{overflow:hidden}
   }
   .group-call-grid.layout-2:not(.has-focus),
   .group-call-grid.layout-3-4:not(.has-focus),
-  .group-call-grid.layout-5-6:not(.has-focus),
+  .group-call-grid.layout-5-6:not(.has-focus){
+    --auto-cols:2
+  }
   .group-call-grid.layout-7-9:not(.has-focus),
   .group-call-grid.layout-10:not(.has-focus){
-    --auto-cols:2
+    --auto-cols:3
   }
 }
 @media(orientation:landscape) and (max-height:620px){
@@ -1186,7 +1188,6 @@ let chatGalleryState={
 };
 const outboxDeliveries=new Map();
 let privateParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_private_video_size')||1)));
-let groupParticipantSize=Math.max(0,Math.min(2,Number(localStorage.getItem('svoi_group_video_size')||1)));
 let privateLocalVideoPosition=(()=>{
   try{
     const saved=JSON.parse(localStorage.getItem('svoi_private_pip_position')||'null');
@@ -1477,7 +1478,7 @@ updateInstallUi();
 updateSoundButton();
 updateVibrationButton();
 applyPrivateParticipantSize();
-applyGroupParticipantSize();
+applyGroupAutoLayout();
 
 $('soundBtn').onclick=async()=>{
   soundsEnabled=!soundsEnabled;
@@ -5259,18 +5260,6 @@ function applyGroupAutoLayout(count=null){
   })
 }
 
-function applyGroupParticipantSize(){
-  applyGroupAutoLayout()
-}
-
-function changeGroupParticipantSize(delta){
-  const next=Math.max(0,Math.min(2,groupParticipantSize+delta));
-  if(next===groupParticipantSize)return;
-  groupParticipantSize=next;
-  localStorage.setItem('svoi_group_video_size',String(next));
-  applyGroupParticipantSize()
-}
-
 function restoreGroupGridLayout(){
   const grid=$('groupCallGrid');
   const strip=$('groupCallStrip');
@@ -6166,7 +6155,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
     $('groupCallDuration').textContent='00:00';
     $('groupCallDuration').classList.add('hidden');
     $('groupCallOverlay').classList.remove('hidden');
-    applyGroupParticipantSize();
+    applyGroupAutoLayout();
     updateSpeakerButtons();
     $('groupCameraBtn').classList.toggle('off',!video);
     $('groupCameraBtn').textContent=video?'📷':'🎥';
