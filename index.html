@@ -120,7 +120,21 @@ body.drawer-open{overflow:hidden}
   pointer-events:none
 }
 .tile-mic-status.hidden{display:none!important}
-</style></head>
+</style><style>
+.private-remote-mute{
+  font-size:11px!important;
+  line-height:1;
+  padding:5px 8px;
+  border-radius:999px;
+  background:#8c2f3ccc;
+  border:1px solid #ff9ba655;
+  color:#fff!important;
+  font-weight:800;
+  text-shadow:none;
+  white-space:nowrap
+}
+</style>
+</head>
 <body>
 <div id="auth" class="auth">
   <div class="auth-card"><div class="brand"><div class="mark">С</div><div><h1>Свои</h1><div class="muted">приватный мессенджер</div></div></div>
@@ -305,7 +319,7 @@ body.drawer-open{overflow:hidden}
       <video id="remoteVideo" class="remote-video" autoplay playsinline></video>
       <div id="callAvatar" class="call-avatar"><img src="/icon-512.svg" alt="Свои"></div>
       <video id="localVideo" class="local-video hidden" autoplay muted playsinline></video>
-      <div class="call-info"><strong id="callName">Звонок</strong><div class="call-meta"><span id="callStatus">Соединение…</span><span id="callPing" class="call-ping hidden">— мс</span></div></div>
+      <div class="call-info"><strong id="callName">Звонок</strong><div class="call-meta"><span id="callStatus">Соединение…</span><span id="remoteMuteStatus" class="private-remote-mute hidden">🔇 микрофон выключен</span><span id="callPing" class="call-ping hidden">— мс</span></div></div>
     </div>
     <div id="incomingActions" class="incoming-actions hidden">
       <button id="rejectCall" class="reject-call" type="button" title="Отклонить">✕</button>
@@ -4266,7 +4280,9 @@ function restoreMinimizedCall(){
 function updateMiniCallBar(){
   if(minimizedCallKind==='private'&&currentCall){
     $('miniCallName').textContent=currentCall.peerName||'Звонок';
-    $('miniCallStatus').textContent=currentCall.answered?'Звонок активен':'Вызов…'
+    $('miniCallStatus').textContent=currentCall.answered
+      ?('Звонок активен'+(currentCall.remoteMuted?' · 🔇 собеседник':''))
+      :'Вызов…'
   }else if(minimizedCallKind==='group'&&groupCallState){
     $('miniCallName').textContent=$('groupCallName').textContent||'Групповой звонок';
     $('miniCallStatus').textContent=$('groupCallStatus').textContent||'Звонок активен'
@@ -5906,12 +5922,38 @@ function setCallVisual(name,avatarUrl){
   }
 }
 
+function setRemoteCallMuted(muted){
+  const value=!!muted;
+  if(currentCall)currentCall.remoteMuted=value;
+  const badge=$('remoteMuteStatus');
+  if(badge)badge.classList.toggle('hidden',!value);
+  updateMiniCallBar()
+}
+
+function sendPrivateMuteState(sync=false){
+  const call=currentCall;
+  if(!call||!call.callId||!call.peerId)return false;
+  try{
+    wsSend({
+      type:'call_mute',
+      to_user_id:call.peerId,
+      call_id:call.callId,
+      muted:!!call.muted,
+      sync:!!sync
+    });
+    return true
+  }catch{
+    return false
+  }
+}
+
 function showCallUi(name,status,video,incoming=false,avatarUrl=null,nativeSystemControls=false){
   clearRemoteVideoFrame();
   $('callOverlay').classList.remove('hidden');
   $('callOverlay').classList.toggle('incoming-call-state',incoming);
   $('callOverlay').classList.toggle('active-call-state',!incoming);
   $('callName').textContent=name||'Звонок';$('callStatus').textContent=status;
+  setRemoteCallMuted(false);
   setCallPing(null);
   setCallVisual(name,avatarUrl);
   $('callAvatar').classList.remove('hidden');
@@ -5939,6 +5981,7 @@ function resetCallUi(){
   clearRemoteVideoFrame();$('localVideo').srcObject=null;$('localVideo').classList.remove('mirrored');
   setCallVisual('Свои',null);
   $('callAvatar').classList.remove('hidden');
+  setRemoteCallMuted(false);
   $('incomingActions').classList.add('hidden');$('activeCallControls').classList.add('hidden');$('mediaPermission').classList.add('hidden');
   $('muteCall').classList.remove('off');$('cameraCall').classList.remove('off');$('cameraCall').disabled=false;updateSpeakerButtons();updatePrivateVideoControls();applyPrivateParticipantSize();
   if(preparedMediaStream){try{preparedMediaStream.getTracks().forEach(t=>t.stop())}catch{}preparedMediaStream=null}
@@ -6088,7 +6131,7 @@ function schedulePrivateCallRecovery(call,delay=900){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,remoteMuted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks()){
     try{
@@ -6319,6 +6362,7 @@ async function acceptIncomingCall(options={}){
       !!data.video,
       stream
     );
+    setRemoteCallMuted(!!data.remote_muted);
     pendingCall=null;
     $('mediaPermission').classList.add('hidden');
     $('callStatus').textContent='Соединение…';
@@ -6420,6 +6464,22 @@ function enqueueCallSignal(data){
 
 async function handleCallSignal(data){
   if(data.type==='call_offer'){incomingCall(data);return}
+  if(data.type==='call_mute'){
+    if(
+      currentCall
+      &&currentCall.callId===data.call_id
+      &&Number(currentCall.peerId)===Number(data.from_user_id)
+    ){
+      setRemoteCallMuted(!!data.muted)
+    }else if(
+      pendingCall
+      &&pendingCall.call_id===data.call_id
+      &&Number(pendingCall.from_user_id)===Number(data.from_user_id)
+    ){
+      pendingCall.remote_muted=!!data.muted
+    }
+    return
+  }
   if(data.type==='call_unavailable'){
     if(currentCall&&currentCall.callId===data.call_id){stopOutgoingTone();alert('Пользователь сейчас недоступен');finishCall(false)}
     return
@@ -6490,6 +6550,7 @@ async function handleCallSignal(data){
     const call=currentCall;
     stopOutgoingTone();
     call.answered=true;
+    sendPrivateMuteState(true);
     updateMiniCallBar();
     updateEarModeButton();
 
@@ -6543,7 +6604,9 @@ $('muteCall').onclick=()=>{
   if(!currentCall)return;
   currentCall.muted=!currentCall.muted;
   currentCall.localStream.getAudioTracks().forEach(t=>t.enabled=!currentCall.muted);
-  $('muteCall').classList.toggle('off',currentCall.muted);$('muteCall').textContent=currentCall.muted?'🔇':'🎤'
+  $('muteCall').classList.toggle('off',currentCall.muted);
+  $('muteCall').textContent=currentCall.muted?'🔇':'🎤';
+  sendPrivateMuteState(false)
 };
 
 $('speakerCall').onclick=()=>chooseSpeakerOutput();
@@ -6934,10 +6997,13 @@ function connectWs(){
     if(action){
       restoreIncomingCallAction(action).catch(()=>{})
     }
+    if(currentCall?.callId){
+      sendPrivateMuteState(true)
+    }
   };
   socket.onmessage=e=>{
     const data=JSON.parse(e.data);
-    if(['call_offer','call_answer','call_video_offer','call_video_answer','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
+    if(['call_offer','call_answer','call_video_offer','call_video_answer','call_mute','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
       enqueueCallSignal(data);return
     }
     if(data.type==='group_call_invite'){
