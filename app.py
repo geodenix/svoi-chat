@@ -3746,6 +3746,7 @@ def remember_user_event(user_id: int, event: dict) -> None:
 
 
 async def flush_ws_queue(websocket: WebSocket, delay: float = WS_BATCH_DELAY_SECONDS):
+    current_task = asyncio.current_task()
     if delay > 0:
         await asyncio.sleep(delay)
     state = ws_connection_state.get(websocket)
@@ -3754,7 +3755,8 @@ async def flush_ws_queue(websocket: WebSocket, delay: float = WS_BATCH_DELAY_SEC
     async with state["send_lock"]:
         queue = state.get("queue") or []
         if not queue:
-            state["flush_task"] = None
+            if state.get("flush_task") is current_task:
+                state["flush_task"] = None
             return
         events = queue[:WS_BATCH_MAX_EVENTS]
         del queue[:len(events)]
@@ -3769,11 +3771,16 @@ async def flush_ws_queue(websocket: WebSocket, delay: float = WS_BATCH_DELAY_SEC
                         "last_seq": int(events[-1].get("_seq", 0)),
                     }
                 )
+            state["last_sent_seq"] = max(
+                int(state.get("last_sent_seq", 0)),
+                max(int(item.get("_seq", 0)) for item in events),
+            )
         except Exception:
             state["dead"] = True
         finally:
-            state["flush_task"] = None
-    if state.get("queue") and not state.get("dead"):
+            if state.get("flush_task") is current_task:
+                state["flush_task"] = None
+    if state.get("queue") and not state.get("dead") and not state.get("flush_task"):
         state["flush_task"] = asyncio.create_task(
             flush_ws_queue(websocket, 0)
         )
@@ -3794,20 +3801,34 @@ async def queue_ws_event(websocket: WebSocket, event: dict, immediate: bool = Fa
         raise RuntimeError("websocket unavailable")
     state["queue"].append(event)
     task = state.get("flush_task")
-    if immediate:
-        if task and not task.done():
-            task.cancel()
-        state["flush_task"] = asyncio.create_task(
-            flush_ws_queue(websocket, 0)
-        )
-        await state["flush_task"]
-        if state.get("dead"):
-            raise RuntimeError("websocket send failed")
-        return
     if not task or task.done():
         state["flush_task"] = asyncio.create_task(
-            flush_ws_queue(websocket)
+            flush_ws_queue(
+                websocket,
+                0 if immediate else WS_BATCH_DELAY_SECONDS,
+            )
         )
+    if not immediate:
+        return
+
+    target_seq = int(event.get("_seq", 0))
+    while (
+        int(state.get("last_sent_seq", 0)) < target_seq
+        and not state.get("dead")
+    ):
+        task = state.get("flush_task")
+        if not task or task.done():
+            state["flush_task"] = asyncio.create_task(
+                flush_ws_queue(websocket, 0)
+            )
+            task = state["flush_task"]
+        try:
+            await task
+        except asyncio.CancelledError:
+            if state.get("dead") or websocket not in ws_connection_state:
+                raise RuntimeError("websocket unavailable")
+    if state.get("dead"):
+        raise RuntimeError("websocket send failed")
 
 
 async def push(user_id: int, payload: dict) -> int:
@@ -6910,6 +6931,7 @@ async def websocket_endpoint(
         "flush_task": None,
         "send_lock": asyncio.Lock(),
         "acked_seq": int(last_seq or 0),
+        "last_sent_seq": int(last_seq or 0),
         "dead": False,
         "token_hash": current_session_hash,
     }
