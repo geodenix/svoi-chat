@@ -750,6 +750,13 @@ body.drawer-open{overflow:hidden}
   font-size:11px
 }
 </style>
+<style id="callPreflightStyles">
+.call-tools{padding:12px 12px 4px}.call-tools button{width:100%;border:1px solid #31527a;background:#173153;color:#fff;border-radius:13px;padding:11px 12px;font-weight:750}
+.call-preflight-dialog{width:min(92vw,520px)}.call-preflight-list{display:grid;gap:8px;margin:14px 0}.call-preflight-row{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;background:#14243a}.call-preflight-row strong{flex:1}.call-preflight-row small{color:#9fb0c8;text-align:right}.call-preflight-icon{width:24px;text-align:center}.call-preflight-summary{padding:11px 12px;border-radius:12px;background:#101e31;color:#d6e4f7}.call-preflight-actions{display:flex;gap:8px;justify-content:flex-end}.call-preflight-actions button{border:0;border-radius:11px;padding:10px 13px;background:#244f7e;color:#fff;font-weight:700}.call-preflight-actions button:disabled{opacity:.5}
+</style>
+<style id="sessionStyles">
+.sessions-dialog{width:min(92vw,520px)}.sessions-list{display:grid;gap:9px;margin:14px 0;max-height:58dvh;overflow:auto}.session-row{display:flex;align-items:center;gap:10px;padding:11px 12px;border-radius:13px;background:#14243a}.session-row .session-main{min-width:0;flex:1}.session-row strong,.session-row small{display:block}.session-row small{color:#9fb0c8;margin-top:3px}.session-current{font-size:11px;padding:4px 7px;border-radius:999px;background:#1f6b4b;color:#bdf4d4}.session-end{border:0;border-radius:10px;padding:8px 10px;background:#6f3340;color:#fff;font-weight:700}.sessions-actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}.sessions-actions button{border:0;border-radius:11px;padding:10px 12px;background:#244f7e;color:#fff;font-weight:700}.sessions-actions .danger{background:#6f3340}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -905,6 +912,7 @@ body.drawer-open{overflow:hidden}
       <button id="notifyBtn" type="button"><span>🔔 Уведомления</span><span>›</span></button>
       <button id="openRecoverySettings" type="button"><span>🔑 Код восстановления</span><span>›</span></button>
       <button id="openPhoneContacts" type="button"><span>📱 Телефон и контакты</span><span>›</span></button>
+      <button id="openSessions" type="button"><span>💻 Активные устройства</span><span>›</span></button>
       <div class="drawer-spacer"></div>
       <button id="logout" class="danger" type="button"><span>↪ Выйти</span><span>›</span></button>
     </div>
@@ -1177,13 +1185,39 @@ body.drawer-open{overflow:hidden}
   <div id="blacklistList" class="blacklist-list"></div>
 </dialog>
 
+<dialog id="sessionsDialog" class="sessions-dialog">
+  <div class="chat-menu-head">
+    <div><h2>Активные устройства</h2><small id="sessionsCount" class="muted"></small></div>
+    <button id="closeSessions" class="chat-menu-close" type="button" aria-label="Закрыть">×</button>
+  </div>
+  <div id="sessionsList" class="sessions-list"></div>
+  <div class="sessions-actions">
+    <button id="revokeOtherSessions" class="danger" type="button">Завершить все остальные</button>
+    <button id="doneSessions" type="button">Закрыть</button>
+  </div>
+</dialog>
+
 <dialog id="callsDialog" class="calls-dialog">
   <div class="calls-dialog-head">
     <h2>Звонки</h2>
     <button id="closeCalls" class="calls-dialog-close" type="button" aria-label="Закрыть">×</button>
   </div>
   <div class="calls-dialog-body">
+    <div class="call-tools"><button id="runCallPreflight" type="button">🧪 Проверить связь перед звонком</button></div>
     <div id="calls" class="call-list"></div>
+  </div>
+</dialog>
+
+<dialog id="callPreflightDialog" class="call-preflight-dialog">
+  <div class="chat-menu-head">
+    <div><h2>Проверка связи</h2><small class="muted">Микрофон, камера, WebSocket, ICE и TURN</small></div>
+    <button id="closeCallPreflight" class="chat-menu-close" type="button" aria-label="Закрыть">×</button>
+  </div>
+  <div id="callPreflightSummary" class="call-preflight-summary">Нажми «Запустить тест».</div>
+  <div id="callPreflightList" class="call-preflight-list"></div>
+  <div class="call-preflight-actions">
+    <button id="startCallPreflight" type="button">Запустить тест</button>
+    <button id="doneCallPreflight" type="button">Закрыть</button>
   </div>
 </dialog>
 
@@ -1651,8 +1685,23 @@ if('serviceWorker' in navigator){
     .catch(()=>{})
 }
 
+function currentSessionDeviceLabel(){
+  const ua=navigator.userAgent||'';
+  let platform='Web';
+  if(/Android/i.test(ua))platform='Android';
+  else if(/iPhone|iPad|iPod/i.test(ua))platform='iPhone/iPad';
+  else if(/Windows/i.test(ua))platform='Windows';
+  else if(/Macintosh|Mac OS X/i.test(ua))platform='macOS';
+  let mode='браузер';
+  try{
+    if(window.Capacitor?.isNativePlatform?.())mode='приложение';
+    else if(window.matchMedia('(display-mode: standalone)').matches)mode='PWA'
+  }catch{}
+  return platform+' · '+mode
+}
+
 const api=async(path,opt={})=>{
-  opt.headers={...(opt.headers||{}),...(token?{Authorization:'Bearer '+token}:{})};
+  opt.headers={...(opt.headers||{}),'X-Svoi-Device':currentSessionDeviceLabel(),...(token?{Authorization:'Bearer '+token}:{})};
   if(opt.body&&typeof opt.body!=='string'){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(opt.body)}
   const r=await fetch(path,opt);let data=null;try{data=await r.json()}catch{}
   if(!r.ok){const err=new Error(data?.detail||'Ошибка сервера');err.status=r.status;throw err}
@@ -3309,6 +3358,7 @@ async function openUser(u){
   const historyRequest=++messageHistoryRequest;
   const userId=Number(u.id);
   active={type:'user',data:u};
+  prewarmPrivateCall(userId).catch(()=>{});
   resetMessageHistoryState();
   $('app').classList.add('chat-open');
   $('chatHead').classList.remove('hidden');
@@ -3361,6 +3411,7 @@ async function openGroup(g){
   const historyRequest=++messageHistoryRequest;
   const groupId=Number(g.id);
   active={type:'group',data:g};
+  closePrewarmedPrivateCall();
   resetMessageHistoryState();
   $('app').classList.add('chat-open');
   $('chatHead').classList.remove('hidden');
@@ -4590,10 +4641,20 @@ function msgNode(m){
     if(m.attachment.is_image){
       const img=document.createElement('img');
       img.className='attachment-img';
-      img.src=m.attachment.url;
+      img.src=m.attachment.thumbnail_url||m.attachment.url;
       img.alt=m.attachment.name;
       img.loading='lazy';
       img.decoding='async';
+      img.dataset.fullSrc=m.attachment.url;
+      img.onerror=()=>{
+        if(img.src!==new URL(m.attachment.url,location.href).href){
+          img.src=m.attachment.url
+        }
+      };
+      img.onclick=event=>{
+        event.stopPropagation();
+        if(img.dataset.fullSrc)window.open(img.dataset.fullSrc,'_blank','noopener')
+      };
       try{img.fetchPriority='low'}catch{}
       d.append(img)
     }else if(isVoice){
@@ -5659,12 +5720,62 @@ $('attach').onclick=()=>$('fileInput').click();
 $('removeFile').onclick=clearPending;
 $('cancelReply').onclick=clearReplySource;
 
+const ATTACHMENT_MAX_BYTES=20*1024*1024;
+const IMAGE_OPTIMIZE_TRIGGER_BYTES=700*1024;
+const IMAGE_OPTIMIZE_MAX_SIDE=1920;
+const IMAGE_OPTIMIZE_QUALITY=.82;
+
+function canvasToBlob(canvas,type,quality){
+  return new Promise(resolve=>canvas.toBlob(resolve,type,quality))
+}
+
+async function optimizeImageAttachment(file){
+  const type=String(file?.type||'').toLowerCase();
+  if(!type.startsWith('image/')||type==='image/gif'||file.size<IMAGE_OPTIMIZE_TRIGGER_BYTES)return file;
+  let bitmap=null;
+  try{
+    bitmap=await createImageBitmap(file,{imageOrientation:'from-image'});
+    const maxSide=Math.max(bitmap.width,bitmap.height);
+    const scale=Math.min(1,IMAGE_OPTIMIZE_MAX_SIDE/maxSide);
+    if(scale===1&&file.size<1.4*1024*1024)return file;
+    const width=Math.max(1,Math.round(bitmap.width*scale));
+    const height=Math.max(1,Math.round(bitmap.height*scale));
+    const canvas=document.createElement('canvas');
+    canvas.width=width;canvas.height=height;
+    const ctx=canvas.getContext('2d',{alpha:false});
+    if(!ctx)return file;
+    ctx.drawImage(bitmap,0,0,width,height);
+    const outputType=(type==='image/webp'&&HTMLCanvasElement.prototype.toBlob)?'image/webp':'image/jpeg';
+    const blob=await canvasToBlob(canvas,outputType,IMAGE_OPTIMIZE_QUALITY);
+    if(!blob||blob.size>=file.size*.92)return file;
+    const base=String(file.name||'photo').replace(/\.[^.]+$/,'');
+    const ext=outputType==='image/webp'?'.webp':'.jpg';
+    return new File([blob],base+'-optimized'+ext,{type:outputType,lastModified:file.lastModified||Date.now()})
+  }catch(err){
+    console.warn('Image optimization skipped',err);
+    return file
+  }finally{
+    try{bitmap?.close()}catch{}
+  }
+}
+
+async function optimizeAttachmentFile(file){
+  if(!file)return file;
+  if(String(file.type||'').toLowerCase().startsWith('image/')){
+    return optimizeImageAttachment(file)
+  }
+  return file
+}
+
 $('fileInput').onchange=async()=>{
   const file=$('fileInput').files?.[0];if(!file)return;
-  if(file.size>20*1024*1024){alert('Файл больше 20 МБ');$('fileInput').value='';return}
-  uploading=true;syncSend();$('pendingFileName').textContent='Загрузка: '+file.name;$('pendingFile').classList.remove('hidden');
+  uploading=true;syncSend();$('pendingFileName').textContent='Подготовка: '+file.name;$('pendingFile').classList.remove('hidden');
   try{
-    const form=new FormData();form.append('file',file);
+    const uploadFile=await optimizeAttachmentFile(file);
+    if(uploadFile.size>ATTACHMENT_MAX_BYTES)throw new Error('Файл больше 20 МБ');
+    const saved=Math.max(0,file.size-uploadFile.size);
+    $('pendingFileName').textContent=(saved>64*1024?'Сжато '+formatSize(file.size)+' → '+formatSize(uploadFile.size)+' · ':'Загрузка: ')+uploadFile.name;
+    const form=new FormData();form.append('file',uploadFile);
     const r=await fetch('/api/uploads',{method:'POST',headers:{Authorization:'Bearer '+token},body:form});
     const data=await r.json();if(!r.ok)throw new Error(data?.detail||'Ошибка загрузки');
     pendingAttachment=data;$('pendingFileName').textContent='📎 '+data.name+' · '+formatSize(data.size)
@@ -7778,6 +7889,63 @@ async function resumeCallInviteFromUrl(){
 }
 
 let rtcConfigCache=null,rtcConfigFetchedAt=0;
+let prewarmedPrivatePc=null;
+let prewarmedPrivatePeerId=0;
+let prewarmedPrivateTimer=null;
+let prewarmPrivatePromise=null;
+
+function closePrewarmedPrivateCall(){
+  if(prewarmedPrivateTimer)clearTimeout(prewarmedPrivateTimer);
+  prewarmedPrivateTimer=null;
+  const pc=prewarmedPrivatePc;
+  prewarmedPrivatePc=null;
+  prewarmedPrivatePeerId=0;
+  try{pc?.close()}catch{}
+}
+
+async function prewarmPrivateCall(peerId){
+  peerId=Number(peerId)||0;
+  if(!peerId||currentCall||pendingCall||groupCallState)return null;
+  if(
+    prewarmedPrivatePc
+    &&prewarmedPrivatePeerId===peerId
+    &&prewarmedPrivatePc.connectionState!=='closed'
+  )return prewarmedPrivatePc;
+  if(prewarmPrivatePromise)return prewarmPrivatePromise;
+
+  prewarmPrivatePromise=(async()=>{
+    const config=await getRtcConfig();
+    if(currentCall||pendingCall||groupCallState)return null;
+    if(active?.type==='user'&&Number(active.data.id)!==peerId)return null;
+    closePrewarmedPrivateCall();
+    const pc=new RTCPeerConnection(config);
+    prewarmedPrivatePc=pc;
+    prewarmedPrivatePeerId=peerId;
+    prewarmedPrivateTimer=setTimeout(()=>{
+      if(prewarmedPrivatePc===pc)closePrewarmedPrivateCall()
+    },20000);
+    return pc
+  })().finally(()=>{prewarmPrivatePromise=null});
+  return prewarmPrivatePromise
+}
+
+function takePrewarmedPrivateCall(peerId){
+  peerId=Number(peerId)||0;
+  const pc=prewarmedPrivatePc;
+  if(
+    !pc
+    ||prewarmedPrivatePeerId!==peerId
+    ||pc.connectionState==='closed'
+  ){
+    if(pc)closePrewarmedPrivateCall();
+    return null
+  }
+  if(prewarmedPrivateTimer)clearTimeout(prewarmedPrivateTimer);
+  prewarmedPrivateTimer=null;
+  prewarmedPrivatePc=null;
+  prewarmedPrivatePeerId=0;
+  return pc
+}
 
 async function getRtcConfig(){
   const now=Date.now();
@@ -9025,7 +9193,7 @@ function schedulePrivateCallRecovery(call,delay=900){
 
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
-  const pc=new RTCPeerConnection(config);
+  const pc=takePrewarmedPrivateCall(peerId)||new RTCPeerConnection(config);
   currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,remoteMuted:false,cameraOff:!video,remoteCameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,connectedAt:0,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,lastVideoBudgetChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0,lastQualityReportAt:0,lastNetworkStats:null};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks()){
@@ -9179,6 +9347,8 @@ function incomingCall(data,suppressRingtone=false,nativeSystemControls=false){
     ?data.ice_candidates.slice()
     :[];
   pendingCall=data;preparedMediaStream=null;
+  closePrewarmedPrivateCall();
+  getRtcConfig().catch(()=>{});
   showCallUi(
     data.from_name,
     data.video?'Входящий видеозвонок':'Входящий голосовой звонок',
@@ -10076,9 +10246,100 @@ function ackGroupMessageDelivered(message){
   ).catch(()=>{})
 }
 
+const wsPingWaiters=new Map();
+
+function resolveWsPing(data){
+  const nonce=String(data?.nonce||'');
+  const waiter=wsPingWaiters.get(nonce);
+  if(!waiter)return false;
+  wsPingWaiters.delete(nonce);
+  clearTimeout(waiter.timer);
+  waiter.resolve(Math.max(0,performance.now()-waiter.started));
+  return true
+}
+
+function measureWsPing(timeoutMs=3500){
+  return new Promise(async(resolve,reject)=>{
+    try{await waitForSocketOpen(Math.min(timeoutMs,3000))}catch(err){reject(err);return}
+    const nonce='preflight-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+    const timer=setTimeout(()=>{
+      wsPingWaiters.delete(nonce);
+      reject(new Error('Нет ответа от сервера'))
+    },timeoutMs);
+    wsPingWaiters.set(nonce,{resolve,reject,timer,started:performance.now()});
+    try{wsSend({type:'ws_ping_probe',nonce})}catch(err){
+      clearTimeout(timer);wsPingWaiters.delete(nonce);reject(err)
+    }
+  })
+}
+
+let wsAckTimer=null;
+let wsAckPendingSeq=0;
+let wsBatchingUi=false;
+let wsUsersRenderPending=false;
+let wsGroupsRenderPending=false;
+
+function wsSeqStorageKey(){
+  return 'svoi_ws_seq_'+String(Number(me?.id)||0)
+}
+
+function readWsLastSeq(){
+  const value=Number(localStorage.getItem(wsSeqStorageKey())||0);
+  return Number.isSafeInteger(value)&&value>0?value:0
+}
+
+function scheduleWsAck(seq){
+  seq=Number(seq)||0;
+  if(!seq)return;
+  wsAckPendingSeq=Math.max(wsAckPendingSeq,seq);
+  if(wsAckTimer)return;
+  wsAckTimer=setTimeout(()=>{
+    wsAckTimer=null;
+    if(!wsAckPendingSeq)return;
+    const ackSeq=wsAckPendingSeq;
+    wsAckPendingSeq=0;
+    if(socket?.readyState===WebSocket.OPEN){
+      try{socket.send(JSON.stringify({type:'ws_ack',seq:ackSeq}))}catch{}
+    }
+  },90)
+}
+
+function acceptWsSequence(data){
+  const seq=Number(data?._seq)||0;
+  if(!seq)return true;
+  const last=readWsLastSeq();
+  if(seq<=last){
+    scheduleWsAck(seq);
+    return false
+  }
+  localStorage.setItem(wsSeqStorageKey(),String(seq));
+  scheduleWsAck(seq);
+  return true
+}
+
+function wsRenderUsers(){
+  if(wsBatchingUi){wsUsersRenderPending=true;return}
+  renderUsers()
+}
+
+function wsRenderGroups(){
+  if(wsBatchingUi){wsGroupsRenderPending=true;return}
+  renderGroups()
+}
+
+function flushWsUiBatch(){
+  const usersPending=wsUsersRenderPending;
+  const groupsPending=wsGroupsRenderPending;
+  wsUsersRenderPending=false;
+  wsGroupsRenderPending=false;
+  if(usersPending)renderUsers();
+  if(groupsPending)renderGroups()
+}
+
 function connectWs(){
   if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';
-  socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));
+  const lastSeq=readWsLastSeq();
+  socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token)+'&last_seq='+encodeURIComponent(lastSeq));
   socket.onopen=()=>{
     scheduleOutboxFlush(120);
     const reconnect=wsHasConnected;
@@ -10105,7 +10366,27 @@ function connectWs(){
     }
   };
   socket.onmessage=e=>{
-    const data=JSON.parse(e.data);
+    let packet=null;
+    try{packet=JSON.parse(e.data)}catch{return}
+    if(packet?.type==='ws_batch'&&Array.isArray(packet.events)){
+      wsBatchingUi=true;
+      try{
+        for(const event of packet.events)processWsEvent(event)
+      }finally{
+        wsBatchingUi=false;
+        flushWsUiBatch()
+      }
+      return
+    }
+    processWsEvent(packet)
+  };
+
+  function processWsEvent(data){
+    if(!data||!acceptWsSequence(data))return;
+    if(data.type==='ws_ping_pong'){
+      resolveWsPing(data);
+      return
+    }
     if(data.type==='group_ping_pong'){
       handleGroupPingPong(data);
       return
@@ -10254,7 +10535,7 @@ function connectWs(){
         if($('groupMembersDialog').open)renderGroupMembers(groupMembersData)
       }
 
-      renderUsers();
+      wsRenderUsers();
       return
     }
     if(data.type==='blocks_updated'){
@@ -10326,7 +10607,7 @@ function connectWs(){
             )
           }
         }
-        renderUsers();
+        wsRenderUsers();
         updateAppBadge().catch(()=>{})
       }else if(chatType==='group'&&chatId){
         groups=groups.map(item=>
@@ -10337,7 +10618,7 @@ function connectWs(){
         if(active?.type==='group'&&Number(active.data.id)===chatId){
           active.data={...active.data,unread_count:unread}
         }
-        renderGroups();
+        wsRenderGroups();
         updateAppBadge().catch(()=>{})
       }
       return
@@ -10449,7 +10730,7 @@ function connectWs(){
               :Number(item.unread_count||0)+1);
           return {...item,unread_count:unread}
         });
-        renderGroups();
+        wsRenderGroups();
         updateAppBadge().catch(()=>{})
       }else{
         // Fallback for a just-added group that has not reached local state yet.
@@ -10497,7 +10778,7 @@ function connectWs(){
       }else{
         groups=[added,...groups]
       }
-      renderGroups();
+      wsRenderGroups();
       return
     }
     if(data.type==='group_removed'){
@@ -10518,7 +10799,7 @@ function connectWs(){
         $('composer').classList.add('hidden');
         $('messages').innerHTML='<div class="welcome"><div class="mark">С</div><h2>Группа недоступна</h2><p>Вы были исключены из группы.</p></div>';
       }
-      renderGroups();
+      wsRenderGroups();
       alert('Вас исключили из группы «'+(data.group_name||'Группа')+'»');
       return
     }
@@ -10535,7 +10816,7 @@ function connectWs(){
       if($('groupMembersDialog').open&&active?.type==='group'&&active.data.id===data.group_id){
         loadGroupMembers(data.group_id).catch(()=>{})
       }
-      renderGroups();
+      wsRenderGroups();
       return
     }
     if(data.type==='group_updated'){
@@ -10558,13 +10839,20 @@ function connectWs(){
       if(groupCallState&&Number(groupCallState.groupId)===Number(updated.id)){
         $('groupCallName').textContent=updated.name
       }
-      renderGroups();
+      wsRenderGroups();
       return
     }
     if(data.type==='group_created')loadGroups().catch(()=>{})
-  };
-  socket.onclose=()=>{
+  }
+  socket.onclose=event=>{
     clearTimeout(retry);
+    if(event?.code===4401){
+      token='';
+      localStorage.removeItem('svoi_token');
+      try{closePrewarmedPrivateCall()}catch{}
+      location.reload();
+      return
+    }
     // WebRTC media can stay alive when only the signaling WebSocket drops.
     // Keep the call and reconnect signaling faster instead of hanging up.
     if(token)retry=setTimeout(connectWs,(currentCall||pendingCall)?700:2500)
@@ -11650,6 +11938,72 @@ $('syncPhoneContactsBtn').onclick=async()=>{
   }
 };
 
+function formatSessionDate(value){
+  if(!value)return 'неизвестно';
+  try{return new Date(value).toLocaleString('ru-RU')}catch{return String(value)}
+}
+
+async function loadAccountSessions(){
+  const data=await api('/api/account/sessions');
+  const sessions=Array.isArray(data?.sessions)?data.sessions:[];
+  $('sessionsCount').textContent='Сессий: '+sessions.length;
+  const box=$('sessionsList');box.replaceChildren();
+  if(!sessions.length){
+    box.innerHTML='<div class="empty">Активных сессий не найдено</div>';
+    return
+  }
+  for(const session of sessions){
+    const row=document.createElement('div');row.className='session-row';
+    const icon=document.createElement('span');icon.textContent=session.client==='Android'?'📱':session.client==='iPhone/iPad'?'📱':'💻';
+    const main=document.createElement('div');main.className='session-main';
+    const title=document.createElement('strong');title.textContent=session.device_label||session.client||'Устройство';
+    const meta=document.createElement('small');
+    meta.textContent='Активность: '+formatSessionDate(session.last_seen_at)+' · вход: '+formatSessionDate(session.created_at);
+    main.append(title,meta);
+    row.append(icon,main);
+    if(session.current){
+      const badge=document.createElement('span');badge.className='session-current';badge.textContent='Это устройство';row.append(badge)
+    }else{
+      const end=document.createElement('button');end.className='session-end';end.type='button';end.textContent='Завершить';
+      end.onclick=async()=>{
+        end.disabled=true;
+        try{
+          await api('/api/account/sessions/'+encodeURIComponent(session.id),{method:'DELETE'});
+          await loadAccountSessions()
+        }catch(err){alert(err.message||'Не удалось завершить сессию');end.disabled=false}
+      };
+      row.append(end)
+    }
+    box.append(row)
+  }
+  $('revokeOtherSessions').disabled=sessions.filter(item=>!item.current).length===0
+}
+
+$('openSessions').onclick=async()=>{
+  closeDrawer();
+  $('sessionsDialog').showModal();
+  $('sessionsList').innerHTML='<div class="empty">Загрузка…</div>';
+  try{await loadAccountSessions()}catch(err){
+    $('sessionsList').innerHTML='<div class="error" style="padding:12px">'+(err.message||'Не удалось загрузить сессии')+'</div>'
+  }
+};
+$('closeSessions').onclick=()=>$('sessionsDialog').close();
+$('doneSessions').onclick=()=>$('sessionsDialog').close();
+$('sessionsDialog').addEventListener('click',event=>{
+  if(event.target===$('sessionsDialog'))$('sessionsDialog').close()
+});
+$('revokeOtherSessions').onclick=async()=>{
+  if(!confirm('Завершить все остальные сессии аккаунта?'))return;
+  const button=$('revokeOtherSessions');button.disabled=true;
+  try{
+    const result=await api('/api/account/sessions/revoke-others',{method:'POST'});
+    await loadAccountSessions();
+    alert('Завершено сессий: '+Number(result?.revoked||0))
+  }catch(err){
+    alert(err.message||'Не удалось завершить сессии')
+  }finally{button.disabled=false}
+};
+
 $('openBlacklist').onclick=async()=>{
   closeDrawer();
   $('blacklistDialog').showModal();
@@ -11660,6 +12014,136 @@ $('openBlacklist').onclick=async()=>{
 $('closeBlacklist').onclick=()=>$('blacklistDialog').close();
 $('blacklistDialog').addEventListener('click',event=>{
   if(event.target===$('blacklistDialog'))$('blacklistDialog').close()
+});
+
+let callPreflightRunning=false;
+
+function setPreflightRows(rows){
+  const box=$('callPreflightList');box.replaceChildren();
+  for(const row of rows){
+    const item=document.createElement('div');item.className='call-preflight-row';
+    const icon=document.createElement('span');icon.className='call-preflight-icon';icon.textContent=row.icon||'•';
+    const title=document.createElement('strong');title.textContent=row.title;
+    const detail=document.createElement('small');detail.textContent=row.detail||'';
+    item.append(icon,title,detail);box.append(item)
+  }
+}
+
+function gatherIceCandidate(config,relayOnly=false,timeoutMs=4500){
+  return new Promise(async(resolve)=>{
+    let pc=null;
+    let settled=false;
+    const finish=result=>{
+      if(settled)return;settled=true;
+      try{pc?.close()}catch{}
+      resolve(result)
+    };
+    const timer=setTimeout(()=>finish({ok:false,type:null}),timeoutMs);
+    try{
+      pc=new RTCPeerConnection({
+        ...config,
+        iceTransportPolicy:relayOnly?'relay':'all',
+        iceCandidatePoolSize:0
+      });
+      pc.createDataChannel('preflight');
+      pc.onicecandidate=event=>{
+        const candidate=event.candidate;
+        if(!candidate){
+          clearTimeout(timer);finish({ok:false,type:null});return
+        }
+        const text=String(candidate.candidate||'');
+        const match=text.match(/typs+(w+)/);
+        const type=match?.[1]||candidate.type||'candidate';
+        if(!relayOnly||type==='relay'){
+          clearTimeout(timer);finish({ok:true,type})
+        }
+      };
+      const offer=await pc.createOffer();
+      await pc.setLocalDescription(offer)
+    }catch(err){
+      clearTimeout(timer);finish({ok:false,type:null,error:err})
+    }
+  })
+}
+
+async function runCallPreflight(){
+  if(callPreflightRunning)return;
+  callPreflightRunning=true;
+  $('startCallPreflight').disabled=true;
+  $('callPreflightSummary').textContent='Проверяем соединение…';
+  const rows=[];
+  const update=(title,icon,detail)=>{
+    const existing=rows.find(item=>item.title===title);
+    if(existing){existing.icon=icon;existing.detail=detail}else rows.push({title,icon,detail});
+    setPreflightRows(rows)
+  };
+
+  const connection=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
+  update('Сеть',navigator.onLine?'✅':'❌',navigator.onLine
+    ?[connection?.effectiveType,connection?.downlink?connection.downlink+' Мбит/с':null,connection?.rtt?connection.rtt+' мс':null].filter(Boolean).join(' · ')||'Подключение есть'
+    :'Устройство офлайн');
+
+  try{
+    const ping=await measureWsPing();
+    update('Сервер / WebSocket','✅',Math.round(ping)+' мс')
+  }catch(err){
+    update('Сервер / WebSocket','❌',err.message||'Нет ответа')
+  }
+
+  let mediaStream=null;
+  try{
+    mediaStream=await navigator.mediaDevices.getUserMedia({
+      audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},
+      video:{width:{ideal:640},height:{ideal:360},frameRate:{ideal:20,max:24}}
+    });
+    const audio=mediaStream.getAudioTracks()[0];
+    const video=mediaStream.getVideoTracks()[0];
+    update('Микрофон',audio?'✅':'⚠️',audio?.label||'Не обнаружен');
+    update('Камера',video?'✅':'⚠️',video?.label||'Не обнаружена')
+  }catch(err){
+    update('Микрофон / камера','❌',err.name==='NotAllowedError'?'Нет разрешения':(err.message||'Ошибка доступа'))
+  }finally{
+    try{mediaStream?.getTracks().forEach(track=>track.stop())}catch{}
+  }
+
+  let rtcConfig=null;
+  try{
+    rtcConfig=await getRtcConfig();
+    const ice=await gatherIceCandidate(rtcConfig,false,4000);
+    update('WebRTC / ICE',ice.ok?'✅':'❌',ice.ok?'Кандидат: '+ice.type:'Кандидаты не получены');
+    const turn=await gatherIceCandidate(rtcConfig,true,5000);
+    update('TURN fallback',turn.ok?'✅':'⚠️',turn.ok?'Relay доступен':'Relay-кандидат не получен')
+  }catch(err){
+    update('WebRTC / ICE','❌',err.message||'Ошибка WebRTC')
+  }
+
+  const failed=rows.filter(row=>row.icon==='❌').length;
+  const warnings=rows.filter(row=>row.icon==='⚠️').length;
+  $('callPreflightSummary').textContent=failed
+    ?'Есть проблемы: '+failed+'. Перед звонком лучше их устранить.'
+    :warnings
+      ?'Связь работает, но есть предупреждения: '+warnings+'.'
+      :'Всё готово к звонку.';
+  $('startCallPreflight').disabled=false;
+  callPreflightRunning=false
+}
+
+function openCallPreflight(){
+  $('callPreflightSummary').textContent='Нажми «Запустить тест».';
+  setPreflightRows([]);
+  $('callPreflightDialog').showModal()
+}
+
+$('runCallPreflight').onclick=()=>{
+  $('callsDialog').close();
+  openCallPreflight();
+  runCallPreflight().catch(()=>{})
+};
+$('startCallPreflight').onclick=()=>runCallPreflight().catch(()=>{});
+$('closeCallPreflight').onclick=()=>$('callPreflightDialog').close();
+$('doneCallPreflight').onclick=()=>$('callPreflightDialog').close();
+$('callPreflightDialog').addEventListener('click',event=>{
+  if(event.target===$('callPreflightDialog'))$('callPreflightDialog').close()
 });
 
 $('openCalls').onclick=async()=>{
