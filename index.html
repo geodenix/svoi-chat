@@ -272,6 +272,86 @@ body.drawer-open{overflow:hidden}
   font-weight:750
 }
 </style>
+<style>
+.group-call-meta-row{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-width:0;
+  margin-top:3px
+}
+.group-call-meta-row #groupCallStatus{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis
+}
+.group-connection-quality{
+  flex:0 0 auto;
+  display:inline-flex!important;
+  align-items:center;
+  border-radius:999px;
+  padding:4px 8px;
+  font-size:10px!important;
+  font-weight:800;
+  line-height:1;
+  border:1px solid transparent;
+  text-shadow:none;
+  white-space:nowrap
+}
+.group-connection-quality.good{
+  background:#163d2bcc;
+  border-color:#49d98b66;
+  color:#8ff0b9!important
+}
+.group-connection-quality.medium{
+  background:#4a3a16cc;
+  border-color:#efc35f66;
+  color:#ffe08a!important
+}
+.group-connection-quality.poor{
+  background:#54252dcc;
+  border-color:#ff7b8866;
+  color:#ffadb5!important
+}
+.group-connection-quality.checking{
+  background:#1c314dcc;
+  border-color:#6f91ba55;
+  color:#bed1e8!important
+}
+.tile-speaking-status{
+  position:absolute;
+  z-index:9;
+  left:8px;
+  top:8px;
+  display:flex;
+  align-items:center;
+  gap:4px;
+  border-radius:999px;
+  padding:5px 8px;
+  background:#17683fcc;
+  border:1px solid #70ecaa77;
+  color:#fff;
+  font-size:11px;
+  font-weight:850;
+  line-height:1;
+  box-shadow:0 4px 14px #0007;
+  pointer-events:none
+}
+.group-tile.speaking{
+  border-color:#49e593!important;
+  box-shadow:0 0 0 3px #49e59388,0 0 30px #49e59355!important
+}
+.group-call-strip .tile-speaking-status{
+  left:5px;
+  top:5px;
+  padding:4px 6px;
+  font-size:9px
+}
+@media(max-width:600px){
+  .group-call-meta-row{gap:5px}
+  .group-connection-quality{padding:4px 6px;font-size:9px!important}
+}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -436,7 +516,13 @@ body.drawer-open{overflow:hidden}
 <div id="groupCallOverlay" class="group-call-overlay hidden">
   <div class="group-call-head">
     <button id="groupCallBack" class="back" type="button" style="display:block">←</button>
-    <div><strong id="groupCallName">Групповой звонок</strong><small id="groupCallStatus" class="muted">Подключение…</small></div>
+    <div>
+      <strong id="groupCallName">Групповой звонок</strong>
+      <div class="group-call-meta-row">
+        <small id="groupCallStatus" class="muted">Подключение…</small>
+        <span id="groupConnectionQuality" class="group-connection-quality checking">Связь: проверяем</span>
+      </div>
+    </div>
   </div>
   <div id="groupCallGrid" class="group-call-grid"></div>
   <div id="groupCallStrip" class="group-call-strip hidden"></div>
@@ -4799,27 +4885,62 @@ function groupVideoTargetForTile(tile){
 }
 
 function normalizeLiveKitConnectionQuality(quality){
+  const known=LivekitClient.ConnectionQuality||{};
+  if(known.Excellent!=null&&quality===known.Excellent)return 'excellent';
+  if(known.Good!=null&&quality===known.Good)return 'good';
+  if(known.Poor!=null&&quality===known.Poor)return 'poor';
+  if(known.Lost!=null&&quality===known.Lost)return 'poor';
+
   const raw=String(quality?.toString?.()??quality??'').toLowerCase();
-  if(raw.includes('poor')||raw==='2')return 'poor';
-  if(raw.includes('good')||raw==='1')return 'good';
-  if(raw.includes('excellent')||raw==='0')return 'excellent';
+  if(raw.includes('poor')||raw.includes('lost'))return 'poor';
+  if(raw.includes('excellent'))return 'excellent';
+  if(raw.includes('good'))return 'good';
+
+  if(known.Excellent!=null&&raw===String(known.Excellent).toLowerCase())return 'excellent';
+  if(known.Good!=null&&raw===String(known.Good).toLowerCase())return 'good';
+  if(known.Poor!=null&&raw===String(known.Poor).toLowerCase())return 'poor';
   return 'unknown'
+}
+
+function setGroupConnectionQuality(level){
+  const badge=$('groupConnectionQuality');
+  if(!badge)return;
+  const normalized=['excellent','good','poor'].includes(level)?level:'unknown';
+  badge.classList.remove('good','medium','poor','checking');
+
+  if(normalized==='excellent'){
+    badge.classList.add('good');
+    badge.textContent='Связь: хорошая'
+  }else if(normalized==='good'){
+    badge.classList.add('medium');
+    badge.textContent='Связь: средняя'
+  }else if(normalized==='poor'){
+    badge.classList.add('poor');
+    badge.textContent='Связь: плохая'
+  }else{
+    badge.classList.add('checking');
+    badge.textContent='Связь: проверяем'
+  }
 }
 
 function updateGroupVideoNetworkCap(quality,participant){
   const state=groupCallState;
   if(!state?.room)return;
 
-  // Prefer the local participant's quality because this represents the
-  // device's own network path. Ignore unrelated remote-quality changes.
+  // Use the local participant because it represents this device's own
+  // connection to the LiveKit room.
   const localIdentity=String(state.room.localParticipant?.identity||'');
   const participantIdentity=String(participant?.identity||'');
   if(participantIdentity&&localIdentity&&participantIdentity!==localIdentity)return;
 
   const normalized=normalizeLiveKitConnectionQuality(quality);
+  setGroupConnectionQuality(normalized);
+
   const next=normalized==='poor'
     ?'low'
-    :(normalized==='good'?'medium':'high');
+    :(normalized==='good'
+      ?'medium'
+      :(normalized==='excellent'?'high':state.videoNetworkCap||'medium'));
 
   if(state.videoNetworkCap===next)return;
   state.videoNetworkCap=next;
@@ -4950,7 +5071,11 @@ function ensureGroupTile(participant,isLocal=false){
   mic.setAttribute('aria-label','Микрофон выключен');
   mic.title='Микрофон выключен';
   mic.textContent='🔇';
-  tile.append(avatar,name,mic);
+  const speaking=document.createElement('div');
+  speaking.className='tile-speaking-status hidden';
+  speaking.setAttribute('aria-label','Сейчас говорит');
+  speaking.textContent='🎙 Говорит';
+  tile.append(avatar,name,mic,speaking);
   tile.title='Нажмите, чтобы увеличить участника';
   tile.addEventListener('click',event=>{
     if(event.target.closest('button'))return;
@@ -5057,12 +5182,16 @@ function updateGroupActiveSpeakers(speakers=[]){
 
     for(const identity of previous){
       if(!next.has(identity)){
-        $(groupTileId(identity))?.classList.remove('speaking')
+        const tile=$(groupTileId(identity));
+        tile?.classList.remove('speaking');
+        tile?.querySelector('.tile-speaking-status')?.classList.add('hidden')
       }
     }
     for(const identity of next){
       if(!previous.has(identity)){
-        $(groupTileId(identity))?.classList.add('speaking')
+        const tile=$(groupTileId(identity));
+        tile?.classList.add('speaking');
+        tile?.querySelector('.tile-speaking-status')?.classList.remove('hidden')
       }
     }
     state.activeSpeakerIds=next;
@@ -5286,6 +5415,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
         if(groupCallState?.room===room){
           groupCallState.needsRecovery=false;
           groupCallState.videoNetworkCap='low';
+          setGroupConnectionQuality('poor');
           scheduleGroupRemoteVideoQualitySync();
           setGroupCallStatus('Восстанавливаем соединение…')
         }
@@ -5296,6 +5426,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
           groupCallState.recovering=false;
           groupCallState.needsRecovery=false;
           groupCallState.videoNetworkCap='medium';
+          setGroupConnectionQuality('good');
           groupCallState.lastParticipantCount=-1;
           refreshGroupCount();
           requestAnimationFrame(()=>scheduleGroupRemoteVideoQualitySync())
@@ -5305,6 +5436,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
         const state=groupCallState;
         if(!state||state.room!==room||state.manualLeave)return;
         state.needsRecovery=true;
+        setGroupConnectionQuality('poor');
         setGroupCallStatus(
           navigator.onLine
             ?'Связь потеряна · переподключаемся…'
@@ -5319,6 +5451,10 @@ async function joinGroupCall(groupId,video=false,invite=false){
     );
 
     ensureGroupTile(room.localParticipant,true);
+    updateGroupVideoNetworkCap(
+      room.localParticipant.connectionQuality,
+      room.localParticipant
+    );
     for(const participant of room.remoteParticipants.values()){
       ensureGroupTile(participant,false);
       updateGroupMicBadge(participant,false)
@@ -5369,6 +5505,7 @@ function leaveGroupCall(disconnect=true){
   $('groupCallStrip').replaceChildren();
   $('groupCallStrip').classList.add('hidden');
   $('groupCallGrid').classList.remove('has-focus');
+  setGroupConnectionQuality('unknown');
   $('groupCallOverlay').classList.add('hidden')
 }
 
