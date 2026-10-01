@@ -500,6 +500,79 @@ body.drawer-open{overflow:hidden}
   font-size:11px
 }
 </style>
+<style>
+/* Automatic VK/Meet-style layout for group calls. */
+.group-size-controls{display:none!important}
+
+.group-call-grid:not(.has-focus){
+  --auto-cols:2;
+  grid-template-columns:repeat(var(--auto-cols),minmax(0,1fr))!important;
+  grid-auto-rows:auto!important;
+  align-content:center!important;
+  justify-content:center;
+  overflow:auto
+}
+.group-call-grid:not(.has-focus) .group-tile{
+  width:100%;
+  max-width:100%;
+  aspect-ratio:1/1;
+  height:auto!important;
+  min-height:0!important
+}
+.group-call-grid.layout-1:not(.has-focus){
+  --auto-cols:1;
+  padding-inline:max(12px,calc((100vw - min(68vw,68dvh,720px))/2))
+}
+.group-call-grid.layout-2:not(.has-focus){
+  --auto-cols:2
+}
+.group-call-grid.layout-3-4:not(.has-focus){
+  --auto-cols:2
+}
+.group-call-grid.layout-5-6:not(.has-focus){
+  --auto-cols:3
+}
+.group-call-grid.layout-7-9:not(.has-focus){
+  --auto-cols:3
+}
+.group-call-grid.layout-10:not(.has-focus){
+  --auto-cols:4
+}
+
+@media(max-width:900px){
+  .group-call-grid.layout-5-6:not(.has-focus),
+  .group-call-grid.layout-7-9:not(.has-focus),
+  .group-call-grid.layout-10:not(.has-focus){
+    --auto-cols:3
+  }
+}
+@media(max-width:620px){
+  .group-call-grid:not(.has-focus){
+    gap:7px!important;
+    padding:8px!important
+  }
+  .group-call-grid.layout-1:not(.has-focus){
+    --auto-cols:1;
+    padding-inline:max(10px,calc((100vw - min(86vw,58dvh))/2))!important
+  }
+  .group-call-grid.layout-2:not(.has-focus),
+  .group-call-grid.layout-3-4:not(.has-focus),
+  .group-call-grid.layout-5-6:not(.has-focus),
+  .group-call-grid.layout-7-9:not(.has-focus),
+  .group-call-grid.layout-10:not(.has-focus){
+    --auto-cols:2
+  }
+}
+@media(orientation:landscape) and (max-height:620px){
+  .group-call-grid.layout-5-6:not(.has-focus),
+  .group-call-grid.layout-7-9:not(.has-focus){
+    --auto-cols:3
+  }
+  .group-call-grid.layout-10:not(.has-focus){
+    --auto-cols:5
+  }
+}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -5048,18 +5121,41 @@ async function chooseSpeakerOutput(){
   }
 }
 
-function applyGroupParticipantSize(){
+function groupLayoutClass(count){
+  if(count<=1)return 'layout-1';
+  if(count===2)return 'layout-2';
+  if(count<=4)return 'layout-3-4';
+  if(count<=6)return 'layout-5-6';
+  if(count<=9)return 'layout-7-9';
+  return 'layout-10'
+}
+
+function applyGroupAutoLayout(count=null){
   const grid=$('groupCallGrid');
-  const down=$('groupSizeDown');
-  const up=$('groupSizeUp');
   if(!grid)return;
+  const state=groupCallState;
+  const participantCount=count==null
+    ?(state?.room?1+state.room.remoteParticipants.size:grid.querySelectorAll('.group-tile').length)
+    :Number(count);
 
-  const mins=[125,175,255];
-  grid.style.setProperty('--tile-min',mins[groupParticipantSize]+'px');
+  grid.classList.remove(
+    'layout-1',
+    'layout-2',
+    'layout-3-4',
+    'layout-5-6',
+    'layout-7-9',
+    'layout-10'
+  );
+  grid.classList.add(groupLayoutClass(Math.max(1,participantCount||1)));
+  grid.dataset.participantCount=String(Math.max(1,participantCount||1));
 
-  if(down)down.disabled=groupParticipantSize<=0;
-  if(up)up.disabled=groupParticipantSize>=2;
-  scheduleGroupRemoteVideoQualitySync()
+  requestAnimationFrame(()=>{
+    scheduleGroupRemoteVideoQualitySync()
+  })
+}
+
+function applyGroupParticipantSize(){
+  applyGroupAutoLayout()
 }
 
 function changeGroupParticipantSize(delta){
@@ -5083,7 +5179,7 @@ function restoreGroupGridLayout(){
     .forEach(tile=>tile.classList.remove('focused'));
   grid.classList.remove('has-focus');
   strip.classList.add('hidden');
-  applyGroupParticipantSize();
+  applyGroupAutoLayout();
   scheduleGroupRemoteVideoQualitySync()
 }
 
@@ -5651,9 +5747,12 @@ function refreshGroupCount(){
   const state=groupCallState;
   if(!state?.room)return;
   const count=1+state.room.remoteParticipants.size;
-  if(state.lastParticipantCount===count)return;
+  const changed=state.lastParticipantCount!==count;
   state.lastParticipantCount=count;
   $('groupCallStatus').textContent=count+' / 10 участников';
+  if(changed&&!$('groupCallGrid').classList.contains('has-focus')){
+    applyGroupAutoLayout(count)
+  }
   updateMiniCallBar()
 }
 
@@ -5864,7 +5963,16 @@ async function joinGroupCall(groupId,video=false,invite=false){
     $('groupCallGrid').replaceChildren();
     $('groupCallStrip').replaceChildren();
     $('groupCallStrip').classList.add('hidden');
-    $('groupCallGrid').classList.remove('has-focus');
+    $('groupCallGrid').classList.remove(
+      'has-focus',
+      'layout-1',
+      'layout-2',
+      'layout-3-4',
+      'layout-5-6',
+      'layout-7-9',
+      'layout-10'
+    );
+    $('groupCallGrid').classList.add('layout-1');
     $('groupCallName').textContent=credentials.group_name;
     $('groupCallStatus').textContent='Подключение…';
     $('groupCallDuration').textContent='00:00';
@@ -6025,7 +6133,15 @@ function leaveGroupCall(disconnect=true){
   $('groupCallGrid').replaceChildren();
   $('groupCallStrip').replaceChildren();
   $('groupCallStrip').classList.add('hidden');
-  $('groupCallGrid').classList.remove('has-focus');
+  $('groupCallGrid').classList.remove(
+    'has-focus',
+    'layout-1',
+    'layout-2',
+    'layout-3-4',
+    'layout-5-6',
+    'layout-7-9',
+    'layout-10'
+  );
   setGroupConnectionQuality('unknown');
   $('groupCallDuration').textContent='00:00';
   $('groupCallDuration').classList.add('hidden');
