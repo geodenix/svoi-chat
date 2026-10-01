@@ -68,6 +68,7 @@ app = FastAPI(title="Свои", version="0.1.0")
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 connections: Dict[int, Set[WebSocket]] = {}
 active_calls: dict[str, dict] = {}
+call_invite_links: dict[str, dict] = {}
 
 
 def now_iso() -> str:
@@ -727,6 +728,10 @@ class PushSubscriptionIn(BaseModel):
 class GroupCallIn(BaseModel):
     video: bool = False
     invite: bool = False
+
+
+class CallInviteActivateIn(BaseModel):
+    invite_token: str = Field(min_length=16, max_length=160)
 
 
 @app.get("/health")
@@ -5072,6 +5077,190 @@ async def group_call_token(
         "video": bool(data.video),
         "is_admin": bool(group["is_admin"]),
         "max_participants": 10,
+    }
+
+
+
+def call_invite_link_for_token(invite_token: str) -> dict | None:
+    invite = call_invite_links.get(invite_token)
+    if not invite:
+        return None
+    if float(invite.get("expires_at_ts", 0)) <= time.time():
+        call_invite_links.pop(invite_token, None)
+        return None
+    return invite
+
+
+async def expire_call_invite_link(invite_token: str, delay_seconds: float = 7200.0):
+    await asyncio.sleep(delay_seconds)
+    invite = call_invite_links.get(invite_token)
+    if invite and float(invite.get("expires_at_ts", 0)) <= time.time():
+        call_invite_links.pop(invite_token, None)
+
+
+async def cleanup_promoted_private_call(call_id: str, delay_seconds: float = 45.0):
+    await asyncio.sleep(delay_seconds)
+    call = active_calls.get(call_id)
+    if not call or not call.get("promoted_to_room"):
+        return
+    if call.get("answered"):
+        finish_call_history(call_id, "completed")
+    active_calls.pop(call_id, None)
+
+
+@app.post("/api/calls/{call_id}/invite-link")
+async def create_private_call_invite_link(
+    call_id: str,
+    user=Depends(current_user),
+):
+    if not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        raise HTTPException(503, "Сервер конференций пока не настроен")
+
+    call = active_calls.get(call_id)
+    if not call or not call.get("answered"):
+        raise HTTPException(404, "Активный личный звонок не найден")
+
+    user_id = int(user["id"])
+    participants = {int(call["caller_id"]), int(call["callee_id"])}
+    if user_id not in participants:
+        raise HTTPException(403, "Нет доступа к этому звонку")
+
+    invite_token = str(call.get("invite_token") or "")
+    invite = call_invite_link_for_token(invite_token) if invite_token else None
+
+    if not invite:
+        invite_token = secrets.token_urlsafe(32)
+        room_name = "svoi-private-" + hashlib.sha256(
+            f"{call_id}:{invite_token}".encode("utf-8")
+        ).hexdigest()[:24]
+        invite = {
+            "invite_token": invite_token,
+            "room_name": room_name,
+            "source_call_id": call_id,
+            "creator_id": user_id,
+            "video": bool(call.get("video")),
+            "created_at": now_iso(),
+            "expires_at_ts": time.time() + 7200,
+        }
+        call_invite_links[invite_token] = invite
+        call["invite_token"] = invite_token
+        asyncio.create_task(expire_call_invite_link(invite_token))
+
+    return {
+        "invite_token": invite_token,
+        "invite_path": f"/?call_invite={invite_token}",
+        "video": bool(invite.get("video")),
+        "expires_in_seconds": max(
+            0,
+            int(float(invite.get("expires_at_ts", 0)) - time.time()),
+        ),
+        "max_participants": 10,
+    }
+
+
+@app.post("/api/calls/{call_id}/activate-conference")
+async def activate_private_call_conference(
+    call_id: str,
+    data: CallInviteActivateIn,
+    user=Depends(current_user),
+):
+    call = active_calls.get(call_id)
+    if not call or not call.get("answered"):
+        raise HTTPException(404, "Активный личный звонок не найден")
+
+    user_id = int(user["id"])
+    participants = {int(call["caller_id"]), int(call["callee_id"])}
+    if user_id not in participants:
+        raise HTTPException(403, "Нет доступа к этому звонку")
+
+    invite = call_invite_link_for_token(data.invite_token)
+    if not invite or str(invite.get("source_call_id")) != str(call_id):
+        raise HTTPException(404, "Ссылка приглашения недействительна")
+
+    peer_id = (
+        int(call["callee_id"])
+        if user_id == int(call["caller_id"])
+        else int(call["caller_id"])
+    )
+    call["promoted_to_room"] = True
+
+    await push(
+        peer_id,
+        {
+            "type": "private_call_room_upgrade",
+            "call_id": call_id,
+            "invite_token": data.invite_token,
+            "video": bool(invite.get("video")),
+            "from_user_id": user_id,
+            "from_name": user["display_name"],
+        },
+    )
+    asyncio.create_task(cleanup_promoted_private_call(call_id))
+
+    return {
+        "ok": True,
+        "invite_path": f"/?call_invite={data.invite_token}",
+    }
+
+
+@app.post("/api/call-links/{invite_token}/token")
+def private_call_invite_token(
+    invite_token: str,
+    data: GroupCallIn,
+    user=Depends(current_user),
+):
+    invite = call_invite_link_for_token(invite_token)
+    if not invite:
+        raise HTTPException(410, "Ссылка на звонок истекла или недействительна")
+    if not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        raise HTTPException(503, "Сервер конференций пока не настроен")
+
+    room_name = str(invite["room_name"])
+    identity = f"user-{user['id']}"
+
+    grants = livekit_api.VideoGrants(
+        room_join=True,
+        room=room_name,
+        can_publish=True,
+        can_subscribe=True,
+    )
+    ttl_seconds = max(
+        60,
+        min(
+            7200,
+            int(float(invite.get("expires_at_ts", 0)) - time.time()),
+        ),
+    )
+    token = (
+        livekit_api.AccessToken(
+            LIVEKIT_API_KEY,
+            LIVEKIT_API_SECRET,
+        )
+        .with_identity(identity)
+        .with_name(user["display_name"])
+        .with_grants(grants)
+        .with_room_config(
+            RoomConfiguration(
+                name=room_name,
+                max_participants=10,
+                empty_timeout=90,
+                departure_timeout=30,
+            )
+        )
+        .with_ttl(timedelta(seconds=ttl_seconds))
+        .to_jwt()
+    )
+
+    return {
+        "server_url": LIVEKIT_WS_URL,
+        "participant_token": token,
+        "room_name": room_name,
+        "group_id": None,
+        "group_name": "Личный звонок",
+        "video": bool(invite.get("video")),
+        "is_admin": False,
+        "max_participants": 10,
+        "invite_token": invite_token,
     }
 
 
