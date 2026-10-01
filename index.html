@@ -6448,14 +6448,16 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
 
     await renderGroupLocalTracks();
     refreshGroupCount();
-    startGroupPingMonitoring(groupCallState)
+    startGroupPingMonitoring(groupCallState);
+    return true
   }catch(err){
     try{room?.disconnect()}catch{}
     groupCallState=null;
     hideMiniCallBar();
     stopNativeCallService().catch(()=>{});
     $('groupCallOverlay').classList.add('hidden');
-    alert(err?.message||'Не удалось подключиться к групповому звонку')
+    alert(err?.message||'Не удалось подключиться к групповому звонку');
+    return false
   }
 }
 
@@ -6730,7 +6732,8 @@ async function resumeCallInviteFromUrl(){
   if(!join)return;
 
   try{
-    await joinGroupCall(null,false,false,inviteToken)
+    const joined=await joinGroupCall(null,false,false,inviteToken);
+    if(!joined)return
   }catch(err){
     alert(err?.message||'Не удалось присоединиться по ссылке')
   }
@@ -8210,7 +8213,8 @@ async function promotePrivateCallToConference(inviteToken,video=false){
   const callVideo=!!(video||call.video);
   closePrivateCallForConference();
   try{
-    await joinGroupCall(null,callVideo,false,inviteToken);
+    const joined=await joinGroupCall(null,callVideo,false,inviteToken);
+    if(!joined)throw new Error('Не удалось перейти в конференцию');
     return {callId,video:callVideo}
   }catch(err){
     throw err
