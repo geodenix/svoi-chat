@@ -95,6 +95,31 @@
 body.drawer-open{overflow:hidden}
 @media(max-width:650px){.admin-chart-grid{grid-template-columns:1fr}}
 @media(max-width:560px){.admin-grid{grid-template-columns:1fr 1fr}.admin-card strong{font-size:18px}.admin-body{padding:10px}}
+</style>
+<style>
+.group-tile{position:relative}
+.tile-mic-status{
+  position:absolute;
+  z-index:8;
+  top:8px;
+  right:8px;
+  min-width:30px;
+  height:30px;
+  padding:0 8px;
+  border-radius:999px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:4px;
+  background:#8c2f3ccc;
+  border:1px solid #ff9ba655;
+  color:#fff;
+  font-size:14px;
+  font-weight:800;
+  box-shadow:0 4px 14px #0007;
+  pointer-events:none
+}
+.tile-mic-status.hidden{display:none!important}
 </style></head>
 <body>
 <div id="auth" class="auth">
@@ -4554,6 +4579,59 @@ function scheduleGroupRemoteVideoQualitySync(){
   })
 }
 
+function groupParticipantMicMuted(participant,isLocal=false){
+  if(!participant)return false;
+  if(isLocal&&groupCallState?.room?.localParticipant===participant){
+    return !!groupCallState.muted
+  }
+
+  const publications=[...(participant.audioTrackPublications?.values?.()||[])];
+  if(!publications.length)return false;
+
+  const microphonePublications=publications.filter(publication=>{
+    const source=publication?.source;
+    return !source
+      ||source===LivekitClient.Track.Source.Microphone
+      ||String(source).toLowerCase().includes('microphone')
+  });
+  const relevant=microphonePublications.length
+    ?microphonePublications
+    :publications;
+  return relevant.length>0&&relevant.every(publication=>!!publication.isMuted)
+}
+
+function updateGroupMicBadge(participant,isLocal=false,explicitMuted=null){
+  if(!participant)return;
+  const tile=$(groupTileId(participant.identity||'local'));
+  if(!tile)return;
+
+  let badge=tile.querySelector('.tile-mic-status');
+  if(!badge){
+    badge=document.createElement('div');
+    badge.className='tile-mic-status hidden';
+    badge.setAttribute('aria-label','Микрофон выключен');
+    badge.title='Микрофон выключен';
+    badge.textContent='🔇';
+    tile.append(badge)
+  }
+
+  const muted=explicitMuted==null
+    ?groupParticipantMicMuted(participant,isLocal)
+    :!!explicitMuted;
+  badge.classList.toggle('hidden',!muted);
+  tile.classList.toggle('mic-muted',muted)
+}
+
+function isGroupMicrophonePublication(publication){
+  if(!publication)return false;
+  const kind=publication.kind;
+  if(kind!==LivekitClient.Track.Kind.Audio&&kind!=='audio')return false;
+  const source=publication.source;
+  return !source
+    ||source===LivekitClient.Track.Source.Microphone
+    ||String(source).toLowerCase().includes('microphone')
+}
+
 function ensureGroupTile(participant,isLocal=false){
   const identity=participant.identity||'local';
   const id=groupTileId(identity);
@@ -4565,7 +4643,12 @@ function ensureGroupTile(participant,isLocal=false){
   tile.dataset.participantIdentity=String(identity);
   const avatar=document.createElement('div');avatar.className='tile-avatar';avatar.textContent=initials(participant.name||identity);
   const name=document.createElement('div');name.className='tile-name';name.textContent=(participant.name||identity)+(isLocal?' · вы':'');
-  tile.append(avatar,name);
+  const mic=document.createElement('div');
+  mic.className='tile-mic-status hidden';
+  mic.setAttribute('aria-label','Микрофон выключен');
+  mic.title='Микрофон выключен';
+  mic.textContent='🔇';
+  tile.append(avatar,name,mic);
   tile.title='Нажмите, чтобы увеличить участника';
   tile.addEventListener('click',event=>{
     if(event.target.closest('button'))return;
@@ -4579,6 +4662,7 @@ function ensureGroupTile(participant,isLocal=false){
   }else{
     grid?.append(tile)
   }
+  updateGroupMicBadge(participant,isLocal);
   return tile
 }
 
@@ -4626,7 +4710,8 @@ function attachGroupTrack(track,participant,isLocal=false,publication=null){
     const element=track.attach();
     element.autoplay=true;element.playsInline=true;element.style.display='none';
     tile.append(element);
-    applyAudioOutput(element).catch(()=>{})
+    applyAudioOutput(element).catch(()=>{});
+    updateGroupMicBadge(participant,isLocal,!!publication?.isMuted)
   }
 }
 
@@ -4736,6 +4821,11 @@ async function recoverGroupCall(state){
     }
 
     await state.room.localParticipant.setMicrophoneEnabled(!state.muted);
+    updateGroupMicBadge(
+      state.room.localParticipant,
+      true,
+      state.muted
+    );
     await state.room.localParticipant.setCameraEnabled(!state.cameraOff);
     if(!state.cameraOff){
       let track=null;
@@ -4774,6 +4864,7 @@ async function renderGroupLocalTracks(){
     const name=tile.querySelector('.tile-name');
     if(name)name.textContent=(p.name||p.identity||'Вы')+' · вы'
   }
+  updateGroupMicBadge(p,true)
 }
 
 async function joinGroupCall(groupId,video=false,invite=false){
@@ -4861,8 +4952,20 @@ async function joinGroupCall(groupId,video=false,invite=false){
       .on(LivekitClient.RoomEvent.TrackUnsubscribed,(track,publication,participant)=>{
         detachGroupTrack(track,participant,publication)
       })
+      .on(LivekitClient.RoomEvent.TrackMuted,(publication,participant)=>{
+        if(isGroupMicrophonePublication(publication)){
+          updateGroupMicBadge(participant,false,true)
+        }
+      })
+      .on(LivekitClient.RoomEvent.TrackUnmuted,(publication,participant)=>{
+        if(isGroupMicrophonePublication(publication)){
+          updateGroupMicBadge(participant,false,false)
+        }
+      })
       .on(LivekitClient.RoomEvent.ParticipantConnected,(participant)=>{
-        ensureGroupTile(participant,false);refreshGroupCount();
+        ensureGroupTile(participant,false);
+        updateGroupMicBadge(participant,false);
+        refreshGroupCount();
       })
       .on(LivekitClient.RoomEvent.ParticipantDisconnected,(participant)=>{
         const leavingTile=$(groupTileId(participant.identity));
@@ -4915,10 +5018,13 @@ async function joinGroupCall(groupId,video=false,invite=false){
 
     ensureGroupTile(room.localParticipant,true);
     for(const participant of room.remoteParticipants.values()){
-      ensureGroupTile(participant,false)
+      ensureGroupTile(participant,false);
+      updateGroupMicBadge(participant,false)
     }
 
     await room.localParticipant.setMicrophoneEnabled(true);
+    groupCallState.muted=false;
+    updateGroupMicBadge(room.localParticipant,true,false);
     await startNativeCallService(credentials.group_name,!!video,true).catch(()=>{});
     if(nativeAudioRoutePlugin()){
       await applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
@@ -5008,6 +5114,11 @@ $('groupMuteBtn').onclick=async()=>{
   try{
     groupCallState.muted=!groupCallState.muted;
     await groupCallState.room.localParticipant.setMicrophoneEnabled(!groupCallState.muted);
+    updateGroupMicBadge(
+      groupCallState.room.localParticipant,
+      true,
+      groupCallState.muted
+    );
     $('groupMuteBtn').classList.toggle('off',groupCallState.muted);
     $('groupMuteBtn').textContent=groupCallState.muted?'🔇':'🎤'
   }catch(err){alert(err.message||'Не удалось изменить микрофон')}
