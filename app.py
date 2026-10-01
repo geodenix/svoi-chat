@@ -3346,7 +3346,8 @@ async def history(
         )
     rows = conn.execute(
         """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,m.edited_at,
-                  m.delivered_at,m.read_at,m.forwarded,m.reply_to_message_id,
+                  m.delivered_at,m.read_at,m.forwarded,m.client_message_id,
+                  m.reply_to_message_id,
                   up.id AS attachment_id,
                   up.stored_name AS attachment_stored_name,
                   up.original_name AS attachment_name,
@@ -3387,6 +3388,7 @@ async def history(
             "delivered_at": row["delivered_at"],
             "read_at": row["read_at"],
             "forwarded": bool(row["forwarded"]),
+            "client_message_id": row["client_message_id"],
             "reply_to_message_id": row["reply_to_message_id"],
             "attachment": attachment_json(row),
         }
@@ -3541,7 +3543,8 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
     if data.client_message_id:
         existing = conn.execute(
             """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,m.edited_at,
-                      m.delivered_at,m.read_at,m.forwarded,m.reply_to_message_id,
+                      m.delivered_at,m.read_at,m.forwarded,m.client_message_id,
+                      m.reply_to_message_id,
                       up.id AS attachment_id,
                       up.stored_name AS attachment_stored_name,
                       up.original_name AS attachment_name,
@@ -3565,6 +3568,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
                 "delivered_at": existing["delivered_at"],
                 "read_at": existing["read_at"],
                 "forwarded": bool(existing["forwarded"]),
+                "client_message_id": existing["client_message_id"],
                 "reply_to_message_id": existing["reply_to_message_id"],
                 "attachment": attachment_json(existing),
             }
@@ -3636,6 +3640,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         "delivered_at": None,
         "read_at": None,
         "forwarded": False,
+        "client_message_id": data.client_message_id,
         "reply_to_message_id": data.reply_to_message_id,
         "attachment": attachment,
     }
@@ -4526,7 +4531,8 @@ async def get_group_messages(
         raise HTTPException(404, "Группа не найдена")
     rows = conn.execute(
         """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,gm.edited_at,
-                  gm.deleted_at,gm.deleted_by,gm.forwarded,gm.reply_to_message_id,
+                  gm.deleted_at,gm.deleted_by,gm.forwarded,gm.client_message_id,
+                  gm.reply_to_message_id,
                   EXISTS(
                     SELECT 1 FROM group_message_mentions gmm
                     WHERE gmm.message_id=gm.id AND gmm.user_id=?
@@ -4613,6 +4619,7 @@ async def get_group_messages(
             "deleted": deleted,
             "deleted_at": row["deleted_at"],
             "forwarded": bool(row["forwarded"]),
+            "client_message_id": row["client_message_id"],
             "reply_to_message_id": row["reply_to_message_id"],
             "mentioned_me": bool(row["mentioned_me"]) and not deleted,
             "has_mentions": bool(row["has_mentions"]) and not deleted,
@@ -4640,7 +4647,8 @@ async def send_group_message(
     if data.client_message_id:
         existing = conn.execute(
             """SELECT gm.id,gm.group_id,gm.sender_id,gm.body,gm.created_at,gm.edited_at,
-                      gm.deleted_at,gm.forwarded,gm.reply_to_message_id,
+                      gm.deleted_at,gm.forwarded,gm.client_message_id,
+                      gm.reply_to_message_id,
                       EXISTS(
                         SELECT 1 FROM group_message_mentions gmm
                         WHERE gmm.message_id=gm.id AND gmm.user_id=?
@@ -4677,6 +4685,7 @@ async def send_group_message(
                 "deleted": deleted,
                 "deleted_at": existing["deleted_at"],
                 "forwarded": bool(existing["forwarded"]),
+                "client_message_id": existing["client_message_id"],
                 "reply_to_message_id": existing["reply_to_message_id"],
                 "mentioned_me": bool(existing["mentioned_me"]) and not deleted,
                 "has_mentions": bool(existing["has_mentions"]) and not deleted,
@@ -4742,6 +4751,7 @@ async def send_group_message(
         "deleted": False,
         "deleted_at": None,
         "forwarded": False,
+        "client_message_id": data.client_message_id,
         "reply_to_message_id": data.reply_to_message_id,
         "mentioned_me": user["id"] in mention_ids,
         "has_mentions": bool(mention_ids),
@@ -4811,6 +4821,17 @@ async def send_group_message(
         )
 
     await deliver_group_batch(deliveries)
+
+    # Keep the sender's other active devices synchronized too. The device
+    # that issued the HTTP request may receive this before the HTTP response;
+    # client_message_id lets the client merge it with the optimistic bubble.
+    await push(
+        int(user["id"]),
+        {
+            "type": "group_message",
+            "message": msg,
+        },
+    )
     return msg
 
 
