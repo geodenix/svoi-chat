@@ -547,6 +547,8 @@ let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],g
 let chatBackgroundRequest=0,currentChatBackgroundUrl='';
 let currentMessages=[],typingStopTimer=null,lastTypingSentAt=0;
 let privateChatLoadRequest=0,privateUsersRefreshTimer=null;
+const MESSAGE_PAGE_SIZE=50;
+let messageHistoryLoading=false,messageHistoryHasMore=false,messageHistoryKey='',messageHistoryRequest=0,messageHistoryReadyAt=0;
 let forwardSource=null,replySource=null,editSource=null,messageActionSource=null;
 const incomingTyping=new Map();
 let messageRecorder=null,messageRecordStream=null,messageRecordChunks=[],messageRecordKind=null,messageRecordTimer=null,messageRecordStartedAt=0,messageRecordBlob=null,messageRecordMime='',messageRecordTarget=null,messageRecordAction=null,messageRecordObjectUrl='';
@@ -1805,8 +1807,10 @@ async function openUser(u){
   if($('groupRenameDialog').open)$('groupRenameDialog').close();
 
   const request=++privateChatLoadRequest;
+  const historyRequest=++messageHistoryRequest;
   const userId=Number(u.id);
   active={type:'user',data:u};
+  resetMessageHistoryState();
   $('app').classList.add('chat-open');
   $('chatHead').classList.remove('hidden');
   $('composer').classList.remove('hidden');
@@ -1820,9 +1824,10 @@ async function openUser(u){
   box.innerHTML='<div class="empty">Загрузка переписки…</div>';
 
   try{
-    const msgs=await api('/api/messages/'+userId);
+    const msgs=await api('/api/messages/'+userId+'?limit='+MESSAGE_PAGE_SIZE);
     if(
       request!==privateChatLoadRequest
+      || historyRequest!==messageHistoryRequest
       || active?.type!=='user'
       || Number(active.data.id)!==userId
     )return;
@@ -1836,9 +1841,10 @@ async function openUser(u){
     renderUsers();
     updateAppBadge().catch(()=>{});
     renderMessages(msgs);
+    initMessageHistoryState(msgs);
     $('text').focus()
   }catch(err){
-    if(request!==privateChatLoadRequest)return;
+    if(request!==privateChatLoadRequest||historyRequest!==messageHistoryRequest)return;
     box.innerHTML='<div class="empty">Не удалось загрузить переписку</div>';
     throw err
   }
@@ -1851,13 +1857,39 @@ async function openGroup(g){
   if($('chatBackgroundDialog').open)$('chatBackgroundDialog').close();
   if($('groupMembersDialog').open)$('groupMembersDialog').close();
   if($('groupRenameDialog').open)$('groupRenameDialog').close();
-  active={type:'group',data:g};$('app').classList.add('chat-open');$('chatHead').classList.remove('hidden');$('composer').classList.remove('hidden');
+
+  const historyRequest=++messageHistoryRequest;
+  const groupId=Number(g.id);
+  active={type:'group',data:g};
+  resetMessageHistoryState();
+  $('app').classList.add('chat-open');
+  $('chatHead').classList.remove('hidden');
+  $('composer').classList.remove('hidden');
   updateHead();renderUsers();renderGroups();restoreCurrentDraft();loadCurrentChatBackground().catch(()=>{});
-  const msgs=await api('/api/groups/'+g.id+'/messages');
-  active.data={...active.data,unread_count:0};
-  groups=groups.map(item=>Number(item.id)===Number(g.id)?{...item,unread_count:0}:item);
-  renderGroups();updateAppBadge().catch(()=>{});
-  renderMessages(msgs);$('text').focus()
+
+  const box=$('messages');
+  box.innerHTML='<div class="empty">Загрузка переписки…</div>';
+
+  try{
+    const msgs=await api('/api/groups/'+groupId+'/messages?limit='+MESSAGE_PAGE_SIZE);
+    if(
+      historyRequest!==messageHistoryRequest
+      || active?.type!=='group'
+      || Number(active.data.id)!==groupId
+    )return;
+
+    active.data={...active.data,unread_count:0};
+    groups=groups.map(item=>Number(item.id)===groupId?{...item,unread_count:0}:item);
+    renderGroups();
+    updateAppBadge().catch(()=>{});
+    renderMessages(msgs);
+    initMessageHistoryState(msgs);
+    $('text').focus()
+  }catch(err){
+    if(historyRequest!==messageHistoryRequest)return;
+    box.innerHTML='<div class="empty">Не удалось загрузить переписку</div>';
+    throw err
+  }
 }
 
 function updateHead(){
@@ -3023,6 +3055,25 @@ function scrollMessagesToBottom(behavior='auto'){
   }
 }
 
+function currentMessageHistoryKey(target=active){
+  if(!target?.data?.id)return '';
+  return target.type+':'+Number(target.data.id)
+}
+
+function resetMessageHistoryState(){
+  messageHistoryLoading=false;
+  messageHistoryHasMore=false;
+  messageHistoryKey=currentMessageHistoryKey();
+  messageHistoryReadyAt=Date.now()+700
+}
+
+function initMessageHistoryState(items){
+  messageHistoryKey=currentMessageHistoryKey();
+  messageHistoryLoading=false;
+  messageHistoryHasMore=Array.isArray(items)&&items.length>=MESSAGE_PAGE_SIZE;
+  messageHistoryReadyAt=Date.now()+700
+}
+
 function renderMessages(items){
   currentMessages=[...items];
   const box=$('messages');
@@ -3038,6 +3089,76 @@ function renderMessages(items){
 
   requestAnimationFrame(()=>scrollMessagesToBottom('auto'))
 }
+
+function prependMessages(items){
+  if(!Array.isArray(items)||!items.length)return 0;
+  const existing=new Set(currentMessages.map(item=>Number(item.id)));
+  const fresh=items.filter(item=>!existing.has(Number(item.id)));
+  if(!fresh.length)return 0;
+
+  const box=$('messages');
+  const fragment=document.createDocumentFragment();
+  for(const m of fresh)fragment.append(msgNode(m));
+  box.prepend(fragment);
+  currentMessages=[...fresh,...currentMessages];
+  return fresh.length
+}
+
+async function loadOlderMessages(){
+  if(
+    messageHistoryLoading
+    || !messageHistoryHasMore
+    || !active
+    || !currentMessages.length
+    || Date.now()<messageHistoryReadyAt
+  )return;
+
+  const key=currentMessageHistoryKey();
+  if(!key||key!==messageHistoryKey)return;
+
+  const oldestId=Math.min(...currentMessages.map(item=>Number(item.id)).filter(Number.isFinite));
+  if(!Number.isFinite(oldestId)||oldestId<=1){
+    messageHistoryHasMore=false;
+    return
+  }
+
+  messageHistoryLoading=true;
+  const box=$('messages');
+  const oldHeight=box.scrollHeight;
+  const oldTop=box.scrollTop;
+  const targetType=active.type;
+  const targetId=Number(active.data.id);
+  const path=targetType==='user'
+    ?'/api/messages/'+targetId+'?limit='+MESSAGE_PAGE_SIZE+'&before_id='+oldestId
+    :'/api/groups/'+targetId+'/messages?limit='+MESSAGE_PAGE_SIZE+'&before_id='+oldestId;
+
+  try{
+    const items=await api(path);
+    if(currentMessageHistoryKey()!==key)return;
+    if(!Array.isArray(items)||items.length<MESSAGE_PAGE_SIZE){
+      messageHistoryHasMore=false
+    }
+    const added=prependMessages(items);
+    if(added){
+      requestAnimationFrame(()=>{
+        if(currentMessageHistoryKey()!==key)return;
+        box.scrollTop=oldTop+(box.scrollHeight-oldHeight)
+      })
+    }
+  }catch(err){
+    console.warn('history pagination failed',err)
+  }finally{
+    if(currentMessageHistoryKey()===key){
+      messageHistoryLoading=false
+    }
+  }
+}
+
+$('messages').addEventListener('scroll',()=>{
+  if($('messages').scrollTop<220){
+    loadOlderMessages().catch(()=>{})
+  }
+},{passive:true});
 
 function appendMessage(m){
   if(currentMessages.some(item=>Number(item.id)===Number(m.id)))return false;
@@ -3081,6 +3202,41 @@ function schedulePrivateUsersRefresh(delay=180){
     privateUsersRefreshTimer=null;
     loadUsers().catch(()=>{})
   },delay)
+}
+
+function applyPrivateMessageToChatList(message){
+  const myId=Number(me?.id);
+  const senderId=Number(message?.sender_id);
+  const recipientId=Number(message?.recipient_id);
+  const peerId=senderId===myId?recipientId:senderId;
+  if(!peerId)return;
+
+  const index=users.findIndex(item=>Number(item.id)===peerId);
+  if(index<0){
+    schedulePrivateUsersRefresh(120);
+    return
+  }
+
+  const activeHere=active?.type==='user'&&Number(active.data.id)===peerId;
+  const incoming=senderId!==myId;
+  const previous=users[index];
+  const nextUnread=incoming
+    ?(activeHere?0:Number(previous.unread_count||0)+1)
+    :Number(previous.unread_count||0);
+
+  const updated={...previous,unread_count:nextUnread};
+  users=[
+    ...users.slice(0,index),
+    updated,
+    ...users.slice(index+1)
+  ];
+
+  if(activeHere){
+    active.data={...active.data,...updated,unread_count:0}
+  }
+
+  renderUsers();
+  updateAppBadge().catch(()=>{})
 }
 
 function syncSend(){
@@ -6367,27 +6523,14 @@ function connectWs(){
         appendMessage(m);
 
         if(senderId===activeUserId){
-          markPrivateChatRead(activeUserId).then(()=>{
-            if(
-              active?.type==='user'
-              && Number(active.data.id)===activeUserId
-            ){
-              active.data={...active.data,unread_count:0};
-              users=users.map(item=>
-                Number(item.id)===activeUserId
-                  ?{...item,unread_count:0}
-                  :item
-              );
-              renderUsers();
-              updateAppBadge().catch(()=>{})
-            }
-          }).catch(()=>{})
+          markPrivateChatRead(activeUserId).catch(()=>{})
         }
       }
 
-      // Обновляем превью/счётчики списка диалогов пачкой, а не на каждое
-      // сообщение отдельно.
-      schedulePrivateUsersRefresh()
+      // Счётчик личного чата обновляем локально. Полный /api/users нужен
+      // только если это первый диалог с пользователем, которого ещё нет
+      // в локальном списке.
+      applyPrivateMessageToChatList(m);
       return
     }
     if(data.type==='message_edited'){
