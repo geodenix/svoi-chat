@@ -2462,6 +2462,81 @@ def _webpush_one(subscription: dict, payload: str) -> dict:
         }
 
 
+def web_push_context_for_user(conn, user_id: int) -> dict:
+    rows = conn.execute(
+        """SELECT endpoint,p256dh,auth
+           FROM push_subscriptions WHERE user_id=?""",
+        (user_id,),
+    ).fetchall()
+    if not rows:
+        return {"rows": [], "unread_count": 0}
+    return {
+        "rows": [dict(row) for row in rows],
+        "unread_count": unread_count_for_user(conn, user_id),
+    }
+
+
+def web_push_contexts_for_users(user_ids) -> dict[int, dict]:
+    ids = sorted({int(user_id) for user_id in user_ids if int(user_id) > 0})
+    if not ids or not push_configured():
+        return {}
+
+    marks = ",".join("?" for _ in ids)
+    conn = connect_db()
+    try:
+        rows = conn.execute(
+            f"""SELECT user_id,endpoint,p256dh,auth
+                FROM push_subscriptions
+                WHERE user_id IN ({marks})""",
+            tuple(ids),
+        ).fetchall()
+        grouped: dict[int, list[dict]] = {}
+        for row in rows:
+            grouped.setdefault(int(row["user_id"]), []).append(
+                {
+                    "endpoint": row["endpoint"],
+                    "p256dh": row["p256dh"],
+                    "auth": row["auth"],
+                }
+            )
+
+        contexts = {}
+        for user_id in ids:
+            subscriptions = grouped.get(user_id, [])
+            contexts[user_id] = {
+                "rows": subscriptions,
+                "unread_count": (
+                    unread_count_for_user(conn, user_id)
+                    if subscriptions
+                    else 0
+                ),
+            }
+        return contexts
+    finally:
+        conn.close()
+
+
+WEB_PUSH_CONCURRENCY = 16
+web_push_semaphore = asyncio.Semaphore(WEB_PUSH_CONCURRENCY)
+
+
+async def _send_web_push_subscription(row: dict, payload: str):
+    subscription = {
+        "endpoint": row["endpoint"],
+        "keys": {
+            "p256dh": row["p256dh"],
+            "auth": row["auth"],
+        },
+    }
+    async with web_push_semaphore:
+        result = await asyncio.to_thread(
+            _webpush_one,
+            subscription,
+            payload,
+        )
+    return row["endpoint"], result
+
+
 async def send_web_push(
     user_id: int,
     title: str,
@@ -2470,6 +2545,7 @@ async def send_web_push(
     tag: str = "svoi",
     force: bool = False,
     silent: bool = False,
+    prepared_context: dict | None = None,
 ):
     stats = {
         "configured": push_configured(),
@@ -2481,15 +2557,15 @@ async def send_web_push(
     if not stats["configured"]:
         return stats
 
-    conn = connect_db()
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """SELECT endpoint,p256dh,auth
-           FROM push_subscriptions WHERE user_id=?""",
-        (user_id,),
-    ).fetchall()
-    unread_count = unread_count_for_user(conn, user_id)
-    conn.close()
+    if prepared_context is None:
+        conn = connect_db()
+        try:
+            prepared_context = web_push_context_for_user(conn, user_id)
+        finally:
+            conn.close()
+
+    rows = prepared_context.get("rows", [])
+    unread_count = int(prepared_context.get("unread_count", 0) or 0)
 
     stats["attempted"] = len(rows)
     if not rows:
@@ -2508,42 +2584,40 @@ async def send_web_push(
         ensure_ascii=False,
     )
 
+    results = await asyncio.gather(
+        *(_send_web_push_subscription(row, payload) for row in rows),
+        return_exceptions=True,
+    )
+
     stale = []
-    for row in rows:
-        subscription = {
-            "endpoint": row["endpoint"],
-            "keys": {
-                "p256dh": row["p256dh"],
-                "auth": row["auth"],
-            },
-        }
-        result = await asyncio.to_thread(
-            _webpush_one,
-            subscription,
-            payload,
-        )
+    for item in results:
+        if isinstance(item, Exception):
+            stats["errors"].append(str(item)[:180])
+            continue
+        endpoint, result = item
         if result["ok"]:
             stats["sent"] += 1
         else:
             if result["error"]:
                 stats["errors"].append(result["error"])
             if result["stale"]:
-                stale.append(row["endpoint"])
+                stale.append(endpoint)
 
     stats["stale"] = len(stale)
     stats["errors"] = stats["errors"][:3]
 
     if stale:
         conn = connect_db()
-        conn.executemany(
-            "DELETE FROM push_subscriptions WHERE endpoint=?",
-            [(endpoint,) for endpoint in stale],
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.executemany(
+                "DELETE FROM push_subscriptions WHERE endpoint=?",
+                [(endpoint,) for endpoint in stale],
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     return stats
-
 
 @app.get("/api/push/status")
 def push_status(
@@ -3084,6 +3158,7 @@ async def deliver_group_recipient(
     recipient_id: int,
     payload: dict,
     notification: dict | None = None,
+    push_context: dict | None = None,
 ):
     async with group_delivery_semaphore:
         jobs = [push(recipient_id, payload)]
@@ -3097,6 +3172,7 @@ async def deliver_group_recipient(
                     notification.get("tag", "svoi"),
                     notification.get("force", False),
                     notification.get("silent", False),
+                    prepared_context=push_context,
                 )
             )
         await asyncio.gather(*jobs, return_exceptions=True)
@@ -3105,12 +3181,19 @@ async def deliver_group_recipient(
 async def deliver_group_batch(deliveries):
     if not deliveries:
         return
+
+    push_contexts = web_push_contexts_for_users(
+        item["recipient_id"]
+        for item in deliveries
+        if item.get("notification")
+    )
     await asyncio.gather(
         *(
             deliver_group_recipient(
                 item["recipient_id"],
                 item["payload"],
                 item.get("notification"),
+                push_contexts.get(int(item["recipient_id"])),
             )
             for item in deliveries
         ),
@@ -3249,6 +3332,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         preview = "📎 " + attachment["name"]
     else:
         preview = "Новое сообщение"
+    push_context = web_push_context_for_user(conn, data.recipient_id)
     await send_web_push(
         data.recipient_id,
         user["display_name"],
@@ -3261,6 +3345,7 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
             "user",
             user["id"],
         ),
+        prepared_context=push_context,
     )
     return msg
 
@@ -3522,6 +3607,10 @@ async def forward_message(
             else "📎 " + attachment["name"] if attachment
             else "Пересланное сообщение"
         )
+        push_context = web_push_context_for_user(
+            conn,
+            data.target_chat_id,
+        )
         await send_web_push(
             data.target_chat_id,
             user["display_name"],
@@ -3534,6 +3623,7 @@ async def forward_message(
                 "user",
                 user["id"],
             ),
+            prepared_context=push_context,
         )
         return msg
 
