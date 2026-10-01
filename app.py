@@ -5439,6 +5439,58 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
             signal_type = data.get("type")
 
+            if signal_type == "group_ping_probe":
+                nonce = str(data.get("nonce", ""))[:120]
+                if nonce:
+                    await websocket.send_json(
+                        {
+                            "type": "group_ping_pong",
+                            "nonce": nonce,
+                        }
+                    )
+                continue
+
+            if signal_type == "group_call_ping":
+                try:
+                    group_id = int(data.get("group_id"))
+                    ping_ms = int(round(float(data.get("ping_ms"))))
+                except (TypeError, ValueError):
+                    continue
+                ping_ms = max(1, min(5000, ping_ms))
+
+                check = connect_db()
+                member = check.execute(
+                    "SELECT 1 FROM group_members WHERE group_id=? AND user_id=?",
+                    (group_id, user_id),
+                ).fetchone()
+                if not member:
+                    check.close()
+                    continue
+                members = check.execute(
+                    "SELECT user_id FROM group_members WHERE group_id=? AND user_id<>?",
+                    (group_id, user_id),
+                ).fetchall()
+                check.close()
+
+                payload = {
+                    "type": "group_call_ping",
+                    "group_id": group_id,
+                    "from_user_id": user_id,
+                    "from_name": display_name,
+                    "identity": f"user-{user_id}",
+                    "ping_ms": ping_ms,
+                }
+                await deliver_group_batch(
+                    [
+                        {
+                            "recipient_id": int(member_row["user_id"]),
+                            "payload": payload,
+                        }
+                        for member_row in members
+                    ]
+                )
+                continue
+
             if signal_type == "typing":
                 chat_type = str(data.get("chat_type", ""))[:12]
                 typing = bool(data.get("typing", False))
