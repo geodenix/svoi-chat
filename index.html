@@ -4796,6 +4796,7 @@ function msgNode(m){
       video.controls=false;
       video.preload='none';
       video.playsInline=true;
+      if(m.attachment.thumbnail_url)video.poster=m.attachment.thumbnail_url;
       video.dataset.src=m.attachment.url;
       video.disablePictureInPicture=true;
       observeChatMedia(video);
@@ -10304,7 +10305,7 @@ function scheduleWsAck(seq){
   },90)
 }
 
-function acceptWsSequence(data){
+function shouldProcessWsSequence(data){
   const seq=Number(data?._seq)||0;
   if(!seq)return true;
   const last=readWsLastSeq();
@@ -10312,9 +10313,14 @@ function acceptWsSequence(data){
     scheduleWsAck(seq);
     return false
   }
-  localStorage.setItem(wsSeqStorageKey(),String(seq));
-  scheduleWsAck(seq);
   return true
+}
+
+function commitWsSequence(data){
+  const seq=Number(data?._seq)||0;
+  if(!seq)return;
+  localStorage.setItem(wsSeqStorageKey(),String(seq));
+  scheduleWsAck(seq)
 }
 
 function wsRenderUsers(){
@@ -10382,7 +10388,17 @@ function connectWs(){
   };
 
   function processWsEvent(data){
-    if(!data||!acceptWsSequence(data))return;
+    if(!data||!shouldProcessWsSequence(data))return;
+    try{
+      dispatchWsEvent(data)
+    }catch(err){
+      console.error('WebSocket event processing failed',err,data?.type);
+      return
+    }
+    commitWsSequence(data)
+  }
+
+  function dispatchWsEvent(data){
     if(data.type==='ws_ping_pong'){
       resolveWsPing(data);
       return
@@ -10985,10 +11001,13 @@ function renderChatGallery(){
         link.target='_blank';
         link.rel='noopener';
         const img=document.createElement('img');
-        img.src=attachment.url;
+        img.src=attachment.thumbnail_url||attachment.url;
         img.alt=attachment.name||'Фото';
         img.loading='lazy';
         img.decoding='async';
+        img.onerror=()=>{
+          if(img.src!==new URL(attachment.url,location.href).href)img.src=attachment.url
+        };
         link.append(img);
         card.append(link)
       }else{
@@ -10997,6 +11016,7 @@ function renderChatGallery(){
         video.controls=true;
         video.preload='none';
         video.playsInline=true;
+        if(attachment.thumbnail_url)video.poster=attachment.thumbnail_url;
         card.append(video)
       }
       const meta=document.createElement('div');
