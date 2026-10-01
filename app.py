@@ -3005,6 +3005,196 @@ def get_upload(stored_name: str, conn=Depends(db)):
     )
 
 
+CHAT_GALLERY_KINDS = {"photos", "videos", "files", "links", "voice"}
+CHAT_GALLERY_LINK_RE = re.compile(r"https?://[^\\s<>\\"']+", re.IGNORECASE)
+
+
+def chat_gallery_links(body: str | None) -> list[str]:
+    found = []
+    seen = set()
+    for match in CHAT_GALLERY_LINK_RE.finditer(body or ""):
+        value = match.group(0).rstrip(".,!?;:)]}")
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        found.append(value)
+    return found
+
+
+def chat_gallery_attachment_kind(row) -> tuple[str | None, dict | None]:
+    attachment = attachment_json(row)
+    if not attachment:
+        return None, None
+    if attachment["is_image"]:
+        return "photos", attachment
+    if attachment["is_video"]:
+        return "videos", attachment
+    if attachment["is_audio"]:
+        return "voice", attachment
+    return "files", attachment
+
+
+@app.get("/api/chat-gallery")
+def chat_gallery(
+    chat_type: str,
+    chat_id: int,
+    kind: str = Query(...),
+    limit: int = Query(30, ge=1, le=60),
+    before_id: int | None = Query(default=None, ge=1),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    chat_type = (chat_type or "").strip().lower()
+    kind = (kind or "").strip().lower()
+    if chat_type not in {"user", "group"}:
+        raise HTTPException(400, "Неизвестный тип чата")
+    if kind not in CHAT_GALLERY_KINDS:
+        raise HTTPException(400, "Неизвестный раздел галереи")
+
+    if chat_type == "user":
+        if chat_id == user["id"]:
+            raise HTTPException(400, "Нельзя открыть чат с самим собой")
+        if not conn.execute(
+            "SELECT 1 FROM users WHERE id=?",
+            (chat_id,),
+        ).fetchone():
+            raise HTTPException(404, "Пользователь не найден")
+    else:
+        if not group_for_user(conn, chat_id, user["id"]):
+            raise HTTPException(404, "Группа не найдена")
+
+    items = []
+    cursor = before_id
+    scan_limit = max(60, min(200, limit * 4))
+    exhausted = False
+    stopped_mid_batch = False
+
+    while len(items) < limit and not exhausted:
+        candidate_filter = (
+            " AND m.body LIKE '%http%'"
+            if kind == "links" and chat_type == "user"
+            else " AND m.attachment_id IS NOT NULL"
+            if chat_type == "user"
+            else " AND gm.body LIKE '%http%'"
+            if kind == "links"
+            else " AND gm.attachment_id IS NOT NULL"
+        )
+
+        if chat_type == "user":
+            rows = conn.execute(
+                f"""SELECT m.id,m.sender_id,m.body,m.created_at,
+                           sender.display_name AS sender_name,
+                           up.id AS attachment_id,
+                           up.stored_name AS attachment_stored_name,
+                           up.original_name AS attachment_name,
+                           up.mime_type AS attachment_mime,
+                           up.size AS attachment_size
+                    FROM messages m
+                    JOIN users sender ON sender.id=m.sender_id
+                    LEFT JOIN uploads up ON up.id=m.attachment_id
+                    WHERE (
+                         (m.sender_id=? AND m.recipient_id=?)
+                         OR (m.sender_id=? AND m.recipient_id=?)
+                    )
+                      AND (? IS NULL OR m.id<?)
+                      AND NOT EXISTS(
+                        SELECT 1 FROM message_hidden_by_user mh
+                        WHERE mh.message_id=m.id AND mh.user_id=?
+                      )
+                      {candidate_filter}
+                    ORDER BY m.id DESC
+                    LIMIT ?""",
+                (
+                    user["id"],
+                    chat_id,
+                    chat_id,
+                    user["id"],
+                    cursor,
+                    cursor,
+                    user["id"],
+                    scan_limit,
+                ),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"""SELECT gm.id,gm.sender_id,gm.body,gm.created_at,
+                           sender.display_name AS sender_name,
+                           up.id AS attachment_id,
+                           up.stored_name AS attachment_stored_name,
+                           up.original_name AS attachment_name,
+                           up.mime_type AS attachment_mime,
+                           up.size AS attachment_size
+                    FROM group_messages gm
+                    JOIN users sender ON sender.id=gm.sender_id
+                    LEFT JOIN uploads up ON up.id=gm.attachment_id
+                    WHERE gm.group_id=?
+                      AND gm.deleted_at IS NULL
+                      AND (? IS NULL OR gm.id<?)
+                      AND NOT EXISTS(
+                        SELECT 1 FROM group_message_hidden_by_user gh
+                        WHERE gh.message_id=gm.id AND gh.user_id=?
+                      )
+                      {candidate_filter}
+                    ORDER BY gm.id DESC
+                    LIMIT ?""",
+                (
+                    chat_id,
+                    cursor,
+                    cursor,
+                    user["id"],
+                    scan_limit,
+                ),
+            ).fetchall()
+
+        if not rows:
+            exhausted = True
+            break
+
+        exhausted = len(rows) < scan_limit
+        for index, row in enumerate(rows):
+            cursor = int(row["id"])
+            if kind == "links":
+                links = chat_gallery_links(row["body"])
+                if not links:
+                    continue
+                items.append(
+                    {
+                        "message_id": row["id"],
+                        "sender_id": row["sender_id"],
+                        "sender_name": row["sender_name"],
+                        "created_at": row["created_at"],
+                        "body": row["body"],
+                        "links": links,
+                        "attachment": None,
+                    }
+                )
+            else:
+                attachment_kind, attachment = chat_gallery_attachment_kind(row)
+                if attachment_kind != kind:
+                    continue
+                items.append(
+                    {
+                        "message_id": row["id"],
+                        "sender_id": row["sender_id"],
+                        "sender_name": row["sender_name"],
+                        "created_at": row["created_at"],
+                        "body": row["body"],
+                        "links": [],
+                        "attachment": attachment,
+                    }
+                )
+
+            if len(items) >= limit:
+                stopped_mid_batch = index < len(rows) - 1
+                break
+
+    next_before_id = cursor if cursor and (stopped_mid_batch or not exhausted) else None
+    return {
+        "items": items,
+        "next_before_id": next_before_id,
+    }
+
+
 @app.get("/api/messages/{other_id}")
 async def history(
     other_id: int,
