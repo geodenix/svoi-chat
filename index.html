@@ -5725,6 +5725,10 @@ const ATTACHMENT_MAX_BYTES=20*1024*1024;
 const IMAGE_OPTIMIZE_TRIGGER_BYTES=700*1024;
 const IMAGE_OPTIMIZE_MAX_SIDE=1920;
 const IMAGE_OPTIMIZE_QUALITY=.82;
+const VIDEO_OPTIMIZE_TRIGGER_BYTES=5*1024*1024;
+const VIDEO_OPTIMIZE_MAX_SIDE=1280;
+const VIDEO_OPTIMIZE_MAX_DURATION=30;
+const VIDEO_OPTIMIZE_BITS_PER_SECOND=1500000;
 
 function canvasToBlob(canvas,type,quality){
   return new Promise(resolve=>canvas.toBlob(resolve,type,quality))
@@ -5760,11 +5764,91 @@ async function optimizeImageAttachment(file){
   }
 }
 
+function supportedVideoRecorderMime(){
+  if(typeof MediaRecorder==='undefined')return '';
+  return ['video/webm;codecs=vp8,opus','video/webm;codecs=vp9,opus','video/webm']
+    .find(type=>MediaRecorder.isTypeSupported?.(type))||''
+}
+
+async function optimizeVideoAttachment(file){
+  const type=String(file?.type||'').toLowerCase();
+  if(!type.startsWith('video/')||file.size<VIDEO_OPTIMIZE_TRIGGER_BYTES)return file;
+  const recorderMime=supportedVideoRecorderMime();
+  if(!recorderMime)return file;
+
+  const video=document.createElement('video');
+  video.preload='metadata';video.playsInline=true;video.muted=true;
+  const objectUrl=URL.createObjectURL(file);video.src=objectUrl;
+  let canvasStream=null,sourceStream=null,recorder=null,drawTimer=null,frameHandle=0;
+  try{
+    await new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>reject(new Error('Видео не открылось')),8000);
+      video.onloadedmetadata=()=>{clearTimeout(timer);resolve()};
+      video.onerror=()=>{clearTimeout(timer);reject(new Error('Не удалось прочитать видео'))}
+    });
+    const duration=Number(video.duration)||0;
+    if(!duration||duration>VIDEO_OPTIMIZE_MAX_DURATION)return file;
+    const sourceWidth=Number(video.videoWidth)||0,sourceHeight=Number(video.videoHeight)||0;
+    if(!sourceWidth||!sourceHeight)return file;
+    const scale=Math.min(1,VIDEO_OPTIMIZE_MAX_SIDE/Math.max(sourceWidth,sourceHeight));
+    const width=Math.max(2,Math.round(sourceWidth*scale/2)*2);
+    const height=Math.max(2,Math.round(sourceHeight*scale/2)*2);
+    const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;
+    const ctx=canvas.getContext('2d',{alpha:false});
+    if(!ctx||typeof canvas.captureStream!=='function')return file;
+    sourceStream=typeof video.captureStream==='function'?video.captureStream()
+      :typeof video.mozCaptureStream==='function'?video.mozCaptureStream():null;
+    if(!sourceStream)return file;
+    canvasStream=canvas.captureStream(24);
+    sourceStream.getAudioTracks().forEach(track=>{try{canvasStream.addTrack(track)}catch{}});
+    const chunks=[];
+    recorder=new MediaRecorder(canvasStream,{
+      mimeType:recorderMime,
+      videoBitsPerSecond:VIDEO_OPTIMIZE_BITS_PER_SECOND,
+      audioBitsPerSecond:96000
+    });
+    recorder.ondataavailable=event=>{if(event.data?.size)chunks.push(event.data)};
+    const stopped=new Promise((resolve,reject)=>{
+      recorder.onstop=resolve;
+      recorder.onerror=event=>reject(event.error||new Error('Ошибка сжатия видео'))
+    });
+    const draw=()=>{
+      if(video.ended||video.paused)return;
+      try{ctx.drawImage(video,0,0,width,height)}catch{}
+      if(typeof video.requestVideoFrameCallback==='function')frameHandle=video.requestVideoFrameCallback(draw)
+    };
+    video.currentTime=0;await video.play();recorder.start(1000);
+    if(typeof video.requestVideoFrameCallback==='function')frameHandle=video.requestVideoFrameCallback(draw);
+    else drawTimer=setInterval(()=>{if(!video.paused&&!video.ended){try{ctx.drawImage(video,0,0,width,height)}catch{}}},42);
+    await new Promise((resolve,reject)=>{
+      video.onended=resolve;
+      video.onerror=()=>reject(new Error('Ошибка воспроизведения видео'))
+    });
+    if(recorder.state!=='inactive')recorder.stop();
+    await stopped;
+    const blob=new Blob(chunks,{type:recorderMime});
+    if(!blob.size||blob.size>=file.size*.92)return file;
+    const base=String(file.name||'video').replace(/\.[^.]+$/,'');
+    return new File([blob],base+'-optimized.webm',{type:'video/webm',lastModified:file.lastModified||Date.now()})
+  }catch(err){
+    console.warn('Video optimization skipped',err);
+    return file
+  }finally{
+    if(drawTimer)clearInterval(drawTimer);
+    try{if(frameHandle&&typeof video.cancelVideoFrameCallback==='function')video.cancelVideoFrameCallback(frameHandle)}catch{}
+    try{if(recorder?.state&&recorder.state!=='inactive')recorder.stop()}catch{}
+    try{canvasStream?.getTracks().forEach(track=>track.stop())}catch{}
+    try{sourceStream?.getTracks().forEach(track=>track.stop())}catch{}
+    try{video.pause()}catch{}
+    video.removeAttribute('src');try{video.load()}catch{};URL.revokeObjectURL(objectUrl)
+  }
+}
+
 async function optimizeAttachmentFile(file){
   if(!file)return file;
-  if(String(file.type||'').toLowerCase().startsWith('image/')){
-    return optimizeImageAttachment(file)
-  }
+  const type=String(file.type||'').toLowerCase();
+  if(type.startsWith('image/'))return optimizeImageAttachment(file);
+  if(type.startsWith('video/'))return optimizeVideoAttachment(file);
   return file
 }
 
