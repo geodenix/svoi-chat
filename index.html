@@ -5374,6 +5374,10 @@ async function joinGroupCall(groupId,video=false,invite=false){
     applyGroupParticipantSize();
     updateSpeakerButtons();
     $('groupCameraBtn').classList.toggle('off',!video);
+    $('groupCameraBtn').textContent=video?'📷':'🎥';
+    $('groupCameraBtn').title=video
+      ?'Переключить в аудиорежим'
+      :'Переключить в видеорежим';
     $('groupSwitchCameraBtn').classList.toggle('hidden',!video);
 
     room
@@ -5574,7 +5578,10 @@ $('groupCameraBtn').onclick=async()=>{
       startNativeCallService($('groupCallName').textContent,true,true).catch(()=>{})
     }
     $('groupCameraBtn').classList.toggle('off',groupCallState.cameraOff);
-    $('groupCameraBtn').textContent=groupCallState.cameraOff?'🚫':'📷';
+    $('groupCameraBtn').textContent=groupCallState.cameraOff?'🎥':'📷';
+    $('groupCameraBtn').title=groupCallState.cameraOff
+      ?'Переключить в видеорежим'
+      :'Переключить в аудиорежим';
     $('groupSwitchCameraBtn').classList.toggle('hidden',groupCallState.cameraOff);
     await renderGroupLocalTracks();
     updateGroupScreenShareControls()
@@ -5647,8 +5654,8 @@ function callId(){return crypto.randomUUID?crypto.randomUUID():(Date.now()+'-'+M
 
 function privateVideoAvailable(){
   return !!currentCall&&(
-    !!localVideoTrack()
-    || !!currentCall.remoteVideo
+    !!localVideoTrack()?.enabled
+    || (!!currentCall.remoteVideo&&!currentCall.remoteCameraOff)
   )
 }
 
@@ -5819,8 +5826,8 @@ function updatePrivateVideoControls(){
   cameraButton.classList.toggle('off',hasVideo&&!enabled);
   cameraButton.textContent=!hasVideo?'🎥':(enabled?'📷':'🚫');
   cameraButton.title=!hasVideo
-    ?'Включить видео'
-    :(enabled?'Выключить камеру':'Включить камеру');
+    ?'Переключить в видеорежим'
+    :(enabled?'Переключить в аудиорежим':'Переключить в видеорежим');
 
   cameraButton.disabled=false;
   switchButton.classList.toggle('hidden',!hasVideo);
@@ -6370,6 +6377,50 @@ function sendPrivateMuteState(sync=false){
   }
 }
 
+function applyRemotePrivateVideoVisibility(call=currentCall){
+  if(!call||currentCall!==call)return;
+  const video=$('remoteVideo');
+  const avatar=$('callAvatar');
+  const visible=!!call.remoteVideo&&!call.remoteCameraOff;
+
+  video?.classList.toggle('hidden',!visible);
+  avatar?.classList.toggle('hidden',visible);
+
+  if(visible){
+    video?.play?.().catch(()=>{})
+    exitEarMode()
+  }
+  applyPrivateParticipantSize();
+  syncNativeProximity().catch(()=>{})
+}
+
+function setRemotePrivateVideoEnabled(enabled){
+  const call=currentCall;
+  if(!call)return;
+  call.remoteCameraOff=!enabled;
+  applyRemotePrivateVideoVisibility(call);
+  updateMiniCallBar()
+}
+
+function sendPrivateVideoState(sync=false){
+  const call=currentCall;
+  if(!call||!call.callId||!call.peerId)return false;
+  const track=localVideoTrack();
+  const enabled=!!track&&!!track.enabled&&!call.cameraOff;
+  try{
+    wsSend({
+      type:'call_video_state',
+      to_user_id:call.peerId,
+      call_id:call.callId,
+      enabled,
+      sync:!!sync
+    });
+    return true
+  }catch{
+    return false
+  }
+}
+
 function showCallUi(name,status,video,incoming=false,avatarUrl=null,nativeSystemControls=false){
   clearRemoteVideoFrame();
   $('callOverlay').classList.remove('hidden');
@@ -6554,7 +6605,7 @@ function schedulePrivateCallRecovery(call,delay=900){
 async function createPeer(peerId,peerName,id,video,stream){
   const config=await getRtcConfig();
   const pc=new RTCPeerConnection(config);
-  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,remoteMuted:false,cameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0};
+  currentCall={pc,peerId,peerName,callId:id,video,localStream:stream,muted:false,remoteMuted:false,cameraOff:!video,remoteCameraOff:!video,remoteVideo:false,remoteMediaStream:null,renegotiating:false,answered:false,recovering:false,recoveryTimer:null,recoveryAttempts:0,lastConnectionState:'new',appliedVideoTier:null,appliedVideoBitrate:0,pendingVideoTier:null,pendingVideoTierSamples:0,lastVideoTierChangeAt:0,appliedAudioTier:null,pendingAudioTier:null,pendingAudioTierSamples:0,lastAudioTierChangeAt:0};
   startNativeCallService(peerName,!!video,false).catch(()=>{});
   for(const track of stream.getTracks()){
     try{
@@ -6594,17 +6645,12 @@ async function createPeer(peerId,peerName,id,video,stream){
     }
 
     if(e.track?.kind==='video'){
-      exitEarMode();
       currentCall.remoteVideo=true;
-      $('callAvatar').classList.add('hidden');
-      applyPrivateParticipantSize();
-      syncNativeProximity().catch(()=>{});
+      applyRemotePrivateVideoVisibility(currentCall);
       e.track.onended=()=>{
         if(currentCall){
           currentCall.remoteVideo=false;
-          $('callAvatar').classList.remove('hidden');
-          applyPrivateParticipantSize();
-          syncNativeProximity().catch(()=>{})
+          applyRemotePrivateVideoVisibility(currentCall)
         }
       }
     }
@@ -6786,6 +6832,11 @@ async function acceptIncomingCall(options={}){
       stream
     );
     setRemoteCallMuted(!!data.remote_muted);
+    setRemotePrivateVideoEnabled(
+      data.remote_video_enabled==null
+        ?!!data.video
+        :!!data.remote_video_enabled
+    );
     pendingCall=null;
     $('mediaPermission').classList.add('hidden');
     $('callStatus').textContent='Соединение…';
@@ -6903,6 +6954,22 @@ async function handleCallSignal(data){
     }
     return
   }
+  if(data.type==='call_video_state'){
+    if(
+      currentCall
+      &&currentCall.callId===data.call_id
+      &&Number(currentCall.peerId)===Number(data.from_user_id)
+    ){
+      setRemotePrivateVideoEnabled(!!data.enabled)
+    }else if(
+      pendingCall
+      &&pendingCall.call_id===data.call_id
+      &&Number(pendingCall.from_user_id)===Number(data.from_user_id)
+    ){
+      pendingCall.remote_video_enabled=!!data.enabled
+    }
+    return
+  }
   if(data.type==='call_unavailable'){
     if(currentCall&&currentCall.callId===data.call_id){stopOutgoingTone();alert('Пользователь сейчас недоступен');finishCall(false)}
     return
@@ -6944,6 +7011,7 @@ async function handleCallSignal(data){
           :currentCall.pc.localDescription
       });
       currentCall.video=!!data.video;
+      if(data.video)setRemotePrivateVideoEnabled(true);
       currentCall.answered=true;
       clearPrivateRecovery(currentCall);
       $('callStatus').textContent='Соединено';
@@ -6960,6 +7028,7 @@ async function handleCallSignal(data){
         await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp))
       }
       currentCall.video=!!data.video;
+      sendPrivateVideoState(false);
       clearPrivateRecovery(currentCall);
       $('callStatus').textContent='Соединено';
       updateMiniCallBar()
@@ -6974,6 +7043,7 @@ async function handleCallSignal(data){
     stopOutgoingTone();
     call.answered=true;
     sendPrivateMuteState(true);
+    sendPrivateVideoState(true);
     updateMiniCallBar();
     updateEarModeButton();
 
@@ -7055,7 +7125,14 @@ $('cameraCall').onclick=async()=>{
 
   currentCall.cameraOff=track.enabled;
   track.enabled=!currentCall.cameraOff;
-  updatePrivateVideoControls()
+  if(!currentCall.cameraOff)exitEarMode();
+  updatePrivateVideoControls();
+  sendPrivateVideoState(false);
+  startNativeCallService(
+    currentCall.peerName,
+    !currentCall.cameraOff,
+    false
+  ).catch(()=>{})
 };
 
 $('switchCamera').onclick=async()=>{
@@ -7421,12 +7498,13 @@ function connectWs(){
       restoreIncomingCallAction(action).catch(()=>{})
     }
     if(currentCall?.callId){
-      sendPrivateMuteState(true)
+      sendPrivateMuteState(true);
+      sendPrivateVideoState(true)
     }
   };
   socket.onmessage=e=>{
     const data=JSON.parse(e.data);
-    if(['call_offer','call_answer','call_video_offer','call_video_answer','call_mute','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
+    if(['call_offer','call_answer','call_video_offer','call_video_answer','call_video_state','call_mute','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
       enqueueCallSignal(data);return
     }
     if(data.type==='group_call_invite'){
