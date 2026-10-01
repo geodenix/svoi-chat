@@ -2835,10 +2835,6 @@ async def upload(
     user=Depends(current_user),
     conn=Depends(db),
 ):
-    content = await file.read(MAX_UPLOAD_BYTES + 1)
-    await file.close()
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "Файл больше 20 МБ")
     original = Path(file.filename or "file").name[:255] or "file"
     suffix = Path(original).suffix.lower()
     if len(suffix) > 12 or not all(ch.isalnum() or ch == "." for ch in suffix):
@@ -2848,20 +2844,43 @@ async def upload(
         (file.content_type or "application/octet-stream")[:120],
         original,
     )
-    (UPLOAD_DIR / stored).write_bytes(content)
-    cur = conn.execute(
-        """INSERT INTO uploads(
-             owner_id,stored_name,original_name,mime_type,size,created_at
-           ) VALUES(?,?,?,?,?,?)""",
-        (user["id"], stored, original, mime, len(content), now_iso()),
-    )
-    conn.commit()
+    path = UPLOAD_DIR / stored
+    total = 0
+
+    try:
+        with path.open("wb") as target:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "Файл больше 20 МБ")
+                target.write(chunk)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+
+    try:
+        cur = conn.execute(
+            """INSERT INTO uploads(
+                 owner_id,stored_name,original_name,mime_type,size,created_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (user["id"], stored, original, mime, total, now_iso()),
+        )
+        conn.commit()
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
     return {
         "id": cur.lastrowid,
         "url": f"/uploads/{stored}",
         "name": original,
         "mime_type": mime,
-        "size": len(content),
+        "size": total,
         "is_image": mime in INLINE_IMAGE_TYPES,
         "is_audio": mime.startswith("audio/"),
         "is_video": mime.startswith("video/"),
@@ -2886,16 +2905,24 @@ def get_upload(stored_name: str, conn=Depends(db)):
         row["mime_type"],
         row["original_name"],
     )
+    cache_headers = {
+        "Cache-Control": "private, max-age=604800, immutable",
+    }
     if (
         mime in INLINE_IMAGE_TYPES
         or mime.startswith("audio/")
         or mime.startswith("video/")
     ):
-        return FileResponse(path, media_type=mime)
+        return FileResponse(
+            path,
+            media_type=mime,
+            headers=cache_headers,
+        )
     return FileResponse(
         path,
         media_type="application/octet-stream",
         filename=row["original_name"],
+        headers=cache_headers,
     )
 
 
