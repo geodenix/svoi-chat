@@ -3308,6 +3308,8 @@ async def history(
                WHERE sender_id=? AND recipient_id=? AND read_at IS NULL""",
             (other_id, user["id"]),
         ).fetchall()
+        message_ids = [int(row["id"]) for row in unread_rows]
+        seen_at = None
         if unread_rows:
             seen_at = now_iso()
             conn.execute(
@@ -3323,10 +3325,25 @@ async def history(
                 {
                     "type": "read_receipt",
                     "reader_id": user["id"],
-                    "message_ids": [row["id"] for row in unread_rows],
+                    "message_ids": message_ids,
                     "read_at": seen_at,
                 },
             )
+
+        # Send the authoritative local state even when another device
+        # already read the chat earlier. This repairs stale counters after
+        # a reconnect/offline period.
+        await push(
+            int(user["id"]),
+            {
+                "type": "chat_read_sync",
+                "chat_type": "user",
+                "chat_id": other_id,
+                "message_ids": message_ids,
+                "read_at": seen_at,
+                "unread_count": 0,
+            },
+        )
     rows = conn.execute(
         """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,m.edited_at,
                   m.delivered_at,m.read_at,m.forwarded,m.reply_to_message_id,
@@ -3397,6 +3414,17 @@ async def mark_private_messages_read(
     ).fetchall()
 
     if not unread_rows:
+        await push(
+            int(user["id"]),
+            {
+                "type": "chat_read_sync",
+                "chat_type": "user",
+                "chat_id": other_id,
+                "message_ids": [],
+                "read_at": None,
+                "unread_count": 0,
+            },
+        )
         return {"ok": True, "message_ids": [], "read_at": None}
 
     seen_at = now_iso()
@@ -3417,6 +3445,17 @@ async def mark_private_messages_read(
             "reader_id": user["id"],
             "message_ids": message_ids,
             "read_at": seen_at,
+        },
+    )
+    await push(
+        int(user["id"]),
+        {
+            "type": "chat_read_sync",
+            "chat_type": "user",
+            "chat_id": other_id,
+            "message_ids": message_ids,
+            "read_at": seen_at,
+            "unread_count": 0,
         },
     )
     return {
@@ -3612,6 +3651,15 @@ async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends
         )
         conn.commit()
         msg["delivered_at"] = delivered_at
+
+    # Keep every active session of the sender in sync as well. The device
+    # that made the HTTP request will receive the same event, but the client
+    # deduplicates by message id.
+    await push(
+        int(user["id"]),
+        {"type": "message", "message": msg},
+    )
+
     if body:
         preview = body
     elif attachment and attachment.get("is_audio"):
@@ -3696,25 +3744,41 @@ async def edit_message(
 
 
 @app.delete("/api/messages/{message_id}/me")
-def delete_message_for_me(
+async def delete_message_for_me(
     message_id: int,
     user=Depends(current_user),
     conn=Depends(db),
 ):
     row = conn.execute(
-        """SELECT id FROM messages
+        """SELECT id,sender_id,recipient_id FROM messages
            WHERE id=? AND (sender_id=? OR recipient_id=?)""",
         (message_id, user["id"], user["id"]),
     ).fetchone()
     if not row:
         raise HTTPException(404, "Сообщение не найдено")
+    hidden_at = now_iso()
     conn.execute(
         """INSERT OR REPLACE INTO message_hidden_by_user(
              message_id,user_id,hidden_at
            ) VALUES(?,?,?)""",
-        (message_id, user["id"], now_iso()),
+        (message_id, user["id"], hidden_at),
     )
     conn.commit()
+    peer_id = (
+        int(row["recipient_id"])
+        if int(row["sender_id"]) == int(user["id"])
+        else int(row["sender_id"])
+    )
+    await push(
+        int(user["id"]),
+        {
+            "type": "message_hidden_for_me",
+            "chat_type": "user",
+            "chat_id": peer_id,
+            "message_id": message_id,
+            "hidden_at": hidden_at,
+        },
+    )
     return {"ok": True, "message_id": message_id}
 
 
@@ -4030,6 +4094,30 @@ def group_for_user(conn, group_id: int, user_id: int):
            WHERE g.id=? AND gm.user_id=?""",
         (group_id, user_id),
     ).fetchone()
+
+
+def group_unread_count_for_user(conn, group_id: int, user_id: int) -> int:
+    row = conn.execute(
+        """SELECT COUNT(*) AS unread_count
+           FROM group_messages unread
+           JOIN group_members mine
+             ON mine.group_id=unread.group_id
+            AND mine.user_id=?
+           WHERE unread.group_id=?
+             AND unread.sender_id<>?
+             AND unread.deleted_at IS NULL
+             AND unread.created_at>=mine.joined_at
+             AND NOT EXISTS(
+               SELECT 1 FROM group_message_reads gr
+               WHERE gr.message_id=unread.id AND gr.user_id=?
+             )
+             AND NOT EXISTS(
+               SELECT 1 FROM group_message_hidden_by_user gh
+               WHERE gh.message_id=unread.id AND gh.user_id=?
+             )""",
+        (user_id, group_id, user_id, user_id, user_id),
+    ).fetchone()
+    return int(row["unread_count"] or 0) if row else 0
 
 
 @app.get("/api/groups")
@@ -4426,7 +4514,7 @@ async def remove_group_member(
 
 
 @app.get("/api/groups/{group_id}/messages")
-def get_group_messages(
+async def get_group_messages(
     group_id: int,
     limit: int = Query(50, ge=1, le=300),
     before_id: int | None = Query(default=None, ge=1),
@@ -4496,6 +4584,17 @@ def get_group_messages(
             ),
         )
         conn.commit()
+        await push(
+            int(user["id"]),
+            {
+                "type": "chat_read_sync",
+                "chat_type": "group",
+                "chat_id": group_id,
+                "message_ids": [int(row["id"]) for row in rows],
+                "read_at": read_at,
+                "unread_count": 0,
+            },
+        )
 
     result = []
     is_admin = bool(group["is_admin"])
@@ -4820,7 +4919,7 @@ async def edit_group_message(
 
 
 @app.delete("/api/groups/{group_id}/messages/{message_id}/me")
-def delete_group_message_for_me(
+async def delete_group_message_for_me(
     group_id: int,
     message_id: int,
     user=Depends(current_user),
@@ -4835,18 +4934,29 @@ def delete_group_message_for_me(
     ).fetchone()
     if not row:
         raise HTTPException(404, "Сообщение не найдено")
+    hidden_at = now_iso()
     conn.execute(
         """INSERT OR REPLACE INTO group_message_hidden_by_user(
              message_id,user_id,hidden_at
            ) VALUES(?,?,?)""",
-        (message_id, user["id"], now_iso()),
+        (message_id, user["id"], hidden_at),
     )
     conn.commit()
+    await push(
+        int(user["id"]),
+        {
+            "type": "message_hidden_for_me",
+            "chat_type": "group",
+            "chat_id": group_id,
+            "message_id": message_id,
+            "hidden_at": hidden_at,
+        },
+    )
     return {"ok": True, "message_id": message_id}
 
 
 @app.post("/api/groups/{group_id}/messages/{message_id}/read")
-def mark_group_message_read(
+async def mark_group_message_read(
     group_id: int,
     message_id: int,
     user=Depends(current_user),
@@ -4862,15 +4972,35 @@ def mark_group_message_read(
     ).fetchone()
     if not row:
         raise HTTPException(404, "Сообщение не найдено")
+
+    read_at = None
     if not row["deleted_at"] and int(row["sender_id"]) != int(user["id"]):
+        read_at = now_iso()
         conn.execute(
             """INSERT OR IGNORE INTO group_message_reads(
                  message_id,user_id,read_at
                ) VALUES(?,?,?)""",
-            (message_id, user["id"], now_iso()),
+            (message_id, user["id"], read_at),
         )
         conn.commit()
-    return {"ok": True}
+
+    unread_count = group_unread_count_for_user(
+        conn,
+        group_id,
+        int(user["id"]),
+    )
+    await push(
+        int(user["id"]),
+        {
+            "type": "chat_read_sync",
+            "chat_type": "group",
+            "chat_id": group_id,
+            "message_ids": [message_id] if read_at else [],
+            "read_at": read_at,
+            "unread_count": unread_count,
+        },
+    )
+    return {"ok": True, "unread_count": unread_count}
 
 
 @app.get("/api/groups/{group_id}/messages/{message_id}/seen-by")
