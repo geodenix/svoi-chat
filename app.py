@@ -10,11 +10,12 @@ import shutil
 import sqlite3
 import subprocess
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Set
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
@@ -28,6 +29,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "svoi.db"
 UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+THUMB_DIR = UPLOAD_DIR / "_thumbs"
+THUMB_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 AVATAR_MAX_BYTES = 5 * 1024 * 1024
 INLINE_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -67,6 +70,19 @@ APP_STARTED_AT = time.time()
 app = FastAPI(title="Свои", version="0.1.0")
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 connections: Dict[int, Set[WebSocket]] = {}
+ws_connection_state: dict[WebSocket, dict] = {}
+user_event_seq: dict[int, int] = {}
+user_event_buffer: dict[int, deque] = {}
+WS_EVENT_BUFFER_LIMIT = 500
+WS_EVENT_TTL_SECONDS = 180.0
+WS_BATCH_DELAY_SECONDS = 0.025
+WS_BATCH_MAX_EVENTS = 24
+WS_IMMEDIATE_TYPES = {
+    "call_offer", "call_answer", "call_video_offer", "call_video_answer",
+    "call_video_state", "call_mute", "ice_candidate", "call_reject",
+    "call_end", "call_unavailable", "private_call_room_upgrade",
+    "group_call_invite", "group_force_mute", "group_force_mute_sent",
+}
 active_calls: dict[str, dict] = {}
 call_invite_links: dict[str, dict] = {}
 
@@ -114,8 +130,12 @@ def init_db():
     );
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
+      session_id TEXT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      created_at TEXT NOT NULL
+      device_label TEXT,
+      user_agent TEXT,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT
     );
     CREATE TABLE IF NOT EXISTS contacts (
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -356,6 +376,34 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_online_samples_time
       ON online_samples(recorded_at);
     """)
+    session_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+    }
+    if "session_id" not in session_columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN session_id TEXT")
+    if "device_label" not in session_columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN device_label TEXT")
+    if "user_agent" not in session_columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN user_agent TEXT")
+    if "last_seen_at" not in session_columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN last_seen_at TEXT")
+
+    legacy_sessions = conn.execute(
+        "SELECT token_hash FROM sessions WHERE session_id IS NULL OR session_id=''"
+    ).fetchall()
+    for legacy in legacy_sessions:
+        conn.execute(
+            "UPDATE sessions SET session_id=?,last_seen_at=COALESCE(last_seen_at,created_at) WHERE token_hash=?",
+            (secrets.token_urlsafe(12), legacy["token_hash"]),
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_user_seen ON sessions(user_id,last_seen_at DESC)"
+    )
+
     for table in ("messages", "group_messages"):
         columns = {
             row[1]
@@ -554,11 +602,37 @@ def phone_lookup_hash(value: str) -> tuple[str, str]:
     return digest, digits[-4:]
 
 
-def make_session(conn, user_id: int) -> str:
+def request_session_meta(request: Request | None) -> tuple[str, str]:
+    if request is None:
+        return "Неизвестное устройство", ""
+    device_label = str(request.headers.get("x-svoi-device") or "").strip()[:120]
+    user_agent = str(request.headers.get("user-agent") or "").strip()[:500]
+    if not device_label:
+        device_label = "Браузер"
+    return device_label, user_agent
+
+
+def make_session(
+    conn,
+    user_id: int,
+    request: Request | None = None,
+) -> str:
     token = secrets.token_urlsafe(32)
+    now = now_iso()
+    device_label, user_agent = request_session_meta(request)
     conn.execute(
-        "INSERT INTO sessions(token_hash,user_id,created_at) VALUES(?,?,?)",
-        (token_hash(token), user_id, now_iso()),
+        """INSERT INTO sessions(
+             token_hash,session_id,user_id,device_label,user_agent,created_at,last_seen_at
+           ) VALUES(?,?,?,?,?,?,?)""",
+        (
+            token_hash(token),
+            secrets.token_urlsafe(12),
+            user_id,
+            device_label,
+            user_agent,
+            now,
+            now,
+        ),
     )
     conn.commit()
     return token
@@ -853,7 +927,7 @@ def health():
 
 
 @app.post("/api/register")
-def register(data: RegisterIn, conn=Depends(db)):
+def register(data: RegisterIn, request: Request, conn=Depends(db)):
     username = data.username.strip().lower()
     if conn.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
         raise HTTPException(409, "Такой логин уже занят")
@@ -882,14 +956,14 @@ def register(data: RegisterIn, conn=Depends(db)):
         (cur.lastrowid,),
     ).fetchone()
     return {
-        "token": make_session(conn, row["id"]),
+        "token": make_session(conn, row["id"], request),
         "user": user_json(row),
         "recovery_code": recovery_code,
     }
 
 
 @app.post("/api/login")
-def login(data: LoginIn, conn=Depends(db)):
+def login(data: LoginIn, request: Request, conn=Depends(db)):
     row = conn.execute(
         """SELECT u.*, a.stored_name AS avatar_stored_name
            FROM users u
@@ -899,7 +973,7 @@ def login(data: LoginIn, conn=Depends(db)):
     ).fetchone()
     if not row or not verify_password(data.password, row["password_hash"], row["salt"]):
         raise HTTPException(401, "Неверный логин или пароль")
-    return {"token": make_session(conn, row["id"]), "user": user_json(row)}
+    return {"token": make_session(conn, row["id"], request), "user": user_json(row)}
 
 
 @app.get("/api/account/recovery")
@@ -952,6 +1026,7 @@ def create_recovery_code(
 @app.post("/api/password/recover")
 async def recover_password(
     data: PasswordRecoverIn,
+    request: Request,
     conn=Depends(db),
 ):
     username = data.username.strip().lower().lstrip("@")
@@ -1000,7 +1075,7 @@ async def recover_password(
     )
     conn.commit()
 
-    new_token = make_session(conn, row["id"])
+    new_token = make_session(conn, row["id"], request)
 
     for websocket in list(connections.get(row["id"], set())):
         try:
@@ -1026,6 +1101,116 @@ async def recover_password(
         "recovery_code": next_recovery_code,
         "message": "Пароль изменён",
     }
+
+
+def authorization_token_hash(authorization: str | None) -> str | None:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    return token_hash(authorization[7:])
+
+
+def session_json(row, current_hash: str | None = None) -> dict:
+    ua = str(row["user_agent"] or "")
+    return {
+        "id": row["session_id"],
+        "device_label": row["device_label"] or "Неизвестное устройство",
+        "created_at": row["created_at"],
+        "last_seen_at": row["last_seen_at"] or row["created_at"],
+        "current": bool(current_hash and row["token_hash"] == current_hash),
+        "client": (
+            "Android"
+            if "Android" in ua
+            else "iPhone/iPad"
+            if "iPhone" in ua or "iPad" in ua
+            else "Windows"
+            if "Windows" in ua
+            else "Web"
+        ),
+    }
+
+
+@app.get("/api/account/sessions")
+def list_account_sessions(
+    authorization: str | None = Header(default=None),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    current_hash = authorization_token_hash(authorization)
+    rows = conn.execute(
+        """SELECT token_hash,session_id,device_label,user_agent,created_at,last_seen_at
+           FROM sessions
+           WHERE user_id=?
+           ORDER BY COALESCE(last_seen_at,created_at) DESC,created_at DESC""",
+        (user["id"],),
+    ).fetchall()
+    return {
+        "sessions": [session_json(row, current_hash) for row in rows],
+        "count": len(rows),
+    }
+
+
+async def close_revoked_session_sockets(user_id: int, hashes: set[str]) -> None:
+    if not hashes:
+        return
+    for websocket in list(connections.get(user_id, set())):
+        state = ws_connection_state.get(websocket) or {}
+        if state.get("token_hash") not in hashes:
+            continue
+        try:
+            await websocket.close(code=4401, reason="Сессия завершена")
+        except Exception:
+            pass
+
+
+@app.delete("/api/account/sessions/{session_id}")
+async def revoke_account_session(
+    session_id: str,
+    authorization: str | None = Header(default=None),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    current_hash = authorization_token_hash(authorization)
+    row = conn.execute(
+        """SELECT token_hash,session_id
+           FROM sessions
+           WHERE user_id=? AND session_id=?""",
+        (user["id"], session_id[:160]),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Сессия не найдена")
+    if current_hash and row["token_hash"] == current_hash:
+        raise HTTPException(409, "Текущую сессию заверши через «Выйти»")
+    revoked_hash = str(row["token_hash"])
+    conn.execute(
+        "DELETE FROM sessions WHERE user_id=? AND session_id=?",
+        (user["id"], row["session_id"]),
+    )
+    conn.commit()
+    await close_revoked_session_sockets(user["id"], {revoked_hash})
+    return {"ok": True, "session_id": row["session_id"]}
+
+
+@app.post("/api/account/sessions/revoke-others")
+async def revoke_other_account_sessions(
+    authorization: str | None = Header(default=None),
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    current_hash = authorization_token_hash(authorization)
+    if not current_hash:
+        raise HTTPException(401, "Нужна авторизация")
+    rows = conn.execute(
+        "SELECT token_hash FROM sessions WHERE user_id=? AND token_hash<>?",
+        (user["id"], current_hash),
+    ).fetchall()
+    revoked_hashes = {str(row["token_hash"]) for row in rows}
+    conn.execute(
+        "DELETE FROM sessions WHERE user_id=? AND token_hash<>?",
+        (user["id"], current_hash),
+    )
+    conn.commit()
+    await close_revoked_session_sockets(user["id"], revoked_hashes)
+    return {"ok": True, "revoked": len(revoked_hashes)}
 
 
 @app.post("/api/logout")
@@ -2230,6 +2415,8 @@ async def set_avatar(
         (user["id"],),
     ).fetchone()
 
+    generate_media_thumbnail(path, stored, mime)
+
     try:
         cur = conn.execute(
             """INSERT INTO uploads(
@@ -2795,6 +2982,12 @@ def effective_media_mime(mime: str | None, name: str | None) -> str:
     return value
 
 
+def attachment_thumbnail_url(stored_name: str, mime: str) -> str | None:
+    if mime in INLINE_IMAGE_TYPES or mime.startswith("video/"):
+        return f"/uploads/thumb/{stored_name}.jpg"
+    return None
+
+
 def attachment_json(row):
     if not row or row["attachment_id"] is None:
         return None
@@ -2805,6 +2998,10 @@ def attachment_json(row):
     return {
         "id": row["attachment_id"],
         "url": f"/uploads/{row['attachment_stored_name']}",
+        "thumbnail_url": attachment_thumbnail_url(
+            row["attachment_stored_name"],
+            mime,
+        ),
         "name": row["attachment_name"],
         "mime_type": mime,
         "size": row["attachment_size"],
@@ -3016,6 +3213,37 @@ def delete_chat_background(
     return {"ok": True, "background_url": None}
 
 
+
+
+def generate_media_thumbnail(path: Path, stored_name: str, mime: str) -> None:
+    if not (mime in INLINE_IMAGE_TYPES or mime.startswith("video/")):
+        return
+    target = THUMB_DIR / f"{stored_name}.jpg"
+    command = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+    ]
+    if mime.startswith("video/"):
+        command += ["-ss", "0.35", "-i", str(path), "-frames:v", "1"]
+    else:
+        command += ["-i", str(path), "-frames:v", "1"]
+    command += [
+        "-vf",
+        "scale='min(640,iw)':-2:flags=lanczos",
+        "-q:v", "5",
+        str(target),
+    ]
+    try:
+        subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=12,
+            check=True,
+        )
+    except Exception:
+        target.unlink(missing_ok=True)
+
+
 @app.post("/api/uploads")
 async def upload(
     file: UploadFile = File(...),
@@ -3065,6 +3293,7 @@ async def upload(
     return {
         "id": cur.lastrowid,
         "url": f"/uploads/{stored}",
+        "thumbnail_url": attachment_thumbnail_url(stored, mime),
         "name": original,
         "mime_type": mime,
         "size": total,
@@ -3072,6 +3301,27 @@ async def upload(
         "is_audio": mime.startswith("audio/"),
         "is_video": mime.startswith("video/"),
     }
+
+
+@app.get("/uploads/thumb/{thumb_name}")
+def get_upload_thumbnail(thumb_name: str, conn=Depends(db)):
+    if Path(thumb_name).name != thumb_name or not thumb_name.endswith(".jpg"):
+        raise HTTPException(404, "Превью не найдено")
+    stored_name = thumb_name[:-4]
+    row = conn.execute(
+        "SELECT 1 FROM uploads WHERE stored_name=?",
+        (stored_name,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Превью не найдено")
+    path = THUMB_DIR / thumb_name
+    if not path.is_file():
+        raise HTTPException(404, "Превью не найдено")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=604800, immutable"},
+    )
 
 
 @app.get("/uploads/{stored_name}")
@@ -3478,17 +3728,108 @@ async def mark_private_messages_read(
     }
 
 
+def next_user_event_seq(user_id: int) -> int:
+    seq = int(user_event_seq.get(user_id, 0)) + 1
+    user_event_seq[user_id] = seq
+    return seq
+
+
+def remember_user_event(user_id: int, event: dict) -> None:
+    now = time.monotonic()
+    buffer = user_event_buffer.setdefault(
+        user_id,
+        deque(maxlen=WS_EVENT_BUFFER_LIMIT),
+    )
+    buffer.append((int(event["_seq"]), now, event))
+    while buffer and now - buffer[0][1] > WS_EVENT_TTL_SECONDS:
+        buffer.popleft()
+
+
+async def flush_ws_queue(websocket: WebSocket, delay: float = WS_BATCH_DELAY_SECONDS):
+    if delay > 0:
+        await asyncio.sleep(delay)
+    state = ws_connection_state.get(websocket)
+    if not state:
+        return
+    async with state["send_lock"]:
+        queue = state.get("queue") or []
+        if not queue:
+            state["flush_task"] = None
+            return
+        events = queue[:WS_BATCH_MAX_EVENTS]
+        del queue[:len(events)]
+        try:
+            if len(events) == 1:
+                await websocket.send_json(events[0])
+            else:
+                await websocket.send_json(
+                    {
+                        "type": "ws_batch",
+                        "events": events,
+                        "last_seq": int(events[-1].get("_seq", 0)),
+                    }
+                )
+        except Exception:
+            state["dead"] = True
+        finally:
+            state["flush_task"] = None
+    if state.get("queue") and not state.get("dead"):
+        state["flush_task"] = asyncio.create_task(
+            flush_ws_queue(websocket, 0)
+        )
+
+
+async def send_ws_direct(websocket: WebSocket, payload: dict):
+    state = ws_connection_state.get(websocket)
+    if not state:
+        await websocket.send_json(payload)
+        return
+    async with state["send_lock"]:
+        await websocket.send_json(payload)
+
+
+async def queue_ws_event(websocket: WebSocket, event: dict, immediate: bool = False):
+    state = ws_connection_state.get(websocket)
+    if not state or state.get("dead"):
+        raise RuntimeError("websocket unavailable")
+    state["queue"].append(event)
+    task = state.get("flush_task")
+    if immediate:
+        if task and not task.done():
+            task.cancel()
+        state["flush_task"] = asyncio.create_task(
+            flush_ws_queue(websocket, 0)
+        )
+        await state["flush_task"]
+        if state.get("dead"):
+            raise RuntimeError("websocket send failed")
+        return
+    if not task or task.done():
+        state["flush_task"] = asyncio.create_task(
+            flush_ws_queue(websocket)
+        )
+
+
 async def push(user_id: int, payload: dict) -> int:
     dead = []
     sent = 0
+    event = dict(payload)
+    event["_seq"] = next_user_event_seq(user_id)
+    event["_sent_at"] = now_iso()
+    remember_user_event(user_id, event)
+    immediate = str(event.get("type", "")) in WS_IMMEDIATE_TYPES
     for ws in list(connections.get(user_id, set())):
         try:
-            await ws.send_json(payload)
+            await queue_ws_event(ws, event, immediate=immediate)
             sent += 1
         except Exception:
             dead.append(ws)
     for ws in dead:
         connections.get(user_id, set()).discard(ws)
+        state = ws_connection_state.pop(ws, None)
+        task = state.get("flush_task") if state else None
+        if task and not task.done():
+            task.cancel()
     return sent
 
 
@@ -6534,10 +6875,21 @@ async def finish_answered_call_after_disconnect_grace(
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(...),
+    last_seq: int = Query(default=0, ge=0),
+):
     conn = connect_db()
     conn.row_factory = sqlite3.Row
     row = get_user_from_token(conn, token)
+    current_session_hash = token_hash(token)
+    if row:
+        conn.execute(
+            "UPDATE sessions SET last_seen_at=? WHERE token_hash=?",
+            (now_iso(), current_session_hash),
+        )
+        conn.commit()
     conn.close()
     if not row:
         await websocket.close(code=4401)
@@ -6549,6 +6901,29 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     await websocket.accept()
     was_offline = not bool(connections.get(user_id))
     connections.setdefault(user_id, set()).add(websocket)
+    user_event_seq[user_id] = max(
+        int(user_event_seq.get(user_id, 0)),
+        int(last_seq or 0),
+    )
+    ws_connection_state[websocket] = {
+        "queue": [],
+        "flush_task": None,
+        "send_lock": asyncio.Lock(),
+        "acked_seq": int(last_seq or 0),
+        "dead": False,
+        "token_hash": current_session_hash,
+    }
+
+    replay = [
+        event
+        for seq, _recorded_at, event in user_event_buffer.get(user_id, ())
+        if seq > int(last_seq or 0)
+    ]
+    for event in replay:
+        try:
+            await queue_ws_event(websocket, event)
+        except Exception:
+            break
 
     if was_offline:
         try:
@@ -6569,7 +6944,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
     for call in list(active_calls.values()):
         if call.get("callee_id") == user_id and not call.get("answered"):
-            await websocket.send_json(
+            await send_ws_direct(
+                websocket,
                 {
                     "type": "call_offer",
                     "from_user_id": call["caller_id"],
@@ -6594,10 +6970,36 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
             signal_type = data.get("type")
 
+            if signal_type == "ws_ack":
+                try:
+                    ack_seq = max(0, int(data.get("seq", 0)))
+                except (TypeError, ValueError):
+                    ack_seq = 0
+                state = ws_connection_state.get(websocket)
+                if state and ack_seq:
+                    state["acked_seq"] = max(
+                        int(state.get("acked_seq", 0)),
+                        ack_seq,
+                    )
+                continue
+
+            if signal_type == "ws_ping_probe":
+                nonce = str(data.get("nonce", ""))[:120]
+                if nonce:
+                    await send_ws_direct(
+                        websocket,
+                        {
+                            "type": "ws_ping_pong",
+                            "nonce": nonce,
+                        },
+                    )
+                continue
+
             if signal_type == "group_ping_probe":
                 nonce = str(data.get("nonce", ""))[:120]
                 if nonce:
-                    await websocket.send_json(
+                    await send_ws_direct(
+                        websocket,
                         {
                             "type": "group_ping_pong",
                             "nonce": nonce,
@@ -6641,7 +7043,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         "from_name": display_name,
                     },
                 )
-                await websocket.send_json(
+                await send_ws_direct(
+                    websocket,
                     {
                         "type": "group_force_mute_sent",
                         "group_id": group_id,
@@ -7105,6 +7508,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         pass
     finally:
         connections.get(user_id, set()).discard(websocket)
+        state = ws_connection_state.pop(websocket, None)
+        task = state.get("flush_task") if state else None
+        if task and not task.done():
+            task.cancel()
         if not connections.get(user_id):
             connections.pop(user_id, None)
             try:
