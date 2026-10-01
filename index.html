@@ -134,6 +134,34 @@ body.drawer-open{overflow:hidden}
   white-space:nowrap
 }
 </style>
+<style>
+.bubble.swipe-reply-ready{touch-action:pan-y;position:relative;will-change:transform}
+.swipe-reply-indicator{
+  position:absolute;
+  z-index:4;
+  left:-42px;
+  top:50%;
+  width:32px;
+  height:32px;
+  margin-top:-16px;
+  border-radius:50%;
+  display:grid;
+  place-items:center;
+  background:#2b86fa;
+  color:#fff;
+  font-size:17px;
+  font-weight:900;
+  box-shadow:0 5px 16px #0006;
+  opacity:0;
+  transform:scale(.72);
+  transition:opacity .08s linear,transform .08s linear;
+  pointer-events:none
+}
+.bubble.swipe-reply-threshold .swipe-reply-indicator{
+  background:#3c9bff;
+  box-shadow:0 5px 18px #2387ff66
+}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -2874,10 +2902,129 @@ async function forwardMessageTo(target){
   }
 }
 
+function bindSwipeToReply(node,message){
+  if(!node||!message||message.deleted)return;
+  node.classList.add('swipe-reply-ready');
+
+  const indicator=document.createElement('span');
+  indicator.className='swipe-reply-indicator';
+  indicator.textContent='↩';
+  indicator.setAttribute('aria-hidden','true');
+  node.append(indicator);
+
+  const threshold=68;
+  const maxDistance=96;
+  let gesture=null;
+
+  const reset=(animated=true)=>{
+    if(animated){
+      node.style.transition='transform .16s ease-out'
+    }else{
+      node.style.transition=''
+    }
+    node.style.transform='';
+    indicator.style.opacity='0';
+    indicator.style.transform='scale(.72)';
+    node.classList.remove('swipe-reply-threshold');
+    if(animated){
+      setTimeout(()=>{
+        if(!gesture)node.style.transition=''
+      },180)
+    }
+  };
+
+  node.addEventListener('pointerdown',event=>{
+    if(event.pointerType==='mouse'||!event.isPrimary)return;
+    if(message.deleted)return;
+    if(event.target.closest('button,a,audio,video,input,textarea,.circle-player,.voice-wave'))return;
+
+    gesture={
+      pointerId:event.pointerId,
+      startX:event.clientX,
+      startY:event.clientY,
+      active:false,
+      cancelled:false,
+      crossed:false,
+      dx:0
+    };
+    node.style.transition=''
+  });
+
+  node.addEventListener('pointermove',event=>{
+    if(!gesture||gesture.pointerId!==event.pointerId||gesture.cancelled)return;
+    const dx=event.clientX-gesture.startX;
+    const dy=event.clientY-gesture.startY;
+
+    if(!gesture.active){
+      if(Math.abs(dy)>10&&Math.abs(dy)>Math.max(8,dx)){
+        gesture.cancelled=true;
+        reset(false);
+        return
+      }
+      if(dx<=6)return;
+      if(dx<Math.abs(dy)*1.15)return;
+      gesture.active=true;
+      try{node.setPointerCapture(event.pointerId)}catch{}
+    }
+
+    if(dx<0){
+      gesture.dx=0;
+      node.style.transform='';
+      indicator.style.opacity='0';
+      indicator.style.transform='scale(.72)';
+      node.classList.remove('swipe-reply-threshold');
+      return
+    }
+
+    event.preventDefault();
+    gesture.dx=dx;
+    const rendered=dx<=threshold
+      ?dx
+      :threshold+(Math.min(dx,maxDistance)-threshold)*0.42;
+    const progress=Math.max(0,Math.min(1,dx/threshold));
+    node.style.transform='translate3d('+rendered+'px,0,0)';
+    indicator.style.opacity=String(Math.min(1,progress*1.15));
+    indicator.style.transform='scale('+(0.72+0.28*progress)+')';
+
+    const crossed=dx>=threshold;
+    node.classList.toggle('swipe-reply-threshold',crossed);
+    if(crossed&&!gesture.crossed){
+      gesture.crossed=true;
+      try{performVibration([24])}catch{}
+    }else if(!crossed){
+      gesture.crossed=false
+    }
+  },{passive:false});
+
+  const finish=event=>{
+    if(!gesture||gesture.pointerId!==event.pointerId)return;
+    const shouldReply=gesture.active&&!gesture.cancelled&&gesture.dx>=threshold;
+    const moved=gesture.active&&gesture.dx>10;
+    gesture=null;
+    if(moved)node._suppressMessageClickUntil=Date.now()+450;
+    reset(true);
+    if(shouldReply){
+      setReplySource(message)
+    }
+  };
+
+  node.addEventListener('pointerup',finish);
+  node.addEventListener('pointercancel',event=>{
+    if(!gesture||gesture.pointerId!==event.pointerId)return;
+    gesture=null;
+    reset(true)
+  })
+}
+
 function msgNode(m){
   const d=document.createElement('div');d.className='bubble'+(m.sender_id===me.id?' mine':'');d.dataset.messageId=String(m.id);d._message=m;
   d.addEventListener('click',event=>{
     if(m.deleted)return;
+    if((d._suppressMessageClickUntil||0)>Date.now()){
+      event.preventDefault();
+      event.stopPropagation();
+      return
+    }
     if(event.target.closest('button,a,audio,video,input,textarea,.circle-player'))return;
     openMessageActions(m)
   });
@@ -2886,6 +3033,7 @@ function msgNode(m){
     event.preventDefault();
     openMessageActions(m)
   });
+  bindSwipeToReply(d,m);
   if(active?.type==='group'&&m.mentioned_me&&m.sender_id!==me.id&&!m.deleted)d.classList.add('mentioned-me');
   if(active?.type==='group'&&m.sender_id!==me.id){const s=document.createElement('div');s.className='sender';s.textContent=m.sender_name||'Участник';d.append(s)}
   if(active?.type==='group'&&m.mentioned_me&&m.sender_id!==me.id&&!m.deleted){
