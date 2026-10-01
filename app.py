@@ -5251,6 +5251,7 @@ CALL_SIGNAL_TYPES = {
     "call_answer",
     "call_video_offer",
     "call_video_answer",
+    "call_video_state",
     "call_mute",
     "ice_candidate",
     "call_reject",
@@ -5594,6 +5595,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     "answered": False,
                     "caller_muted": False,
                     "callee_muted": False,
+                    "caller_video_enabled": bool(data.get("video", False)),
+                    "callee_video_enabled": False,
                     "missed_notified": False,
                     "action_token": secrets.token_urlsafe(24),
                 }
@@ -5619,6 +5622,49 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 continue
 
             call = active_calls.get(call_id)
+
+            if signal_type == "call_video_state":
+                if not call:
+                    continue
+                participants = {call["caller_id"], call["callee_id"]}
+                if user_id not in participants or target_id not in participants:
+                    continue
+                if user_id == target_id:
+                    continue
+
+                enabled = bool(data.get("enabled", False))
+                sync = bool(data.get("sync", False))
+                if user_id == call["caller_id"]:
+                    call["caller_video_enabled"] = enabled
+                else:
+                    call["callee_video_enabled"] = enabled
+
+                if enabled:
+                    call["video"] = True
+                    mark_call_video(call_id)
+
+                payload["enabled"] = enabled
+                payload["sync"] = sync
+                await push(target_id, payload)
+
+                if sync:
+                    remote_enabled = (
+                        bool(call.get("caller_video_enabled", False))
+                        if target_id == call["caller_id"]
+                        else bool(call.get("callee_video_enabled", False))
+                    )
+                    await push(
+                        user_id,
+                        {
+                            "type": "call_video_state",
+                            "from_user_id": target_id,
+                            "from_name": "Собеседник",
+                            "call_id": call_id,
+                            "enabled": remote_enabled,
+                            "sync": True,
+                        },
+                    )
+                continue
 
             if signal_type == "call_mute":
                 if not call:
@@ -5673,6 +5719,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
                 if signal_type == "call_video_offer" and requested_video:
                     call["video"] = True
+                    if not reconnect:
+                        if user_id == call["caller_id"]:
+                            call["caller_video_enabled"] = True
+                        else:
+                            call["callee_video_enabled"] = True
                     mark_call_video(call_id)
 
                 if reconnect and not requested_video:
@@ -5688,6 +5739,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 if call:
                     call["answered"] = True
                     call["answered_at"] = now_iso()
+                    if user_id == call["caller_id"]:
+                        call["caller_video_enabled"] = bool(data.get("video", False))
+                    else:
+                        call["callee_video_enabled"] = bool(data.get("video", False))
                     mark_call_answered(call_id)
                 await push(target_id, payload)
                 if call:
@@ -5721,6 +5776,42 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                                     "caller_muted"
                                     if user_id == call["caller_id"]
                                     else "callee_muted",
+                                    False,
+                                )
+                            ),
+                            "sync": True,
+                        },
+                    )
+                    await push(
+                        user_id,
+                        {
+                            "type": "call_video_state",
+                            "from_user_id": target_id,
+                            "from_name": "Собеседник",
+                            "call_id": call_id,
+                            "enabled": bool(
+                                call.get(
+                                    "caller_video_enabled"
+                                    if target_id == call["caller_id"]
+                                    else "callee_video_enabled",
+                                    False,
+                                )
+                            ),
+                            "sync": True,
+                        },
+                    )
+                    await push(
+                        target_id,
+                        {
+                            "type": "call_video_state",
+                            "from_user_id": user_id,
+                            "from_name": display_name,
+                            "call_id": call_id,
+                            "enabled": bool(
+                                call.get(
+                                    "caller_video_enabled"
+                                    if user_id == call["caller_id"]
+                                    else "callee_video_enabled",
                                     False,
                                 )
                             ),
