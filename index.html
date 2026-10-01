@@ -562,7 +562,8 @@ body.drawer-open{overflow:hidden}
   padding-inline:max(12px,calc((100vw - min(68vw,68dvh,720px))/2))
 }
 .group-call-grid.layout-2:not(.has-focus){
-  --auto-cols:2
+  --auto-cols:2;
+  padding-inline:max(10px,calc((100vw - min(94vw,900px))/2))
 }
 .group-call-grid.layout-3-4:not(.has-focus){
   --auto-cols:2
@@ -610,6 +611,27 @@ body.drawer-open{overflow:hidden}
   }
   .group-call-grid.layout-10:not(.has-focus){
     --auto-cols:5
+  }
+}
+
+.group-call-grid.has-focus .group-tile.focused{
+  animation:group-focus-in .22s ease-out
+}
+.group-call-strip:not(.hidden){
+  animation:group-strip-in .2s ease-out
+}
+@keyframes group-focus-in{
+  from{opacity:.72;transform:scale(.965)}
+  to{opacity:1;transform:scale(1)}
+}
+@keyframes group-strip-in{
+  from{opacity:0;transform:translateY(8px)}
+  to{opacity:1;transform:translateY(0)}
+}
+@media(prefers-reduced-motion:reduce){
+  .group-call-grid.has-focus .group-tile.focused,
+  .group-call-strip:not(.hidden){
+    animation:none
   }
 }
 </style>
@@ -5444,6 +5466,7 @@ function applyGroupAutoLayout(count=null){
   const participantCount=count==null
     ?(state?.room?1+state.room.remoteParticipants.size:grid.querySelectorAll('.group-tile').length)
     :Number(count);
+  const normalizedCount=Math.max(1,participantCount||1);
 
   grid.classList.remove(
     'layout-1',
@@ -5453,11 +5476,47 @@ function applyGroupAutoLayout(count=null){
     'layout-7-9',
     'layout-10'
   );
-  grid.classList.add(groupLayoutClass(Math.max(1,participantCount||1)));
-  grid.dataset.participantCount=String(Math.max(1,participantCount||1));
+  grid.classList.add(groupLayoutClass(normalizedCount));
+  grid.dataset.participantCount=String(normalizedCount);
 
   requestAnimationFrame(()=>{
-    scheduleGroupRemoteVideoQualitySync()
+    if(groupCallState!==state)return;
+    scheduleGroupRemoteVideoQualitySync();
+
+    // До 4 участников держим спокойную сетку. Автоматически увеличенный
+    // участник нужен только в больших звонках.
+    if(normalizedCount<5){
+      if(
+        state?.groupFocusSource==='auto'
+        &&grid.classList.contains('has-focus')
+      ){
+        restoreGroupGridLayout()
+      }
+      return
+    }
+
+    // Закреплённый участник всегда важнее автоматического говорящего.
+    if(state?.pinnedIdentity)return;
+
+    const localIdentity=String(state?.room?.localParticipant?.identity||'');
+    const activeRemote=(state?.pendingSpeakers||[]).find(participant=>{
+      const identity=String(participant?.identity||'');
+      return identity&&identity!==localIdentity
+    });
+    const fallbackRemote=state?.room
+      ?[...state.room.remoteParticipants.values()][0]
+      :null;
+    const targetIdentity=String(
+      activeRemote?.identity
+      ||fallbackRemote?.identity
+      ||localIdentity
+      ||''
+    );
+    const target=targetIdentity?$(groupTileId(targetIdentity)):null;
+
+    if(target?.isConnected&&!grid.classList.contains('has-focus')){
+      showGroupFocusedTile(target,'auto')
+    }
   })
 }
 
@@ -5474,15 +5533,18 @@ function restoreGroupGridLayout(){
     .forEach(tile=>tile.classList.remove('focused'));
   grid.classList.remove('has-focus');
   strip.classList.add('hidden');
+  if(groupCallState)groupCallState.groupFocusSource='';
   applyGroupAutoLayout();
   scheduleGroupRemoteVideoQualitySync()
 }
 
-function showGroupFocusedTile(tile){
+function showGroupFocusedTile(tile,source='manual'){
   if(!tile?.isConnected)return;
   const grid=$('groupCallGrid');
   const strip=$('groupCallStrip');
   if(!grid||!strip)return;
+
+  if(groupCallState)groupCallState.groupFocusSource=source;
 
   if(tile.classList.contains('focused')){
     grid.classList.add('has-focus');
@@ -5550,13 +5612,16 @@ function setGroupPinnedIdentity(identity=''){
 
   if(next){
     const tile=$(groupTileId(next));
-    if(tile?.isConnected)showGroupFocusedTile(tile)
+    if(tile?.isConnected)showGroupFocusedTile(tile,'pinned')
   }
 }
 
 function scheduleGroupSpeakerFocus(identity){
   const state=groupCallState;
   if(!state||state.pinnedIdentity)return;
+
+  const participantCount=state.room?1+state.room.remoteParticipants.size:0;
+  if(participantCount<5)return;
 
   const next=String(identity||'');
   if(!next)return;
@@ -5575,7 +5640,7 @@ function scheduleGroupSpeakerFocus(identity){
     if(groupCallState!==state||state.pinnedIdentity)return;
     state.speakerFocusTimer=null;
     const tile=$(groupTileId(next));
-    if(tile?.isConnected)showGroupFocusedTile(tile)
+    if(tile?.isConnected)showGroupFocusedTile(tile,'auto')
   },650)
 }
 
@@ -5593,7 +5658,7 @@ function focusGroupTile(tile){
   if(state?.pinnedIdentity&&state.pinnedIdentity!==identity){
     setGroupPinnedIdentity('')
   }
-  showGroupFocusedTile(tile)
+  showGroupFocusedTile(tile,'manual')
 }
 
 function groupParticipantUserId(identity){
@@ -6276,7 +6341,7 @@ function refreshGroupCount(){
   const changed=state.lastParticipantCount!==count;
   state.lastParticipantCount=count;
   $('groupCallStatus').textContent=count+' / 10 участников';
-  if(changed&&!$('groupCallGrid').classList.contains('has-focus')){
+  if(changed){
     applyGroupAutoLayout(count)
   }
   updateMiniCallBar()
@@ -6502,6 +6567,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
       speakerFocusTimer:null,
       autoSpeakerIdentity:'',
       pinnedIdentity:'',
+      groupFocusSource:'',
       videoQualityFrame:0,
       videoNetworkCap:'high',
       pendingSpeakers:[],
