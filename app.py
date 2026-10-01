@@ -32,6 +32,8 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 THUMB_DIR = UPLOAD_DIR / "_thumbs"
 THUMB_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+VIDEO_OPTIMIZE_TRIGGER_BYTES = 5 * 1024 * 1024
+VIDEO_OPTIMIZE_MIN_SAVING_RATIO = 0.90
 AVATAR_MAX_BYTES = 5 * 1024 * 1024
 INLINE_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 AVATAR_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -3237,6 +3239,58 @@ def delete_chat_background(
 
 
 
+def optimize_uploaded_mp4(path: Path, mime: str, original_name: str) -> bool:
+    if mime != "video/mp4":
+        return False
+    if Path(original_name).suffix.lower() != ".mp4":
+        return False
+    try:
+        original_size = path.stat().st_size
+    except OSError:
+        return False
+    if original_size < VIDEO_OPTIMIZE_TRIGGER_BYTES:
+        return False
+
+    candidate = path.with_name(path.name + ".optimized.mp4")
+    command = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(path),
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-map_metadata", "-1",
+        "-vf", "scale=1280:1280:force_original_aspect_ratio=decrease:force_divisible_by=2",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "28",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "96k",
+        "-ac", "2",
+        "-movflags", "+faststart",
+        str(candidate),
+    ]
+    try:
+        subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=90,
+            check=True,
+        )
+        optimized_size = candidate.stat().st_size
+        if (
+            optimized_size > 0
+            and optimized_size < original_size * VIDEO_OPTIMIZE_MIN_SAVING_RATIO
+        ):
+            os.replace(candidate, path)
+            return True
+    except Exception:
+        pass
+    finally:
+        candidate.unlink(missing_ok=True)
+    return False
+
+
 def generate_media_thumbnail(path: Path, stored_name: str, mime: str) -> None:
     if not (mime in INLINE_IMAGE_TYPES or mime.startswith("video/")):
         return
@@ -3299,6 +3353,27 @@ async def upload(
         raise
     finally:
         await file.close()
+
+    if mime == "video/mp4":
+        await asyncio.to_thread(
+            optimize_uploaded_mp4,
+            path,
+            mime,
+            original,
+        )
+        try:
+            total = path.stat().st_size
+        except OSError:
+            path.unlink(missing_ok=True)
+            raise HTTPException(500, "Не удалось подготовить видео")
+
+    if mime in INLINE_IMAGE_TYPES or mime.startswith("video/"):
+        await asyncio.to_thread(
+            generate_media_thumbnail,
+            path,
+            stored,
+            mime,
+        )
 
     try:
         cur = conn.execute(
