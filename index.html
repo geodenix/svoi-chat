@@ -2093,6 +2093,48 @@ function formatMediaSeconds(value){
   return minutes+':'+String(seconds).padStart(2,'0')
 }
 
+let lazyChatMediaObserver=null;
+
+function ensureChatMediaSource(media,eager=false){
+  if(!media)return;
+  const source=media.dataset?.src;
+  if(!source)return;
+  media.src=source;
+  media.preload='metadata';
+  delete media.dataset.src;
+  try{lazyChatMediaObserver?.unobserve(media)}catch{}
+  if(eager){
+    try{media.load()}catch{}
+  }
+}
+
+function observeChatMedia(media){
+  if(!media?.dataset?.src)return;
+  if(!('IntersectionObserver' in window)){
+    ensureChatMediaSource(media);
+    return
+  }
+  if(!lazyChatMediaObserver){
+    lazyChatMediaObserver=new IntersectionObserver(entries=>{
+      for(const entry of entries){
+        if(entry.isIntersecting){
+          ensureChatMediaSource(entry.target)
+        }
+      }
+    },{
+      root:$('messages'),
+      rootMargin:'700px 0px',
+      threshold:0.01
+    })
+  }
+  lazyChatMediaObserver.observe(media)
+}
+
+function resetLazyChatMediaObserver(){
+  try{lazyChatMediaObserver?.disconnect()}catch{}
+  lazyChatMediaObserver=null
+}
+
 function replaceMessageNode(message){
   currentMessages=currentMessages.map(item=>Number(item.id)===Number(message.id)?message:item);
   const node=document.querySelector('.bubble[data-message-id="'+message.id+'"]');
@@ -2818,14 +2860,22 @@ function msgNode(m){
       d.classList.add('media-only',isVoice?'voice-only':'circle-only')
     }
     if(m.attachment.is_image){
-      const img=document.createElement('img');img.className='attachment-img';img.src=m.attachment.url;img.alt=m.attachment.name;img.loading='lazy';d.append(img)
+      const img=document.createElement('img');
+      img.className='attachment-img';
+      img.src=m.attachment.url;
+      img.alt=m.attachment.name;
+      img.loading='lazy';
+      img.decoding='async';
+      try{img.fetchPriority='low'}catch{}
+      d.append(img)
     }else if(isVoice){
       const player=document.createElement('div');
       player.className='voice-message';
 
       const audio=document.createElement('audio');
-      audio.preload='metadata';
-      audio.src=m.attachment.url;
+      audio.preload='none';
+      audio.dataset.src=m.attachment.url;
+      observeChatMedia(audio);
 
       const play=document.createElement('button');
       play.className='voice-play';
@@ -2900,6 +2950,7 @@ function msgNode(m){
           document.querySelectorAll('.voice-message audio').forEach(other=>{
             if(other!==audio&&!other.paused)other.pause()
           });
+          ensureChatMediaSource(audio,true);
           audio.play().catch(()=>{})
         }else{
           audio.pause()
@@ -2954,10 +3005,11 @@ function msgNode(m){
       const video=document.createElement('video');
       video.className='video-circle-message';
       video.controls=false;
-      video.preload='metadata';
+      video.preload='none';
       video.playsInline=true;
-      video.src=m.attachment.url;
+      video.dataset.src=m.attachment.url;
       video.disablePictureInPicture=true;
+      observeChatMedia(video);
 
       const play=document.createElement('button');
       play.className='circle-play';
@@ -2996,6 +3048,7 @@ function msgNode(m){
 
       const togglePlay=()=>{
         if(video.paused||video.ended){
+          ensureChatMediaSource(video,true);
           video.play().catch(()=>{})
         }else{
           video.pause()
@@ -3077,6 +3130,7 @@ function initMessageHistoryState(items){
 function renderMessages(items){
   currentMessages=[...items];
   const box=$('messages');
+  resetLazyChatMediaObserver();
   box.replaceChildren();
 
   if(!items.length){
