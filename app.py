@@ -222,6 +222,17 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_group_message_reads_message
       ON group_message_reads(message_id, read_at);
+    CREATE TABLE IF NOT EXISTS group_message_receipts (
+      message_id INTEGER NOT NULL REFERENCES group_messages(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      delivered_at TEXT,
+      read_at TEXT,
+      PRIMARY KEY(message_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_message_receipts_message
+      ON group_message_receipts(message_id, delivered_at, read_at);
+    CREATE INDEX IF NOT EXISTS idx_group_message_receipts_user
+      ON group_message_receipts(user_id, message_id);
     CREATE TABLE IF NOT EXISTS uploads (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -4125,6 +4136,140 @@ def group_unread_count_for_user(conn, group_id: int, user_id: int) -> int:
     return int(row["unread_count"] or 0) if row else 0
 
 
+def ensure_group_message_receipts(
+    conn,
+    message_id: int,
+    group_id: int,
+    sender_id: int,
+    created_at: str,
+) -> None:
+    # Snapshot current members who had already joined when the message was
+    # created. New messages are snapshotted at send time; this branch mainly
+    # backfills older messages created before receipt tracking existed.
+    conn.execute(
+        """INSERT OR IGNORE INTO group_message_receipts(
+             message_id,user_id,delivered_at,read_at
+           )
+           SELECT ?,gm.user_id,NULL,NULL
+           FROM group_members gm
+           WHERE gm.group_id=?
+             AND gm.user_id<>?
+             AND gm.joined_at<=?""",
+        (message_id, group_id, sender_id, created_at),
+    )
+
+    # Existing historical read receipts prove both delivery and read.
+    conn.execute(
+        """INSERT OR IGNORE INTO group_message_receipts(
+             message_id,user_id,delivered_at,read_at
+           )
+           SELECT gmr.message_id,gmr.user_id,gmr.read_at,gmr.read_at
+           FROM group_message_reads gmr
+           WHERE gmr.message_id=? AND gmr.user_id<>?""",
+        (message_id, sender_id),
+    )
+    conn.execute(
+        """UPDATE group_message_receipts
+           SET delivered_at=COALESCE(
+                 delivered_at,
+                 (
+                   SELECT gmr.read_at
+                   FROM group_message_reads gmr
+                   WHERE gmr.message_id=group_message_receipts.message_id
+                     AND gmr.user_id=group_message_receipts.user_id
+                 )
+               ),
+               read_at=COALESCE(
+                 read_at,
+                 (
+                   SELECT gmr.read_at
+                   FROM group_message_reads gmr
+                   WHERE gmr.message_id=group_message_receipts.message_id
+                     AND gmr.user_id=group_message_receipts.user_id
+                 )
+               )
+           WHERE message_id=?""",
+        (message_id,),
+    )
+
+
+def group_receipt_summary(conn, message_id: int) -> dict:
+    row = conn.execute(
+        """SELECT
+             COUNT(*) AS total_recipients,
+             SUM(CASE WHEN delivered_at IS NOT NULL THEN 1 ELSE 0 END)
+               AS delivered_count,
+             SUM(CASE WHEN read_at IS NOT NULL THEN 1 ELSE 0 END)
+               AS read_count
+           FROM group_message_receipts
+           WHERE message_id=?""",
+        (message_id,),
+    ).fetchone()
+    return {
+        "total_recipients": int(row["total_recipients"] or 0) if row else 0,
+        "delivered_count": int(row["delivered_count"] or 0) if row else 0,
+        "read_count": int(row["read_count"] or 0) if row else 0,
+    }
+
+
+async def push_group_receipt_updates(
+    conn,
+    group_id: int,
+    message_ids,
+) -> None:
+    ids = sorted({int(value) for value in message_ids if int(value) > 0})
+    if not ids:
+        return
+
+    grouped = {}
+    for offset in range(0, len(ids), 400):
+        chunk = ids[offset:offset + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""SELECT id,sender_id FROM group_messages
+                WHERE group_id=? AND id IN ({placeholders})""",
+            (group_id, *chunk),
+        ).fetchall()
+        for row in rows:
+            sender_id = int(row["sender_id"])
+            grouped.setdefault(sender_id, []).append(
+                {
+                    "message_id": int(row["id"]),
+                    "summary": group_receipt_summary(
+                        conn,
+                        int(row["id"]),
+                    ),
+                }
+            )
+
+    tasks = []
+    for sender_id, updates in grouped.items():
+        for offset in range(0, len(updates), 100):
+            tasks.append(
+                push(
+                    sender_id,
+                    {
+                        "type": "group_receipt_updates",
+                        "group_id": group_id,
+                        "updates": updates[offset:offset + 100],
+                    },
+                )
+            )
+    if tasks:
+        await asyncio.gather(
+            *tasks,
+            return_exceptions=True,
+        )
+
+
+async def push_group_receipt_update(
+    conn,
+    group_id: int,
+    message_id: int,
+) -> None:
+    await push_group_receipt_updates(conn, group_id, [message_id])
+
+
 @app.get("/api/groups")
 def get_groups(user=Depends(current_user), conn=Depends(db)):
     now = now_iso()
@@ -4568,6 +4713,33 @@ async def get_group_messages(
     ).fetchall()
     if before_id is None:
         read_at = now_iso()
+        newly_read_rows = conn.execute(
+            """SELECT gm.id,gm.sender_id,gm.created_at
+               FROM group_messages gm
+               JOIN group_members mine
+                 ON mine.group_id=gm.group_id
+                AND mine.user_id=?
+               WHERE gm.group_id=?
+                 AND gm.sender_id<>?
+                 AND gm.deleted_at IS NULL
+                 AND gm.created_at>=mine.joined_at
+                 AND NOT EXISTS(
+                   SELECT 1 FROM group_message_reads gr
+                   WHERE gr.message_id=gm.id AND gr.user_id=?
+                 )
+                 AND NOT EXISTS(
+                   SELECT 1 FROM group_message_hidden_by_user gh
+                   WHERE gh.message_id=gm.id AND gh.user_id=?
+                 )""",
+            (
+                user["id"],
+                group_id,
+                user["id"],
+                user["id"],
+                user["id"],
+            ),
+        ).fetchall()
+
         conn.execute(
             """INSERT OR IGNORE INTO group_message_reads(
                  message_id,user_id,read_at
@@ -4589,6 +4761,32 @@ async def get_group_messages(
                 user["id"],
             ),
         )
+
+        newly_read_ids = [
+            int(receipt_row["id"])
+            for receipt_row in newly_read_rows
+        ]
+        if newly_read_ids:
+            conn.executemany(
+                """INSERT OR IGNORE INTO group_message_receipts(
+                     message_id,user_id,delivered_at,read_at
+                   ) VALUES(?,?,?,?)""",
+                [
+                    (message_id, user["id"], read_at, read_at)
+                    for message_id in newly_read_ids
+                ],
+            )
+            conn.executemany(
+                """UPDATE group_message_receipts
+                   SET delivered_at=COALESCE(delivered_at, ?),
+                       read_at=COALESCE(read_at, ?)
+                   WHERE message_id=? AND user_id=?""",
+                [
+                    (read_at, read_at, message_id, user["id"])
+                    for message_id in newly_read_ids
+                ],
+            )
+
         conn.commit()
         await push(
             int(user["id"]),
@@ -4601,9 +4799,16 @@ async def get_group_messages(
                 "unread_count": 0,
             },
         )
+        if newly_read_ids:
+            await push_group_receipt_updates(
+                conn,
+                group_id,
+                newly_read_ids,
+            )
 
     result = []
     is_admin = bool(group["is_admin"])
+    receipt_backfill_touched = False
     for row in reversed(rows):
         deleted = bool(row["deleted_at"])
         if deleted and not is_admin:
@@ -4631,7 +4836,22 @@ async def get_group_messages(
             "show_deleted_notice": deleted and is_admin,
             "attachment": None if deleted else attachment_json(row),
         }
+        if int(row["sender_id"]) == int(user["id"]):
+            ensure_group_message_receipts(
+                conn,
+                int(row["id"]),
+                group_id,
+                int(row["sender_id"]),
+                row["created_at"],
+            )
+            item["receipt_summary"] = group_receipt_summary(
+                conn,
+                int(row["id"]),
+            )
+            receipt_backfill_touched = True
         result.append(item)
+    if receipt_backfill_touched:
+        conn.commit()
     return result
 
 @app.post("/api/groups/{group_id}/messages")
@@ -4673,6 +4893,18 @@ async def send_group_message(
             if existing["group_id"] != group_id:
                 raise HTTPException(409, "Идентификатор сообщения уже использован")
             deleted = bool(existing["deleted_at"])
+            ensure_group_message_receipts(
+                conn,
+                int(existing["id"]),
+                group_id,
+                int(existing["sender_id"]),
+                existing["created_at"],
+            )
+            conn.commit()
+            existing_receipt_summary = group_receipt_summary(
+                conn,
+                int(existing["id"]),
+            )
             return {
                 "id": existing["id"],
                 "group_id": existing["group_id"],
@@ -4692,6 +4924,7 @@ async def send_group_message(
                 "can_delete": not deleted,
                 "can_restore": False,
                 "show_deleted_notice": False,
+                "receipt_summary": existing_receipt_summary,
             }
     if data.reply_to_message_id is not None:
         reply_row = conn.execute(
@@ -4762,6 +4995,26 @@ async def send_group_message(
         "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
         (group_id,),
     ).fetchall()
+    recipient_ids = [
+        int(row["user_id"])
+        for row in member_rows
+        if int(row["user_id"]) != int(user["id"])
+    ]
+    if recipient_ids:
+        conn.executemany(
+            """INSERT OR IGNORE INTO group_message_receipts(
+                 message_id,user_id,delivered_at,read_at
+               ) VALUES(?,?,NULL,NULL)""",
+            [
+                (int(cur.lastrowid), recipient_id)
+                for recipient_id in recipient_ids
+            ],
+        )
+        conn.commit()
+    msg["receipt_summary"] = group_receipt_summary(
+        conn,
+        int(cur.lastrowid),
+    )
     if body:
         preview = body
     elif attachment and attachment.get("is_audio"):
@@ -4987,7 +5240,7 @@ async def mark_group_message_read(
     if not group:
         raise HTTPException(404, "Группа не найдена")
     row = conn.execute(
-        """SELECT id,sender_id,deleted_at FROM group_messages
+        """SELECT id,sender_id,created_at,deleted_at FROM group_messages
            WHERE id=? AND group_id=?""",
         (message_id, group_id),
     ).fetchone()
@@ -4995,6 +5248,7 @@ async def mark_group_message_read(
         raise HTTPException(404, "Сообщение не найдено")
 
     read_at = None
+    receipt_changed = False
     if not row["deleted_at"] and int(row["sender_id"]) != int(user["id"]):
         read_at = now_iso()
         conn.execute(
@@ -5003,6 +5257,28 @@ async def mark_group_message_read(
                ) VALUES(?,?,?)""",
             (message_id, user["id"], read_at),
         )
+        receipt_row = conn.execute(
+            """SELECT delivered_at,read_at
+               FROM group_message_receipts
+               WHERE message_id=? AND user_id=?""",
+            (message_id, user["id"]),
+        ).fetchone()
+        if receipt_row is None:
+            ensure_group_message_receipts(
+                conn,
+                message_id,
+                group_id,
+                int(row["sender_id"]),
+                row["created_at"],
+            )
+        receipt_update = conn.execute(
+            """UPDATE group_message_receipts
+               SET delivered_at=COALESCE(delivered_at, ?),
+                   read_at=COALESCE(read_at, ?)
+               WHERE message_id=? AND user_id=? AND read_at IS NULL""",
+            (read_at, read_at, message_id, user["id"]),
+        )
+        receipt_changed = bool(receipt_update.rowcount)
         conn.commit()
 
     unread_count = group_unread_count_for_user(
@@ -5021,7 +5297,80 @@ async def mark_group_message_read(
             "unread_count": unread_count,
         },
     )
-    return {"ok": True, "unread_count": unread_count}
+    if receipt_changed:
+        await push_group_receipt_update(
+            conn,
+            group_id,
+            message_id,
+        )
+    return {
+        "ok": True,
+        "unread_count": unread_count,
+        "receipt_summary": group_receipt_summary(conn, message_id),
+    }
+
+
+@app.post("/api/groups/{group_id}/messages/{message_id}/delivered")
+async def mark_group_message_delivered(
+    group_id: int,
+    message_id: int,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    group = group_for_user(conn, group_id, user["id"])
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+
+    row = conn.execute(
+        """SELECT id,sender_id,created_at,deleted_at
+           FROM group_messages
+           WHERE id=? AND group_id=?""",
+        (message_id, group_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Сообщение не найдено")
+
+    receipt_row = conn.execute(
+        """SELECT delivered_at,read_at
+           FROM group_message_receipts
+           WHERE message_id=? AND user_id=?""",
+        (message_id, user["id"]),
+    ).fetchone()
+    if receipt_row is None:
+        ensure_group_message_receipts(
+            conn,
+            message_id,
+            group_id,
+            int(row["sender_id"]),
+            row["created_at"],
+        )
+
+    changed = False
+    delivered_at = None
+    if int(row["sender_id"]) != int(user["id"]):
+        delivered_at = now_iso()
+        update = conn.execute(
+            """UPDATE group_message_receipts
+               SET delivered_at=COALESCE(delivered_at, ?)
+               WHERE message_id=? AND user_id=?
+                 AND delivered_at IS NULL""",
+            (delivered_at, message_id, user["id"]),
+        )
+        changed = bool(update.rowcount)
+
+    conn.commit()
+    if changed:
+        await push_group_receipt_update(
+            conn,
+            group_id,
+            message_id,
+        )
+
+    return {
+        "ok": True,
+        "delivered_at": delivered_at,
+        "receipt_summary": group_receipt_summary(conn, message_id),
+    }
 
 
 @app.get("/api/groups/{group_id}/messages/{message_id}/seen-by")
@@ -5035,31 +5384,80 @@ def group_message_seen_by(
     if not group:
         raise HTTPException(404, "Группа не найдена")
     message = conn.execute(
-        "SELECT id,sender_id FROM group_messages WHERE id=? AND group_id=?",
+        """SELECT id,sender_id,created_at
+           FROM group_messages
+           WHERE id=? AND group_id=?""",
         (message_id, group_id),
     ).fetchone()
     if not message:
         raise HTTPException(404, "Сообщение не найдено")
 
+    if int(message["sender_id"]) != int(user["id"]):
+        read_rows = conn.execute(
+            """SELECT u.id,u.username,u.display_name,
+                      a.stored_name AS avatar_stored_name,
+                      gmr.read_at
+               FROM group_message_reads gmr
+               JOIN users u ON u.id=gmr.user_id
+               LEFT JOIN uploads a ON a.id=u.avatar_id
+               WHERE gmr.message_id=? AND gmr.user_id<>?
+               ORDER BY gmr.read_at""",
+            (message_id, message["sender_id"]),
+        ).fetchall()
+        return {
+            "message_id": message_id,
+            "viewers": [
+                {**user_json(row), "read_at": row["read_at"]}
+                for row in read_rows
+            ],
+        }
+
+    ensure_group_message_receipts(
+        conn,
+        message_id,
+        group_id,
+        int(message["sender_id"]),
+        message["created_at"],
+    )
+    conn.commit()
+
     rows = conn.execute(
         """SELECT u.id,u.username,u.display_name,
                   a.stored_name AS avatar_stored_name,
-                  gmr.read_at
-           FROM group_message_reads gmr
+                  gmr.delivered_at,gmr.read_at
+           FROM group_message_receipts gmr
            JOIN users u ON u.id=gmr.user_id
            LEFT JOIN uploads a ON a.id=u.avatar_id
-           WHERE gmr.message_id=? AND gmr.user_id<>?
-           ORDER BY gmr.read_at""",
-        (message_id, message["sender_id"]),
+           WHERE gmr.message_id=?
+           ORDER BY
+             CASE
+               WHEN gmr.read_at IS NOT NULL THEN 0
+               WHEN gmr.delivered_at IS NOT NULL THEN 1
+               ELSE 2
+             END,
+             COALESCE(gmr.read_at,gmr.delivered_at) DESC,
+             u.display_name COLLATE NOCASE""",
+        (message_id,),
     ).fetchall()
+
+    recipients = [
+        {
+            **user_json(row),
+            "delivered_at": row["delivered_at"],
+            "read_at": row["read_at"],
+        }
+        for row in rows
+    ]
     return {
         "message_id": message_id,
+        "summary": group_receipt_summary(conn, message_id),
+        "recipients": recipients,
         "viewers": [
-            {**user_json(row), "read_at": row["read_at"]}
-            for row in rows
+            item
+            for item in recipients
+            if item["read_at"]
         ],
     }
-
 
 @app.delete("/api/groups/{group_id}/messages/{message_id}")
 async def delete_group_message(
