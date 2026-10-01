@@ -4405,6 +4405,7 @@ async def edit_group_message(
         "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
         (group_id,),
     ).fetchall()
+    deliveries = []
     for member in members:
         member_id = int(member["user_id"])
         payload = {
@@ -4415,14 +4416,17 @@ async def edit_group_message(
                 or member_id == int(row["sender_id"])
             ),
         }
-        await push(
-            member_id,
+        deliveries.append(
             {
-                "type": "group_message_edited",
-                "group_id": group_id,
-                "message": payload,
-            },
+                "recipient_id": member_id,
+                "payload": {
+                    "type": "group_message_edited",
+                    "group_id": group_id,
+                    "message": payload,
+                },
+            }
         )
+    await deliver_group_batch(deliveries)
 
     return {
         **base,
@@ -4560,17 +4564,20 @@ async def delete_group_message(
         "SELECT user_id,is_admin FROM group_members WHERE group_id=?",
         (group_id,),
     ).fetchall()
-    for member in members:
-        await push(
-            int(member["user_id"]),
-            {
+    deliveries = [
+        {
+            "recipient_id": int(member["user_id"]),
+            "payload": {
                 "type": "group_message_deleted",
                 "group_id": group_id,
                 "message_id": message_id,
                 "deleted_at": deleted_at,
                 "show_deleted_notice": bool(member["is_admin"]),
             },
-        )
+        }
+        for member in members
+    ]
+    await deliver_group_batch(deliveries)
 
     return {
         "ok": True,
@@ -4661,23 +4668,28 @@ async def restore_group_message(
             (message_id,),
         ).fetchall()
     }
+    deliveries = []
     for member in members:
+        member_id = int(member["user_id"])
         payload = {
             **restored,
-            "mentioned_me": int(member["user_id"]) in mentioned_ids,
+            "mentioned_me": member_id in mentioned_ids,
             "can_delete": (
                 bool(member["is_admin"])
-                or int(member["user_id"]) == int(row["sender_id"])
+                or member_id == int(row["sender_id"])
             ),
         }
-        await push(
-            int(member["user_id"]),
+        deliveries.append(
             {
-                "type": "group_message_restored",
-                "group_id": group_id,
-                "message": payload,
-            },
+                "recipient_id": member_id,
+                "payload": {
+                    "type": "group_message_restored",
+                    "group_id": group_id,
+                    "message": payload,
+                },
+            }
         )
+    await deliver_group_batch(deliveries)
 
     return restored
 
@@ -4747,17 +4759,22 @@ async def group_call_token(
             if data.video
             else "Групповой звонок"
         )
-        for member in members:
-            member_id = member["user_id"]
-            await push(member_id, invite_payload)
-            await send_web_push(
-                member_id,
-                kind,
-                f"{user['display_name']} зовёт в «{group['name']}»",
-                f"/?group_call={group_id}&video={1 if data.video else 0}",
-                f"group-call-{group_id}",
-                False,
-            )
+        deliveries = [
+            {
+                "recipient_id": int(member["user_id"]),
+                "payload": invite_payload,
+                "notification": {
+                    "title": kind,
+                    "body": f"{user['display_name']} зовёт в «{group['name']}»",
+                    "url": f"/?group_call={group_id}&video={1 if data.video else 0}",
+                    "tag": f"group-call-{group_id}",
+                    "force": False,
+                    "silent": False,
+                },
+            }
+            for member in members
+        ]
+        await deliver_group_batch(deliveries)
 
     return {
         "server_url": LIVEKIT_WS_URL,
