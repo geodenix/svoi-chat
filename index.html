@@ -1199,16 +1199,54 @@ function muteStatusText(item){
 
 function showAuth(){me=null;active=null;foundUser=null;if(adminRefreshTimer){clearInterval(adminRefreshTimer);adminRefreshTimer=null}if(socket)socket.close();$('auth').classList.remove('hidden');$('app').classList.add('hidden');document.title='Свои';updateAppBadge().catch(()=>{})}
 
+function runWhenIdle(task,timeout=1200){
+  if(typeof requestIdleCallback==='function'){
+    requestIdleCallback(()=>task(),{timeout})
+  }else{
+    setTimeout(task,80)
+  }
+}
+
+function retryStartupLoader(loader,delay=1800){
+  setTimeout(()=>loader().catch(()=>{}),delay)
+}
+
 async function enter(){
   try{
-    me=await api('/api/me');$('meName').textContent=me.display_name;$('meUser').textContent='@'+me.username;setAvatar($('meAvatar'),me);$('adminNav').classList.toggle('hidden',!me.is_server_admin);
-    $('authError').textContent='';$('auth').classList.add('hidden');$('app').classList.remove('hidden');
-    await Promise.all([loadUsers(),loadGroups(),loadCallHistory()]);
+    me=await api('/api/me');
+    $('meName').textContent=me.display_name;
+    $('meUser').textContent='@'+me.username;
+    setAvatar($('meAvatar'),me);
+    $('adminNav').classList.toggle('hidden',!me.is_server_admin);
+    $('authError').textContent='';
+    $('auth').classList.add('hidden');
+    $('app').classList.remove('hidden');
+
+    // Signaling is critical for incoming calls, so connect it before the
+    // heavier chat-list queries finish.
     connectWs();
-    flushOutbox().catch(()=>{});
-    initPush().catch(err=>{setDrawerButton($('notifyBtn'),'⚠️','Уведомления','Ошибка');$('notifyBtn').title=err.message||'Ошибка push'});
     resumeIncomingCallFromUrl().catch(()=>{});
-    resumeGroupCallFromUrl().catch(()=>{})
+    resumeGroupCallFromUrl().catch(()=>{});
+
+    const usersLoad=loadUsers();
+    const groupsLoad=loadGroups();
+    Promise.allSettled([usersLoad,groupsLoad]).then(results=>{
+      if(results[0].status==='rejected')retryStartupLoader(loadUsers);
+      if(results[1].status==='rejected')retryStartupLoader(loadGroups);
+
+      // Offline outbox may refresh chat lists after delivery, so run it only
+      // after the first list requests settle to avoid duplicate startup work.
+      runWhenIdle(()=>flushOutbox().catch(()=>{}),1400)
+    });
+
+    // Push registration and service-worker work are useful but not required
+    // for first paint. Call history is now loaded only when the Calls screen opens.
+    runWhenIdle(()=>{
+      initPush().catch(err=>{
+        setDrawerButton($('notifyBtn'),'⚠️','Уведомления','Ошибка');
+        $('notifyBtn').title=err.message||'Ошибка push'
+      })
+    },1200)
   }catch(err){
     if(err?.status===401){
       token='';localStorage.removeItem('svoi_token');showAuth();return
