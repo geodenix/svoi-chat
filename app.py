@@ -308,6 +308,35 @@ def init_db():
       ON call_quality_samples(recorded_at DESC);
     CREATE INDEX IF NOT EXISTS idx_call_quality_user
       ON call_quality_samples(user_id, recorded_at DESC);
+    CREATE TABLE IF NOT EXISTS client_errors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      message TEXT NOT NULL,
+      source TEXT,
+      line_no INTEGER,
+      column_no INTEGER,
+      stack TEXT,
+      page_path TEXT,
+      client_type TEXT,
+      app_version TEXT,
+      app_version_code INTEGER,
+      user_agent TEXT,
+      network_type TEXT,
+      effective_type TEXT,
+      downlink_mbps REAL,
+      network_rtt_ms REAL,
+      online INTEGER NOT NULL DEFAULT 1,
+      context TEXT,
+      fingerprint TEXT,
+      recorded_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_client_errors_time
+      ON client_errors(recorded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_client_errors_user
+      ON client_errors(user_id, recorded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_client_errors_fingerprint
+      ON client_errors(user_id, fingerprint, recorded_at DESC);
     CREATE TABLE IF NOT EXISTS online_samples (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       recorded_at TEXT NOT NULL,
@@ -774,6 +803,27 @@ class CallQualityIn(BaseModel):
     video_fps: float | None = Field(default=None, ge=0, le=240)
     connection_quality: str | None = Field(default=None, max_length=24)
     end_reason: str | None = Field(default=None, max_length=64)
+
+
+class ClientErrorIn(BaseModel):
+    kind: str = Field(pattern=r"^(js_error|promise_rejection|manual)$")
+    message: str = Field(min_length=1, max_length=1200)
+    source: str | None = Field(default=None, max_length=500)
+    line_no: int | None = Field(default=None, ge=0, le=10000000)
+    column_no: int | None = Field(default=None, ge=0, le=10000000)
+    stack: str | None = Field(default=None, max_length=8000)
+    page_path: str | None = Field(default=None, max_length=500)
+    client_type: str | None = Field(default=None, max_length=64)
+    app_version: str | None = Field(default=None, max_length=64)
+    app_version_code: int | None = Field(default=None, ge=0, le=2147483647)
+    user_agent: str | None = Field(default=None, max_length=1200)
+    network_type: str | None = Field(default=None, max_length=64)
+    effective_type: str | None = Field(default=None, max_length=32)
+    downlink_mbps: float | None = Field(default=None, ge=0, le=100000)
+    network_rtt_ms: float | None = Field(default=None, ge=0, le=60000)
+    online: bool = True
+    context: str | None = Field(default=None, max_length=1000)
+    fingerprint: str | None = Field(default=None, max_length=160)
 
 
 @app.get("/health")
@@ -5435,6 +5485,144 @@ def record_call_quality(
     )
     conn.commit()
     return {"ok": True}
+
+
+@app.post("/api/client-errors")
+def record_client_error(
+    payload: ClientErrorIn,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
+    fingerprint = (payload.fingerprint or "").strip()[:160] or None
+    now = now_iso()
+
+    if fingerprint:
+        recent_since = (
+            datetime.now(timezone.utc) - timedelta(seconds=60)
+        ).isoformat()
+        duplicate = conn.execute(
+            """SELECT id FROM client_errors
+               WHERE user_id=? AND fingerprint=? AND recorded_at>=?
+               ORDER BY id DESC LIMIT 1""",
+            (user["id"], fingerprint, recent_since),
+        ).fetchone()
+        if duplicate:
+            return {"ok": True, "duplicate": True}
+
+    conn.execute(
+        """INSERT INTO client_errors(
+             user_id,kind,message,source,line_no,column_no,stack,page_path,
+             client_type,app_version,app_version_code,user_agent,
+             network_type,effective_type,downlink_mbps,network_rtt_ms,
+             online,context,fingerprint,recorded_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            user["id"],
+            payload.kind,
+            payload.message.strip()[:1200],
+            (payload.source or "").strip()[:500] or None,
+            payload.line_no,
+            payload.column_no,
+            (payload.stack or "").strip()[:8000] or None,
+            (payload.page_path or "").strip()[:500] or None,
+            (payload.client_type or "").strip()[:64] or None,
+            (payload.app_version or "").strip()[:64] or None,
+            payload.app_version_code,
+            (payload.user_agent or "").strip()[:1200] or None,
+            (payload.network_type or "").strip()[:64] or None,
+            (payload.effective_type or "").strip()[:32] or None,
+            payload.downlink_mbps,
+            payload.network_rtt_ms,
+            1 if payload.online else 0,
+            (payload.context or "").strip()[:1000] or None,
+            fingerprint,
+            now,
+        ),
+    )
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    conn.execute("DELETE FROM client_errors WHERE recorded_at<?", (cutoff,))
+    conn.commit()
+    return {"ok": True, "duplicate": False}
+
+
+@app.get("/api/admin/client-errors")
+def admin_client_errors(
+    period: str = Query("day", max_length=12),
+    limit: int = Query(60, ge=1, le=200),
+    user=Depends(require_server_admin),
+    conn=Depends(db),
+):
+    period = period.strip().lower()
+    if period not in {"day", "week"}:
+        raise HTTPException(400, "Период должен быть day или week")
+
+    since = datetime.now(timezone.utc) - (
+        timedelta(hours=24) if period == "day" else timedelta(days=7)
+    )
+    since_iso = since.isoformat()
+
+    rows = conn.execute(
+        """SELECT
+             e.*,u.display_name,u.username
+           FROM client_errors e
+           JOIN users u ON u.id=e.user_id
+           WHERE e.recorded_at>=?
+           ORDER BY e.id DESC
+           LIMIT ?""",
+        (since_iso, limit),
+    ).fetchall()
+
+    summary_row = conn.execute(
+        """SELECT
+             COUNT(*) AS total_errors,
+             COUNT(DISTINCT user_id) AS affected_users,
+             SUM(CASE WHEN kind='js_error' THEN 1 ELSE 0 END) AS js_errors,
+             SUM(CASE WHEN kind='promise_rejection' THEN 1 ELSE 0 END)
+               AS promise_rejections
+           FROM client_errors
+           WHERE recorded_at>=?""",
+        (since_iso,),
+    ).fetchone()
+
+    errors = []
+    for row in rows:
+        errors.append({
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "display_name": row["display_name"],
+            "username": row["username"],
+            "kind": row["kind"],
+            "message": row["message"],
+            "source": row["source"],
+            "line_no": row["line_no"],
+            "column_no": row["column_no"],
+            "stack": row["stack"],
+            "page_path": row["page_path"],
+            "client_type": row["client_type"],
+            "app_version": row["app_version"],
+            "app_version_code": row["app_version_code"],
+            "user_agent": row["user_agent"],
+            "network_type": row["network_type"],
+            "effective_type": row["effective_type"],
+            "downlink_mbps": row["downlink_mbps"],
+            "network_rtt_ms": row["network_rtt_ms"],
+            "online": bool(row["online"]),
+            "context": row["context"],
+            "recorded_at": row["recorded_at"],
+        })
+
+    return {
+        "period": period,
+        "summary": {
+            "total_errors": int(summary_row["total_errors"] or 0),
+            "affected_users": int(summary_row["affected_users"] or 0),
+            "js_errors": int(summary_row["js_errors"] or 0),
+            "promise_rejections": int(
+                summary_row["promise_rejections"] or 0
+            ),
+        },
+        "errors": errors,
+    }
 
 
 @app.get("/api/admin/call-quality")
