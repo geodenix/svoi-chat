@@ -7369,19 +7369,21 @@ function privateVideoTierForNetwork(network){
   const hasLoss=Number.isFinite(loss)&&loss>=0;
   const hasJitter=Number.isFinite(jitter)&&jitter>=0;
 
-  // Video yields first when the link starts getting unstable.
+  // Keep private-call video sharp. Do not drop a quality tier because of
+  // a short bandwidth-estimator dip; degrade only when the link is
+  // meaningfully constrained.
   if(
-    (hasRtt&&rtt>=600)
-    ||(hasBandwidth&&bandwidth<420000)
-    ||(hasLoss&&loss>=7)
-    ||(hasJitter&&jitter>=70)
+    (hasRtt&&rtt>=850)
+    ||(hasBandwidth&&bandwidth<320000)
+    ||(hasLoss&&loss>=11)
+    ||(hasJitter&&jitter>=110)
   )return 'poor';
 
   if(
-    (hasRtt&&rtt>=300)
-    ||(hasBandwidth&&bandwidth<1000000)
-    ||(hasLoss&&loss>=2.5)
-    ||(hasJitter&&jitter>=30)
+    (hasRtt&&rtt>=480)
+    ||(hasBandwidth&&bandwidth<760000)
+    ||(hasLoss&&loss>=5)
+    ||(hasJitter&&jitter>=55)
   )return 'fair';
 
   return 'good'
@@ -7436,18 +7438,18 @@ async function applyPrivateVideoTier(call,tier,network=null){
   if(!sender?.track||typeof sender.getParameters!=='function'||typeof sender.setParameters!=='function')return;
 
   const profiles={
-    good:{maxBitrate:1400000,maxFramerate:24,scaleResolutionDownBy:1},
-    fair:{maxBitrate:520000,maxFramerate:18,scaleResolutionDownBy:1.75},
-    poor:{maxBitrate:220000,maxFramerate:12,scaleResolutionDownBy:2.75}
+    good:{maxBitrate:2600000,maxFramerate:30,scaleResolutionDownBy:1},
+    fair:{maxBitrate:1100000,maxFramerate:22,scaleResolutionDownBy:1},
+    poor:{maxBitrate:460000,maxFramerate:15,scaleResolutionDownBy:1.5}
   };
   const profile=profiles[tier]||profiles.good;
   let maxBitrate=profile.maxBitrate;
 
   const bandwidth=Number(network?.availableOutgoingBitrate);
   if(Number.isFinite(bandwidth)&&bandwidth>0){
-    // Reserve room for Opus speech, RTCP and short bandwidth estimation spikes.
-    const reservedForAudioAndOverhead=160000;
-    const videoBudget=Math.max(120000,bandwidth-reservedForAudioAndOverhead);
+    // Reserve enough room for speech/RTCP without starving the video track.
+    const reservedForAudioAndOverhead=110000;
+    const videoBudget=Math.max(280000,bandwidth-reservedForAudioAndOverhead);
     maxBitrate=Math.min(maxBitrate,videoBudget)
   }
 
@@ -7461,7 +7463,9 @@ async function applyPrivateVideoTier(call,tier,network=null){
       encoding.maxFramerate=profile.maxFramerate;
       encoding.scaleResolutionDownBy=profile.scaleResolutionDownBy
     }
-    params.degradationPreference='balanced';
+    // Prefer keeping image resolution in a 1-to-1 video call.
+    // WebRTC may reduce frame rate before making the picture blurry.
+    params.degradationPreference='maintain-resolution';
     await sender.setParameters(params);
     if(currentCall===call){
       call.appliedVideoTier=tier;
@@ -7482,8 +7486,8 @@ async function maybeAdaptPrivateVideo(call,network){
     const bandwidth=Number(network?.availableOutgoingBitrate);
     if(Number.isFinite(bandwidth)&&bandwidth>0){
       const desiredCap=Math.min(
-        tier==='good'?1400000:(tier==='fair'?520000:220000),
-        Math.max(120000,bandwidth-160000)
+        tier==='good'?2600000:(tier==='fair'?1100000:460000),
+        Math.max(280000,bandwidth-110000)
       );
       const currentCap=Number(call.appliedVideoBitrate)||0;
       if(
@@ -7505,11 +7509,11 @@ async function maybeAdaptPrivateVideo(call,network){
 
   const upgrading=networkTierRank(tier)>networkTierRank(currentTier);
   const requiredSamples=upgrading
-    ?4
-    :(severePrivateNetworkProblem(network)?1:2);
+    ?2
+    :(severePrivateNetworkProblem(network)?1:3);
   if((call.pendingVideoTierSamples||0)<requiredSamples)return;
 
-  const minDelay=upgrading?7000:3000;
+  const minDelay=upgrading?2800:4500;
   if(call.lastVideoTierChangeAt&&Date.now()-call.lastVideoTierChangeAt<minDelay)return;
 
   call.pendingVideoTier=null;
@@ -7779,7 +7783,7 @@ async function getCallMedia(video){
       facingMode:{ideal:cameraFacing},
       width:{ideal:1280,max:1280},
       height:{ideal:720,max:720},
-      frameRate:{ideal:24,max:30}
+      frameRate:{ideal:30,max:30}
     }:false
   });
   const timeout=new Promise((_,reject)=>setTimeout(()=>{
