@@ -173,6 +173,29 @@ if ! git merge --ff-only origin/main; then
   exit 1
 fi
 
+FETCHED_SHA="$(git rev-parse HEAD)"
+if [ "$FETCHED_SHA" = "$PREVIOUS_SHA" ]; then
+  log "No code changes detected: $FETCHED_SHA"
+  if health_ok; then
+    log "Service is already healthy; skipping restart"
+    exit 0
+  fi
+
+  log "No code changes, but health check failed; restarting service for recovery"
+  if ! systemctl restart "$SERVICE"; then
+    log "Recovery restart failed"
+    exit 1
+  fi
+  if health_ok; then
+    log "Service recovered successfully"
+    exit 0
+  fi
+
+  journalctl -u "$SERVICE" -n 80 --no-pager || true
+  log "Service is still unhealthy after recovery restart"
+  exit 1
+fi
+
 if ! ensure_venv || ! validate_release; then
   rollback
   exit 1
