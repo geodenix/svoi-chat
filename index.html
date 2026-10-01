@@ -1689,15 +1689,15 @@ function currentSessionDeviceLabel(){
   const ua=navigator.userAgent||'';
   let platform='Web';
   if(/Android/i.test(ua))platform='Android';
-  else if(/iPhone|iPad|iPod/i.test(ua))platform='iPhone/iPad';
+  else if(/iPhone|iPad|iPod/i.test(ua))platform='iPhone';
   else if(/Windows/i.test(ua))platform='Windows';
   else if(/Macintosh|Mac OS X/i.test(ua))platform='macOS';
-  let mode='браузер';
+  let mode='browser';
   try{
-    if(window.Capacitor?.isNativePlatform?.())mode='приложение';
-    else if(window.matchMedia('(display-mode: standalone)').matches)mode='PWA'
+    if(window.Capacitor?.isNativePlatform?.())mode='app';
+    else if(window.matchMedia('(display-mode: standalone)').matches)mode='pwa'
   }catch{}
-  return platform+' · '+mode
+  return platform+'|'+mode
 }
 
 const api=async(path,opt={})=>{
