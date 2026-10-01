@@ -3074,6 +3074,48 @@ async def push(user_id: int, payload: dict) -> int:
     return sent
 
 
+GROUP_DELIVERY_CONCURRENCY = 12
+group_delivery_semaphore = asyncio.Semaphore(GROUP_DELIVERY_CONCURRENCY)
+
+
+async def deliver_group_recipient(
+    recipient_id: int,
+    payload: dict,
+    notification: dict | None = None,
+):
+    async with group_delivery_semaphore:
+        jobs = [push(recipient_id, payload)]
+        if notification:
+            jobs.append(
+                send_web_push(
+                    recipient_id,
+                    notification["title"],
+                    notification["body"],
+                    notification.get("url", "/"),
+                    notification.get("tag", "svoi"),
+                    notification.get("force", False),
+                    notification.get("silent", False),
+                )
+            )
+        await asyncio.gather(*jobs, return_exceptions=True)
+
+
+async def deliver_group_batch(deliveries):
+    if not deliveries:
+        return
+    await asyncio.gather(
+        *(
+            deliver_group_recipient(
+                item["recipient_id"],
+                item["payload"],
+                item.get("notification"),
+            )
+            for item in deliveries
+        ),
+        return_exceptions=True,
+    )
+
+
 @app.post("/api/messages")
 async def send_message(data: MessageIn, user=Depends(current_user), conn=Depends(db)):
     if data.recipient_id == user["id"]:
@@ -3543,6 +3585,7 @@ async def forward_message(
         else "Пересланное сообщение"
     )
 
+    deliveries = []
     for member in members:
         if member["user_id"] == user["id"]:
             continue
@@ -3552,38 +3595,45 @@ async def forward_message(
             "mentioned_me": recipient_id in mention_ids,
             "can_delete": bool(member["is_admin"]),
         }
-        await push(
-            recipient_id,
-            {"type": "group_message", "message": live_msg},
-        )
         should_notify = (
             recipient_id in mention_ids
             if mention_ids
             else True
         )
+        notification = None
         if should_notify:
-            await send_web_push(
-                recipient_id,
-                (
+            notification = {
+                "title": (
                     f"Упоминание · {group['name']}"
                     if mention_ids
                     else f"{group['name']} · {user['display_name']}"
                 ),
-                (
+                "body": (
                     f"{user['display_name']}: ↪ {preview}"
                     if mention_ids
                     else "↪ " + preview
                 ),
-                "/",
-                f"group-{data.target_chat_id}",
-                silent=is_chat_muted(
+                "url": "/",
+                "tag": f"group-{data.target_chat_id}",
+                "silent": is_chat_muted(
                     conn,
                     recipient_id,
                     "group",
                     data.target_chat_id,
                 ),
-            )
+            }
+        deliveries.append(
+            {
+                "recipient_id": recipient_id,
+                "payload": {
+                    "type": "group_message",
+                    "message": live_msg,
+                },
+                "notification": notification,
+            }
+        )
 
+    await deliver_group_batch(deliveries)
     return msg
 
 
@@ -4229,45 +4279,55 @@ async def send_group_message(
         preview = "📎 " + attachment["name"]
     else:
         preview = "Новое сообщение"
+    deliveries = []
     for row in member_rows:
-        if row["user_id"] != user["id"]:
-            recipient_id = int(row["user_id"])
-            live_msg = {
-                **msg,
-                "mentioned_me": recipient_id in mention_ids,
-                "can_delete": bool(row["is_admin"]),
-            }
-            await push(
-                recipient_id,
-                {"type": "group_message", "message": live_msg},
-            )
-            should_notify = (
-                recipient_id in mention_ids
-                if mention_ids
-                else True
-            )
-            if should_notify:
-                await send_web_push(
+        if row["user_id"] == user["id"]:
+            continue
+        recipient_id = int(row["user_id"])
+        live_msg = {
+            **msg,
+            "mentioned_me": recipient_id in mention_ids,
+            "can_delete": bool(row["is_admin"]),
+        }
+        should_notify = (
+            recipient_id in mention_ids
+            if mention_ids
+            else True
+        )
+        notification = None
+        if should_notify:
+            notification = {
+                "title": (
+                    f"Упоминание · {group['name']}"
+                    if mention_ids
+                    else f"{group['name']} · {user['display_name']}"
+                ),
+                "body": (
+                    f"{user['display_name']}: {preview}"
+                    if mention_ids
+                    else preview
+                ),
+                "url": "/",
+                "tag": f"group-{group_id}",
+                "silent": is_chat_muted(
+                    conn,
                     recipient_id,
-                    (
-                        f"Упоминание · {group['name']}"
-                        if mention_ids
-                        else f"{group['name']} · {user['display_name']}"
-                    ),
-                    (
-                        f"{user['display_name']}: {preview}"
-                        if mention_ids
-                        else preview
-                    ),
-                    "/",
-                    f"group-{group_id}",
-                    silent=is_chat_muted(
-                        conn,
-                        recipient_id,
-                        "group",
-                        group_id,
-                    ),
-                )
+                    "group",
+                    group_id,
+                ),
+            }
+        deliveries.append(
+            {
+                "recipient_id": recipient_id,
+                "payload": {
+                    "type": "group_message",
+                    "message": live_msg,
+                },
+                "notification": notification,
+            }
+        )
+
+    await deliver_group_batch(deliveries)
     return msg
 
 
