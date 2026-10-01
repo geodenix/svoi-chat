@@ -1794,7 +1794,20 @@ def set_chat_mute(
 def users(user=Depends(current_user), conn=Depends(db)):
     now = now_iso()
     rows = conn.execute(
-        """SELECT u.id,u.username,u.display_name,u.last_seen_at,
+        """WITH peer_ids(id) AS (
+             SELECT contact_user_id
+             FROM contacts
+             WHERE user_id=?
+             UNION
+             SELECT recipient_id
+             FROM messages
+             WHERE sender_id=?
+             UNION
+             SELECT sender_id
+             FROM messages
+             WHERE recipient_id=?
+           )
+           SELECT u.id,u.username,u.display_name,u.last_seen_at,
                   a.stored_name AS avatar_stored_name,
                   EXISTS(
                     SELECT 1 FROM contacts c
@@ -1825,20 +1838,10 @@ def users(user=Depends(current_user), conn=Depends(db)):
                       AND (cm.muted_until IS NULL OR cm.muted_until>?)
                     LIMIT 1
                   ) AS muted_until
-           FROM users u
+           FROM peer_ids peers
+           JOIN users u ON u.id=peers.id
            LEFT JOIN uploads a ON a.id=u.avatar_id
            WHERE u.id<>?
-             AND (
-               EXISTS(
-                 SELECT 1 FROM contacts c
-                 WHERE c.user_id=? AND c.contact_user_id=u.id
-               )
-               OR EXISTS(
-                 SELECT 1 FROM messages m
-                 WHERE (m.sender_id=? AND m.recipient_id=u.id)
-                    OR (m.sender_id=u.id AND m.recipient_id=?)
-               )
-             )
            ORDER BY u.display_name""",
         (
             user["id"],
@@ -1846,12 +1849,12 @@ def users(user=Depends(current_user), conn=Depends(db)):
             user["id"],
             user["id"],
             user["id"],
+            user["id"],
+            user["id"],
+            user["id"],
             now,
             user["id"],
             now,
-            user["id"],
-            user["id"],
-            user["id"],
             user["id"],
         ),
     ).fetchall()
@@ -3749,7 +3752,11 @@ def get_groups(user=Depends(current_user), conn=Depends(db)):
         """SELECT g.id,g.name,g.owner_id,g.created_at,
                   ga.stored_name AS avatar_stored_name,
                   mine.is_admin AS is_admin,
-                  COUNT(DISTINCT gm2.user_id) AS member_count,
+                  (
+                    SELECT COUNT(*)
+                    FROM group_members gm2
+                    WHERE gm2.group_id=g.id
+                  ) AS member_count,
                   (
                     SELECT COUNT(*) FROM group_messages unread
                     WHERE unread.group_id=g.id
@@ -3776,12 +3783,10 @@ def get_groups(user=Depends(current_user), conn=Depends(db)):
                       AND (cm.muted_until IS NULL OR cm.muted_until>?)
                     LIMIT 1
                   ) AS muted_until
-           FROM chat_groups g
-           JOIN group_members mine
-             ON mine.group_id=g.id AND mine.user_id=?
-           LEFT JOIN group_members gm2 ON gm2.group_id=g.id
+           FROM group_members mine
+           JOIN chat_groups g ON g.id=mine.group_id
            LEFT JOIN uploads ga ON ga.id=g.avatar_id
-           GROUP BY g.id
+           WHERE mine.user_id=?
            ORDER BY g.id DESC""",
         (
             user["id"],
