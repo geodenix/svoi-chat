@@ -352,6 +352,32 @@ body.drawer-open{overflow:hidden}
   .group-connection-quality{padding:4px 6px;font-size:9px!important}
 }
 </style>
+<style>
+.tile-ping-status{
+  position:absolute;
+  z-index:8;
+  right:8px;
+  bottom:36px;
+  padding:4px 7px;
+  border-radius:999px;
+  background:#07101eb8;
+  border:1px solid #ffffff24;
+  color:#dce9f8;
+  font-size:10px;
+  font-weight:750;
+  line-height:1;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+  pointer-events:none;
+  text-shadow:0 1px 4px #000
+}
+.group-call-strip .tile-ping-status{
+  right:5px;
+  bottom:28px;
+  padding:3px 5px;
+  font-size:8px
+}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -5055,6 +5081,93 @@ function isGroupMicrophonePublication(publication){
     ||String(source).toLowerCase().includes('microphone')
 }
 
+function updateGroupParticipantPing(identity,value){
+  const tile=$(groupTileId(identity));
+  if(!tile)return;
+  let badge=tile.querySelector('.tile-ping-status');
+  if(!badge){
+    badge=document.createElement('div');
+    badge.className='tile-ping-status';
+    badge.textContent='Пинг —';
+    tile.append(badge)
+  }
+
+  const ms=Number(value);
+  if(Number.isFinite(ms)&&ms>=0){
+    const rounded=Math.max(1,Math.round(ms));
+    badge.textContent='Пинг '+rounded+' мс';
+    badge.title='Задержка до сервера: '+rounded+' мс'
+  }else{
+    badge.textContent='Пинг —';
+    badge.title='Пинг ещё не измерен'
+  }
+}
+
+function stopGroupPingMonitoring(state=groupCallState){
+  if(!state)return;
+  if(state.pingTimer){
+    clearInterval(state.pingTimer);
+    state.pingTimer=null
+  }
+  if(state.pingPending?.clear)state.pingPending.clear()
+}
+
+function sendGroupPingProbe(state=groupCallState){
+  if(!state||groupCallState!==state||state.manualLeave)return;
+  if(!socket||socket.readyState!==WebSocket.OPEN)return;
+
+  const nonce=Date.now()+'-'+(++state.pingSeq);
+  state.pingPending.set(nonce,performance.now());
+
+  while(state.pingPending.size>8){
+    const first=state.pingPending.keys().next().value;
+    state.pingPending.delete(first)
+  }
+
+  try{
+    wsSend({
+      type:'group_ping_probe',
+      nonce
+    })
+  }catch{}
+}
+
+function startGroupPingMonitoring(state=groupCallState){
+  if(!state||groupCallState!==state)return;
+  stopGroupPingMonitoring(state);
+  state.pingPending=new Map();
+  state.pingSeq=0;
+
+  const localIdentity=String(state.room?.localParticipant?.identity||'');
+  if(localIdentity)updateGroupParticipantPing(localIdentity,null);
+
+  sendGroupPingProbe(state);
+  state.pingTimer=setInterval(()=>{
+    sendGroupPingProbe(state)
+  },4000)
+}
+
+function handleGroupPingPong(data){
+  const state=groupCallState;
+  if(!state?.pingPending)return;
+  const nonce=String(data?.nonce||'');
+  const started=state.pingPending.get(nonce);
+  if(started==null)return;
+  state.pingPending.delete(nonce);
+
+  const ping=Math.max(1,Math.round(performance.now()-started));
+  const identity=String(state.room?.localParticipant?.identity||'');
+  if(identity)updateGroupParticipantPing(identity,ping);
+
+  try{
+    wsSend({
+      type:'group_call_ping',
+      group_id:state.groupId,
+      ping_ms:ping
+    })
+  }catch{}
+}
+
 function ensureGroupTile(participant,isLocal=false){
   const identity=participant.identity||'local';
   const id=groupTileId(identity);
@@ -5075,7 +5188,11 @@ function ensureGroupTile(participant,isLocal=false){
   speaking.className='tile-speaking-status hidden';
   speaking.setAttribute('aria-label','Сейчас говорит');
   speaking.textContent='🎙 Говорит';
-  tile.append(avatar,name,mic,speaking);
+  const ping=document.createElement('div');
+  ping.className='tile-ping-status';
+  ping.textContent='Пинг —';
+  ping.title='Пинг ещё не измерен';
+  tile.append(avatar,name,mic,speaking,ping);
   tile.title='Нажмите, чтобы увеличить участника';
   tile.addEventListener('click',event=>{
     if(event.target.closest('button'))return;
@@ -5090,6 +5207,8 @@ function ensureGroupTile(participant,isLocal=false){
     grid?.append(tile)
   }
   updateGroupMicBadge(participant,isLocal);
+  const knownPing=groupCallState?.participantPings?.get?.(String(identity));
+  updateGroupParticipantPing(identity,knownPing??null);
   return tile
 }
 
@@ -5361,7 +5480,11 @@ async function joinGroupCall(groupId,video=false,invite=false){
       videoQualityFrame:0,
       videoNetworkCap:'high',
       pendingSpeakers:[],
-      activeSpeakerIds:new Set()
+      activeSpeakerIds:new Set(),
+      participantPings:new Map(),
+      pingPending:new Map(),
+      pingSeq:0,
+      pingTimer:null
     };
 
     $('groupCallGrid').replaceChildren();
@@ -5433,7 +5556,8 @@ async function joinGroupCall(groupId,video=false,invite=false){
           setGroupConnectionQuality('good');
           groupCallState.lastParticipantCount=-1;
           refreshGroupCount();
-          requestAnimationFrame(()=>scheduleGroupRemoteVideoQualitySync())
+          requestAnimationFrame(()=>scheduleGroupRemoteVideoQualitySync());
+          startGroupPingMonitoring(groupCallState)
         }
       })
       .on(LivekitClient.RoomEvent.Disconnected,()=>{
@@ -5474,7 +5598,8 @@ async function joinGroupCall(groupId,video=false,invite=false){
     if(video)await room.localParticipant.setCameraEnabled(true);
 
     await renderGroupLocalTracks();
-    refreshGroupCount()
+    refreshGroupCount();
+    startGroupPingMonitoring(groupCallState)
   }catch(err){
     try{room?.disconnect()}catch{}
     groupCallState=null;
@@ -5492,6 +5617,7 @@ function leaveGroupCall(disconnect=true){
   const state=groupCallState;
   if(state){
     state.manualLeave=true;
+    stopGroupPingMonitoring(state);
     if(state.speakerFrame){
       cancelAnimationFrame(state.speakerFrame);
       state.speakerFrame=0
@@ -7501,9 +7627,26 @@ function connectWs(){
       sendPrivateMuteState(true);
       sendPrivateVideoState(true)
     }
+    if(groupCallState){
+      sendGroupPingProbe(groupCallState)
+    }
   };
   socket.onmessage=e=>{
     const data=JSON.parse(e.data);
+    if(data.type==='group_ping_pong'){
+      handleGroupPingPong(data);
+      return
+    }
+    if(data.type==='group_call_ping'){
+      const state=groupCallState;
+      if(state&&Number(data.group_id)===Number(state.groupId)){
+        const identity=String(data.identity||('user-'+data.from_user_id));
+        const ping=Number(data.ping_ms);
+        state.participantPings.set(identity,ping);
+        updateGroupParticipantPing(identity,ping)
+      }
+      return
+    }
     if(['call_offer','call_answer','call_video_offer','call_video_answer','call_video_state','call_mute','ice_candidate','call_reject','call_end','call_unavailable'].includes(data.type)){
       enqueueCallSignal(data);return
     }
