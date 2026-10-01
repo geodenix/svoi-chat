@@ -2388,7 +2388,9 @@ function handleTypingInput(){
     return
   }
   const now=Date.now();
-  if(now-lastTypingSentAt>1000){
+  // Typing is a presence hint, not a per-keystroke event. A slower heartbeat
+  // cuts WebSocket traffic substantially while keeping the indicator live.
+  if(now-lastTypingSentAt>2500){
     sendTypingState(true);
     lastTypingSentAt=now
   }
@@ -2397,7 +2399,7 @@ function handleTypingInput(){
     sendTypingState(false);
     typingStopTimer=null;
     lastTypingSentAt=0
-  },1600)
+  },1800)
 }
 
 function refreshTypingStatus(){
@@ -6480,7 +6482,7 @@ function connectWs(){
           chat_id:Number(data.chat_id),
           from_user_id:Number(data.from_user_id),
           from_name:data.from_name||'Участник',
-          expires:Date.now()+2300
+          expires:Date.now()+4200
         });
         setTimeout(()=>{
           const item=incomingTyping.get(key);
@@ -6488,7 +6490,7 @@ function connectWs(){
             incomingTyping.delete(key);
             refreshTypingStatus()
           }
-        },2400)
+        },4300)
       }else{
         incomingTyping.delete(key)
       }
