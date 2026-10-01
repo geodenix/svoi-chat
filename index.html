@@ -436,6 +436,15 @@ body.drawer-open{overflow:hidden}
   box-shadow:0 10px 32px #000b
 }
 </style>
+<style>
+.item .draft-preview{
+  color:#ffb65c!important;
+  font-weight:700
+}
+.item.active .draft-preview{
+  color:#ffd08a!important
+}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -2132,16 +2141,60 @@ function renderUnreadBadge(container,item){
   }
 }
 
+function draftTextForTarget(target){
+  const key=draftKey(target);
+  if(!key)return '';
+  return (localStorage.getItem(key)||'').trim()
+}
+
+function draftPreviewText(value){
+  const text=String(value||'').replace(/\s+/g,' ').trim();
+  if(!text)return '';
+  return text.length>46?text.slice(0,43)+'…':text
+}
+
+function updateDraftListPreview(target=active){
+  if(!target?.data?.id)return;
+  const selector='.item[data-chat-type="'+target.type+'"][data-chat-id="'+Number(target.data.id)+'"]';
+  const row=document.querySelector(selector);
+  const small=row?.querySelector('.txt small');
+  if(!small)return;
+
+  const draft=draftTextForTarget(target);
+  small.classList.toggle('draft-preview',!!draft);
+  if(draft){
+    small.textContent='Черновик: '+draftPreviewText(draft);
+    return
+  }
+
+  if(target.type==='user'){
+    const user=users.find(item=>Number(item.id)===Number(target.data.id))||target.data;
+    small.textContent='@'+user.username+' · '+(
+      user.blocked_by_me?'🚫 заблокирован':formatLastSeen(user)
+    )
+  }else{
+    const group=groups.find(item=>Number(item.id)===Number(target.data.id))||target.data;
+    small.textContent=(group.member_count||0)+' участников'
+  }
+}
+
 function renderUsers(){
   const box=$('users');box.replaceChildren();
   if(!users.length){box.innerHTML='<div class="muted" style="padding:12px">Контактов и личных диалогов пока нет. Найди человека по @тегу.</div>';return}
   for(const u of users){
     const b=document.createElement('button');
     b.className='item'+(active?.type==='user'&&active.data.id===u.id?' active':'');
+    b.dataset.chatType='user';
+    b.dataset.chatId=String(u.id);
     b.innerHTML='<span class="avatar"></span><span class="txt"><strong></strong><small class="muted"></small></span><span class="chat-badges"><span class="chat-mute-icon hidden">🔕</span><span class="unread-badge hidden"></span></span><span class="dot '+(u.online?'on':'')+'"></span>';
     setAvatar(b.querySelector('.avatar'),u);
     b.querySelector('strong').textContent=u.display_name;
-    b.querySelector('small').textContent='@'+u.username+' · '+(u.blocked_by_me?'🚫 заблокирован':formatLastSeen(u));
+    const userDraft=draftTextForTarget({type:'user',data:u});
+    const userSmall=b.querySelector('small');
+    userSmall.classList.toggle('draft-preview',!!userDraft);
+    userSmall.textContent=userDraft
+      ?'Черновик: '+draftPreviewText(userDraft)
+      :('@'+u.username+' · '+(u.blocked_by_me?'🚫 заблокирован':formatLastSeen(u)));
     renderUnreadBadge(b,u);
     b.onclick=()=>openUser(u);
     box.append(b)
@@ -2154,10 +2207,17 @@ function renderGroups(){
   for(const g of groups){
     const b=document.createElement('button');
     b.className='item'+(active?.type==='group'&&active.data.id===g.id?' active':'');
+    b.dataset.chatType='group';
+    b.dataset.chatId=String(g.id);
     b.innerHTML='<span class="avatar group-avatar">#</span><span class="txt"><strong></strong><small class="muted"></small></span><span class="chat-badges"><span class="chat-mute-icon hidden">🔕</span><span class="unread-badge hidden"></span></span>';
     setGroupAvatar(b.querySelector('.avatar'),g);
     b.querySelector('strong').textContent=g.name;
-    b.querySelector('small').textContent=g.member_count+' участников';
+    const groupDraft=draftTextForTarget({type:'group',data:g});
+    const groupSmall=b.querySelector('small');
+    groupSmall.classList.toggle('draft-preview',!!groupDraft);
+    groupSmall.textContent=groupDraft
+      ?'Черновик: '+draftPreviewText(groupDraft)
+      :(g.member_count+' участников');
     renderUnreadBadge(b,g);
     b.onclick=()=>openGroup(g);
     box.append(b)
@@ -2769,8 +2829,9 @@ function saveCurrentDraft(){
   const key=draftKey();
   if(!key)return;
   const value=$('text').value;
-  if(value)localStorage.setItem(key,value);
-  else localStorage.removeItem(key)
+  if(value.trim())localStorage.setItem(key,value);
+  else localStorage.removeItem(key);
+  updateDraftListPreview(active)
 }
 
 function restoreCurrentDraft(){
@@ -2778,12 +2839,15 @@ function restoreCurrentDraft(){
   const value=key?(localStorage.getItem(key)||''):'';
   $('text').value=value;
   resizeComposerTextarea();
-  syncSend()
+  syncSend();
+  updateDraftListPreview(active)
 }
 
 function clearCurrentDraft(){
-  const key=draftKey();
-  if(key)localStorage.removeItem(key)
+  const target=active;
+  const key=draftKey(target);
+  if(key)localStorage.removeItem(key);
+  updateDraftListPreview(target)
 }
 
 function sendTypingState(typing){
