@@ -605,9 +605,21 @@ def phone_lookup_hash(value: str) -> tuple[str, str]:
 def request_session_meta(request: Request | None) -> tuple[str, str]:
     if request is None:
         return "Неизвестное устройство", ""
-    device_label = str(request.headers.get("x-svoi-device") or "").strip()[:120]
+    raw_label = str(request.headers.get("x-svoi-device") or "").strip()[:120]
     user_agent = str(request.headers.get("user-agent") or "").strip()[:500]
-    if not device_label:
+    platform, separator, mode = raw_label.partition("|")
+    platform = re.sub(r"[^A-Za-z0-9 ./_-]", "", platform).strip()[:60]
+    mode = re.sub(r"[^A-Za-z0-9_-]", "", mode).strip().lower()[:24] if separator else ""
+    mode_labels = {
+        "app": "приложение",
+        "pwa": "PWA",
+        "browser": "браузер",
+    }
+    if platform:
+        device_label = platform
+        if mode in mode_labels:
+            device_label += " · " + mode_labels[mode]
+    else:
         device_label = "Браузер"
     return device_label, user_agent
 
@@ -1131,11 +1143,21 @@ def session_json(row, current_hash: str | None = None) -> dict:
 
 @app.get("/api/account/sessions")
 def list_account_sessions(
+    request: Request,
     authorization: str | None = Header(default=None),
     user=Depends(current_user),
     conn=Depends(db),
 ):
     current_hash = authorization_token_hash(authorization)
+    if current_hash:
+        device_label, user_agent = request_session_meta(request)
+        conn.execute(
+            """UPDATE sessions
+               SET device_label=?,user_agent=?,last_seen_at=?
+               WHERE token_hash=?""",
+            (device_label, user_agent, now_iso(), current_hash),
+        )
+        conn.commit()
     rows = conn.execute(
         """SELECT token_hash,session_id,device_label,user_agent,created_at,last_seen_at
            FROM sessions
