@@ -573,6 +573,92 @@ body.drawer-open{overflow:hidden}
   }
 }
 </style>
+<style>
+.group-tile .tile-name{cursor:pointer}
+.group-call-profile-dialog{
+  width:min(92vw,390px);
+  padding:22px;
+  text-align:center;
+  overflow:visible
+}
+.group-call-profile-close{
+  position:absolute;
+  right:12px;
+  top:12px;
+  width:38px;
+  height:38px;
+  border:0;
+  border-radius:12px;
+  background:#203552;
+  color:#fff;
+  font-size:22px
+}
+.group-call-profile-avatar{
+  width:84px;
+  height:84px;
+  margin:4px auto 12px;
+  border-radius:28px;
+  overflow:hidden;
+  background:#244f7e;
+  display:grid;
+  place-items:center;
+  color:#fff;
+  font-size:30px;
+  font-weight:800
+}
+.group-call-profile-avatar img{
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  display:block
+}
+.group-call-profile-dialog h2{
+  margin:0;
+  font-size:22px
+}
+.group-call-profile-tag{
+  margin-top:4px;
+  color:#9fc9ff;
+  font-size:14px
+}
+.group-call-profile-status{
+  margin-top:5px;
+  color:#aab9cf;
+  font-size:13px
+}
+.group-call-profile-stats{
+  display:flex;
+  justify-content:center;
+  gap:7px;
+  flex-wrap:wrap;
+  margin:16px 0
+}
+.group-call-profile-stats span{
+  border:1px solid #304967;
+  background:#14263d;
+  color:#dce9f8;
+  border-radius:999px;
+  padding:7px 9px;
+  font-size:11px;
+  font-weight:750
+}
+.group-call-profile-actions{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px
+}
+.group-call-profile-actions button{
+  border:0;
+  border-radius:12px;
+  padding:11px 10px;
+  background:#244f7e;
+  color:#fff;
+  font-weight:750
+}
+.group-call-profile-actions button.danger{
+  background:#7d3440
+}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -806,6 +892,24 @@ body.drawer-open{overflow:hidden}
     <small id="earLockText">Экран заблокирован. Чтобы разблокировать — удерживайте экран 2 секунды.</small>
   </div>
 </div>
+
+<dialog id="groupCallProfileDialog" class="group-call-profile-dialog">
+  <button id="closeGroupCallProfile" class="group-call-profile-close" type="button" aria-label="Закрыть">×</button>
+  <div id="groupCallProfileAvatar" class="group-call-profile-avatar">С</div>
+  <h2 id="groupCallProfileName">Участник</h2>
+  <div id="groupCallProfileTag" class="group-call-profile-tag"></div>
+  <div id="groupCallProfileStatus" class="group-call-profile-status"></div>
+  <div class="group-call-profile-stats">
+    <span id="groupCallProfileMic">🎤 Микрофон</span>
+    <span id="groupCallProfilePing">Пинг —</span>
+    <span id="groupCallProfileQuality">⚪ Связь</span>
+  </div>
+  <div class="group-call-profile-actions">
+    <button id="groupCallProfileFocus" type="button">⛶ Увеличить</button>
+    <button id="groupCallProfileMessage" type="button">💬 Написать</button>
+    <button id="groupCallProfileMute" class="danger hidden" type="button">🔇 Заглушить</button>
+  </div>
+</dialog>
 
 <dialog id="chatMenuDialog" class="chat-menu-dialog">
   <div class="chat-menu-head">
@@ -1070,6 +1174,7 @@ let adminStatsPeriod=localStorage.getItem('svoi_admin_stats_period')==='week'?'w
 let groupCallState=null;
 let minimizedCallKind=null;
 let groupMembersData=null;
+let groupCallProfileUser=null;
 let addParticipantContext=null;
 let chatGalleryState={
   kind:'photos',
@@ -5594,6 +5699,83 @@ function handleGroupPingPong(data){
   }catch{}
 }
 
+async function openGroupCallProfile(participant,tile){
+  const state=groupCallState;
+  if(!state||!participant)return;
+
+  const identity=String(participant.identity||'');
+  const userId=groupParticipantUserId(identity);
+  let user=null;
+
+  if(userId===Number(me?.id)){
+    user={...me,id:Number(me.id),online:true}
+  }else{
+    user=users.find(item=>Number(item.id)===userId)||null
+  }
+
+  try{
+    const members=await api('/api/groups/'+state.groupId+'/members');
+    const member=members?.members?.find(item=>Number(item.id)===userId);
+    if(member)user={...(user||{}),...member}
+  }catch{}
+
+  if(!user){
+    user={
+      id:userId,
+      display_name:participant.name||identity||'Участник',
+      username:'',
+      online:true
+    }
+  }
+
+  groupCallProfileUser={user,participant,identity,tile};
+
+  const avatar=$('groupCallProfileAvatar');
+  avatar.replaceChildren();
+  if(user.avatar_url){
+    const img=document.createElement('img');
+    img.src=user.avatar_url;
+    img.alt=user.display_name||'Участник';
+    avatar.append(img)
+  }else{
+    avatar.textContent=initials(user.display_name||participant.name||identity)
+  }
+
+  $('groupCallProfileName').textContent=
+    (user.display_name||participant.name||identity)
+    +(userId===Number(me?.id)?' · вы':'');
+  $('groupCallProfileTag').textContent=user.username?'@'+user.username:'';
+  $('groupCallProfileStatus').textContent=userId===Number(me?.id)
+    ?'Это вы'
+    :(user.online?'● в сети':formatLastSeen(user));
+
+  const muted=tile?.querySelector('.tile-mic-status')&&!tile.querySelector('.tile-mic-status').classList.contains('hidden');
+  $('groupCallProfileMic').textContent=muted?'🔇 Микрофон выключен':'🎤 Микрофон включён';
+
+  const ping=state.participantPings?.get?.(identity);
+  $('groupCallProfilePing').textContent=Number.isFinite(Number(ping))
+    ?'Пинг '+Math.round(Number(ping))+' мс'
+    :'Пинг —';
+
+  const quality=effectiveGroupParticipantQuality(identity);
+  $('groupCallProfileQuality').textContent=quality==='good'
+    ?'🟢 Хорошая связь'
+    :(quality==='medium'
+      ?'🟡 Средняя связь'
+      :(quality==='poor'?'🔴 Плохая связь':'⚪ Связь'));
+
+  $('groupCallProfileMessage').classList.toggle(
+    'hidden',
+    userId===Number(me?.id)||!userId
+  );
+  $('groupCallProfileMute').classList.toggle(
+    'hidden',
+    !state.isAdmin||userId===Number(me?.id)||!userId
+  );
+
+  $('groupCallProfileDialog').showModal()
+}
+
 function ensureGroupTile(participant,isLocal=false){
   const identity=participant.identity||'local';
   const id=groupTileId(identity);
@@ -5605,6 +5787,12 @@ function ensureGroupTile(participant,isLocal=false){
   tile.dataset.participantIdentity=String(identity);
   const avatar=document.createElement('div');avatar.className='tile-avatar';avatar.textContent=initials(participant.name||identity);
   const name=document.createElement('div');name.className='tile-name';name.textContent=(participant.name||identity)+(isLocal?' · вы':'');
+  name.title='Открыть профиль участника';
+  name.addEventListener('click',event=>{
+    event.preventDefault();
+    event.stopPropagation();
+    openGroupCallProfile(participant,tile).catch(()=>{})
+  });
   const mic=document.createElement('div');
   mic.className='tile-mic-status hidden';
   mic.setAttribute('aria-label','Микрофон выключен');
@@ -6110,6 +6298,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
 }
 
 function leaveGroupCall(disconnect=true){
+  if($('groupCallProfileDialog')?.open)$('groupCallProfileDialog').close();
   hideMiniCallBar();
   stopNativeCallService().catch(()=>{});
   resetNativeAudioRoute().catch(()=>{});
@@ -6190,6 +6379,55 @@ window.addEventListener('online',()=>{
     schedulePrivateCallRecovery(call,120)
   }
 });
+
+$('closeGroupCallProfile').onclick=()=>$('groupCallProfileDialog').close();
+$('groupCallProfileDialog').addEventListener('click',event=>{
+  if(event.target===$('groupCallProfileDialog')){
+    $('groupCallProfileDialog').close()
+  }
+});
+$('groupCallProfileDialog').addEventListener('close',()=>{
+  groupCallProfileUser=null
+});
+
+$('groupCallProfileFocus').onclick=()=>{
+  const tile=groupCallProfileUser?.tile;
+  $('groupCallProfileDialog').close();
+  if(tile?.isConnected)focusGroupTile(tile)
+};
+
+$('groupCallProfileMessage').onclick=async()=>{
+  const user=groupCallProfileUser?.user;
+  if(!user?.id||Number(user.id)===Number(me?.id))return;
+  $('groupCallProfileDialog').close();
+  minimizeGroupCall();
+  let chatUser=users.find(item=>Number(item.id)===Number(user.id));
+  if(!chatUser){
+    chatUser=user;
+    if(!users.some(item=>Number(item.id)===Number(user.id))){
+      users=[chatUser,...users];
+      renderUsers()
+    }
+  }
+  await openUser(chatUser)
+};
+
+$('groupCallProfileMute').onclick=()=>{
+  const state=groupCallState;
+  const user=groupCallProfileUser?.user;
+  if(!state?.isAdmin||!user?.id||Number(user.id)===Number(me?.id))return;
+  try{
+    wsSend({
+      type:'group_force_mute',
+      group_id:state.groupId,
+      target_user_id:Number(user.id)
+    });
+    $('groupCallProfileMute').disabled=true;
+    setTimeout(()=>{
+      if($('groupCallProfileMute'))$('groupCallProfileMute').disabled=false
+    },1200)
+  }catch{}
+};
 
 $('groupMuteBtn').onclick=async()=>{
   if(!groupCallState)return;
