@@ -162,6 +162,8 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_messages_pair
       ON messages(sender_id, recipient_id, id);
+    CREATE INDEX IF NOT EXISTS idx_messages_recipient_pair
+      ON messages(recipient_id, sender_id, id);
     CREATE TABLE IF NOT EXISTS chat_groups (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -5046,8 +5048,15 @@ async def broadcast_presence(
         "online": bool(online),
         "last_seen_at": last_seen_at,
     }
-    for peer_id in presence_peer_ids(user_id):
-        await push(peer_id, payload)
+    await deliver_group_batch(
+        [
+            {
+                "recipient_id": peer_id,
+                "payload": payload,
+            }
+            for peer_id in presence_peer_ids(user_id)
+        ]
+    )
 
 
 async def finish_answered_call_after_disconnect_grace(
@@ -5159,11 +5168,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         "SELECT 1 FROM users WHERE id=?",
                         (chat_id,),
                     ).fetchone()
-                    check.close()
-                    if not exists:
-                        continue
-                    check = connect_db()
-                    blocked = users_blocked(check, user_id, chat_id)
+                    blocked = (
+                        users_blocked(check, user_id, chat_id)
+                        if exists
+                        else True
+                    )
                     check.close()
                     if blocked:
                         continue
@@ -5202,8 +5211,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         "from_name": display_name,
                         "typing": typing,
                     }
-                    for member_row in members:
-                        await push(int(member_row["user_id"]), payload)
+                    await deliver_group_batch(
+                        [
+                            {
+                                "recipient_id": int(member_row["user_id"]),
+                                "payload": payload,
+                            }
+                            for member_row in members
+                        ]
+                    )
                     continue
 
                 continue
