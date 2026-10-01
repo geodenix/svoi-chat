@@ -2902,36 +2902,38 @@ def get_upload(stored_name: str, conn=Depends(db)):
 @app.get("/api/messages/{other_id}")
 async def history(
     other_id: int,
-    limit: int = Query(100, ge=1, le=300),
+    limit: int = Query(50, ge=1, le=300),
+    before_id: int | None = Query(default=None, ge=1),
     user=Depends(current_user),
     conn=Depends(db),
 ):
     if not conn.execute("SELECT 1 FROM users WHERE id=?", (other_id,)).fetchone():
         raise HTTPException(404, "Пользователь не найден")
-    unread_rows = conn.execute(
-        """SELECT id FROM messages
-           WHERE sender_id=? AND recipient_id=? AND read_at IS NULL""",
-        (other_id, user["id"]),
-    ).fetchall()
-    if unread_rows:
-        seen_at = now_iso()
-        conn.execute(
-            """UPDATE messages
-               SET delivered_at=COALESCE(delivered_at, ?),
-                   read_at=?
+    if before_id is None:
+        unread_rows = conn.execute(
+            """SELECT id FROM messages
                WHERE sender_id=? AND recipient_id=? AND read_at IS NULL""",
-            (seen_at, seen_at, other_id, user["id"]),
-        )
-        conn.commit()
-        await push(
-            other_id,
-            {
-                "type": "read_receipt",
-                "reader_id": user["id"],
-                "message_ids": [row["id"] for row in unread_rows],
-                "read_at": seen_at,
-            },
-        )
+            (other_id, user["id"]),
+        ).fetchall()
+        if unread_rows:
+            seen_at = now_iso()
+            conn.execute(
+                """UPDATE messages
+                   SET delivered_at=COALESCE(delivered_at, ?),
+                       read_at=?
+                   WHERE sender_id=? AND recipient_id=? AND read_at IS NULL""",
+                (seen_at, seen_at, other_id, user["id"]),
+            )
+            conn.commit()
+            await push(
+                other_id,
+                {
+                    "type": "read_receipt",
+                    "reader_id": user["id"],
+                    "message_ids": [row["id"] for row in unread_rows],
+                    "read_at": seen_at,
+                },
+            )
     rows = conn.execute(
         """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,m.edited_at,
                   m.delivered_at,m.read_at,m.forwarded,m.reply_to_message_id,
@@ -2946,12 +2948,22 @@ async def history(
                 (m.sender_id=? AND m.recipient_id=?)
                 OR (m.sender_id=? AND m.recipient_id=?)
            )
+             AND (? IS NULL OR m.id<?)
              AND NOT EXISTS(
                SELECT 1 FROM message_hidden_by_user mh
                WHERE mh.message_id=m.id AND mh.user_id=?
              )
            ORDER BY m.id DESC LIMIT ?""",
-        (user["id"], other_id, other_id, user["id"], user["id"], limit),
+        (
+            user["id"],
+            other_id,
+            other_id,
+            user["id"],
+            before_id,
+            before_id,
+            user["id"],
+            limit,
+        ),
     ).fetchall()
     result = []
     for row in reversed(rows):
@@ -3955,7 +3967,8 @@ async def remove_group_member(
 @app.get("/api/groups/{group_id}/messages")
 def get_group_messages(
     group_id: int,
-    limit: int = Query(100, ge=1, le=300),
+    limit: int = Query(50, ge=1, le=300),
+    before_id: int | None = Query(default=None, ge=1),
     user=Depends(current_user),
     conn=Depends(db),
 ):
@@ -3983,36 +3996,45 @@ def get_group_messages(
            JOIN users u ON u.id=gm.sender_id
            LEFT JOIN uploads up ON up.id=gm.attachment_id
            WHERE gm.group_id=?
+             AND (? IS NULL OR gm.id<?)
              AND NOT EXISTS(
                SELECT 1 FROM group_message_hidden_by_user gh
                WHERE gh.message_id=gm.id AND gh.user_id=?
              )
            ORDER BY gm.id DESC LIMIT ?""",
-        (user["id"], group_id, user["id"], limit),
-    ).fetchall()
-    read_at = now_iso()
-    conn.execute(
-        """INSERT OR IGNORE INTO group_message_reads(
-             message_id,user_id,read_at
-           )
-           SELECT gm.id,?,?
-           FROM group_messages gm
-           WHERE gm.group_id=?
-             AND gm.sender_id<>?
-             AND gm.deleted_at IS NULL
-             AND NOT EXISTS(
-               SELECT 1 FROM group_message_hidden_by_user gh
-               WHERE gh.message_id=gm.id AND gh.user_id=?
-             )""",
         (
             user["id"],
-            read_at,
             group_id,
+            before_id,
+            before_id,
             user["id"],
-            user["id"],
+            limit,
         ),
-    )
-    conn.commit()
+    ).fetchall()
+    if before_id is None:
+        read_at = now_iso()
+        conn.execute(
+            """INSERT OR IGNORE INTO group_message_reads(
+                 message_id,user_id,read_at
+               )
+               SELECT gm.id,?,?
+               FROM group_messages gm
+               WHERE gm.group_id=?
+                 AND gm.sender_id<>?
+                 AND gm.deleted_at IS NULL
+                 AND NOT EXISTS(
+                   SELECT 1 FROM group_message_hidden_by_user gh
+                   WHERE gh.message_id=gm.id AND gh.user_id=?
+                 )""",
+            (
+                user["id"],
+                read_at,
+                group_id,
+                user["id"],
+                user["id"],
+            ),
+        )
+        conn.commit()
 
     result = []
     is_admin = bool(group["is_admin"])
