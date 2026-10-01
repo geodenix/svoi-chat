@@ -445,6 +445,34 @@ body.drawer-open{overflow:hidden}
   color:#ffd08a!important
 }
 </style>
+<style>
+.tile-network-quality{
+  position:absolute;
+  z-index:8;
+  left:8px;
+  bottom:36px;
+  min-width:24px;
+  height:24px;
+  padding:0 5px;
+  border-radius:999px;
+  display:grid;
+  place-items:center;
+  background:#07101eb8;
+  border:1px solid #ffffff24;
+  font-size:11px;
+  line-height:1;
+  pointer-events:none;
+  text-shadow:0 1px 4px #000
+}
+.group-call-strip .tile-network-quality{
+  left:5px;
+  bottom:28px;
+  min-width:19px;
+  height:19px;
+  padding:0 3px;
+  font-size:8px
+}
+</style>
 </head>
 <body>
 <div id="auth" class="auth">
@@ -5281,6 +5309,72 @@ function isGroupMicrophonePublication(publication){
     ||String(source).toLowerCase().includes('microphone')
 }
 
+function groupQualityFromPing(value){
+  const ms=Number(value);
+  if(!Number.isFinite(ms)||ms<0)return 'unknown';
+  if(ms<=150)return 'good';
+  if(ms<=350)return 'medium';
+  return 'poor'
+}
+
+function groupQualityRank(value){
+  return value==='poor'?3:(value==='medium'?2:(value==='good'?1:0))
+}
+
+function effectiveGroupParticipantQuality(identity){
+  const state=groupCallState;
+  if(!state)return 'unknown';
+
+  const id=String(identity||'');
+  const livekit=state.participantQualities?.get?.(id)||'unknown';
+  const ping=state.participantPings?.get?.(id);
+  const byPing=groupQualityFromPing(ping);
+
+  if(groupQualityRank(livekit)>=groupQualityRank(byPing)){
+    return livekit
+  }
+  return byPing
+}
+
+function updateGroupParticipantQuality(identity,quality=null){
+  const state=groupCallState;
+  const id=String(identity||'');
+  if(!id)return;
+
+  if(state&&quality!=null){
+    const normalized=normalizeLiveKitConnectionQuality(quality);
+    const mapped=normalized==='excellent'
+      ?'good'
+      :(normalized==='good'?'medium':(normalized==='poor'?'poor':'unknown'));
+    state.participantQualities?.set?.(id,mapped)
+  }
+
+  const tile=$(groupTileId(id));
+  if(!tile)return;
+
+  let badge=tile.querySelector('.tile-network-quality');
+  if(!badge){
+    badge=document.createElement('div');
+    badge.className='tile-network-quality';
+    tile.append(badge)
+  }
+
+  const level=effectiveGroupParticipantQuality(id);
+  if(level==='good'){
+    badge.textContent='🟢';
+    badge.title='Связь хорошая'
+  }else if(level==='medium'){
+    badge.textContent='🟡';
+    badge.title='Связь средняя'
+  }else if(level==='poor'){
+    badge.textContent='🔴';
+    badge.title='Связь плохая'
+  }else{
+    badge.textContent='⚪';
+    badge.title='Качество связи определяется'
+  }
+}
+
 function updateGroupParticipantPing(identity,value){
   const tile=$(groupTileId(identity));
   if(!tile)return;
@@ -5301,6 +5395,7 @@ function updateGroupParticipantPing(identity,value){
     badge.textContent='Пинг —';
     badge.title='Пинг ещё не измерен'
   }
+  updateGroupParticipantQuality(identity)
 }
 
 function stopGroupPingMonitoring(state=groupCallState){
@@ -5395,7 +5490,11 @@ function ensureGroupTile(participant,isLocal=false){
   ping.className='tile-ping-status';
   ping.textContent='Пинг —';
   ping.title='Пинг ещё не измерен';
-  tile.append(avatar,name,mic,speaking,ping);
+  const quality=document.createElement('div');
+  quality.className='tile-network-quality';
+  quality.textContent='⚪';
+  quality.title='Качество связи определяется';
+  tile.append(avatar,name,mic,speaking,ping,quality);
   tile.title='Нажмите, чтобы увеличить участника';
   tile.addEventListener('click',event=>{
     if(event.target.closest('button'))return;
@@ -5412,6 +5511,7 @@ function ensureGroupTile(participant,isLocal=false){
   updateGroupMicBadge(participant,isLocal);
   const knownPing=groupCallState?.participantPings?.get?.(String(identity));
   updateGroupParticipantPing(identity,knownPing??null);
+  updateGroupParticipantQuality(identity,participant.connectionQuality);
   return tile
 }
 
@@ -5685,6 +5785,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
       videoNetworkCap:'high',
       pendingSpeakers:[],
       activeSpeakerIds:new Set(),
+      participantQualities:new Map(),
       participantPings:new Map(),
       pingPending:new Map(),
       pingSeq:0,
@@ -5729,6 +5830,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
       .on(LivekitClient.RoomEvent.ParticipantConnected,(participant)=>{
         ensureGroupTile(participant,false);
         updateGroupMicBadge(participant,false);
+        updateGroupParticipantQuality(participant.identity,participant.connectionQuality);
         refreshGroupCount();
       })
       .on(LivekitClient.RoomEvent.ParticipantDisconnected,(participant)=>{
@@ -5742,6 +5844,7 @@ async function joinGroupCall(groupId,video=false,invite=false){
         updateGroupActiveSpeakers(speakers)
       })
       .on(LivekitClient.RoomEvent.ConnectionQualityChanged,(quality,participant)=>{
+        updateGroupParticipantQuality(participant?.identity,quality);
         updateGroupVideoNetworkCap(quality,participant)
       })
       .on(LivekitClient.RoomEvent.Reconnecting,()=>{
@@ -5790,13 +5893,21 @@ async function joinGroupCall(groupId,video=false,invite=false){
     }
 
     ensureGroupTile(room.localParticipant,true);
+    updateGroupParticipantQuality(
+      room.localParticipant.identity,
+      room.localParticipant.connectionQuality
+    );
     updateGroupVideoNetworkCap(
       room.localParticipant.connectionQuality,
       room.localParticipant
     );
     for(const participant of room.remoteParticipants.values()){
       ensureGroupTile(participant,false);
-      updateGroupMicBadge(participant,false)
+      updateGroupMicBadge(participant,false);
+      updateGroupParticipantQuality(
+        participant.identity,
+        participant.connectionQuality
+      )
     }
 
     await room.localParticipant.setMicrophoneEnabled(true);
