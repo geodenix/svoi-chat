@@ -1286,6 +1286,7 @@ body.drawer-open{overflow:hidden}
 <script>
 const $=id=>document.getElementById(id);
 let mode='login',token=localStorage.getItem('svoi_token')||'',me=null,users=[],groups=[],callHistory=[],active=null,socket=null,retry=null,pendingAttachment=null,uploading=false,foundUser=null;
+let wsHasConnected=false,wsReconnectSyncTimer=null;
 let chatBackgroundRequest=0,currentChatBackgroundUrl='';
 let currentMessages=[],typingStopTimer=null,lastTypingSentAt=0;
 let privateChatLoadRequest=0,privateUsersRefreshTimer=null;
@@ -2125,7 +2126,17 @@ function muteStatusText(item){
   })
 }
 
-function showAuth(){me=null;active=null;foundUser=null;if(adminRefreshTimer){clearInterval(adminRefreshTimer);adminRefreshTimer=null}if(socket)socket.close();$('auth').classList.remove('hidden');$('app').classList.add('hidden');document.title='Свои';updateAppBadge().catch(()=>{})}
+function showAuth(){
+  me=null;active=null;foundUser=null;
+  wsHasConnected=false;
+  if(wsReconnectSyncTimer){clearTimeout(wsReconnectSyncTimer);wsReconnectSyncTimer=null}
+  if(adminRefreshTimer){clearInterval(adminRefreshTimer);adminRefreshTimer=null}
+  if(socket)socket.close();
+  $('auth').classList.remove('hidden');
+  $('app').classList.add('hidden');
+  document.title='Свои';
+  updateAppBadge().catch(()=>{})
+}
 
 function runWhenIdle(task,timeout=1200){
   if(typeof requestIdleCallback==='function'){
@@ -9607,6 +9618,17 @@ function connectWs(){
   if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';
   socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token));
   socket.onopen=()=>{
+    const reconnect=wsHasConnected;
+    wsHasConnected=true;
+    if(reconnect&&me){
+      if(wsReconnectSyncTimer)clearTimeout(wsReconnectSyncTimer);
+      wsReconnectSyncTimer=setTimeout(()=>{
+        wsReconnectSyncTimer=null;
+        if(!me||socket?.readyState!==WebSocket.OPEN)return;
+        Promise.allSettled([loadUsers(),loadGroups()]).catch(()=>{})
+      },350)
+    }
+
     const action=readPendingNativeCallAction();
     if(action){
       restoreIncomingCallAction(action).catch(()=>{})
@@ -9817,6 +9839,57 @@ function connectWs(){
       // только если это первый диалог с пользователем, которого ещё нет
       // в локальном списке.
       applyPrivateMessageToChatList(m);
+      return
+    }
+    if(data.type==='chat_read_sync'){
+      const chatType=String(data.chat_type||'');
+      const chatId=Number(data.chat_id);
+      const unread=Math.max(0,Number(data.unread_count)||0);
+
+      if(chatType==='user'&&chatId){
+        users=users.map(item=>
+          Number(item.id)===chatId
+            ?{...item,unread_count:unread}
+            :item
+        );
+        if(active?.type==='user'&&Number(active.data.id)===chatId){
+          active.data={...active.data,unread_count:unread};
+          const ids=new Set((data.message_ids||[]).map(Number));
+          if(ids.size){
+            currentMessages=currentMessages.map(item=>
+              ids.has(Number(item.id))
+                ?{...item,read_at:data.read_at||item.read_at}
+                :item
+            )
+          }
+        }
+        renderUsers();
+        updateAppBadge().catch(()=>{})
+      }else if(chatType==='group'&&chatId){
+        groups=groups.map(item=>
+          Number(item.id)===chatId
+            ?{...item,unread_count:unread}
+            :item
+        );
+        if(active?.type==='group'&&Number(active.data.id)===chatId){
+          active.data={...active.data,unread_count:unread}
+        }
+        renderGroups();
+        updateAppBadge().catch(()=>{})
+      }
+      return
+    }
+    if(data.type==='message_hidden_for_me'){
+      const chatType=String(data.chat_type||'');
+      const chatId=Number(data.chat_id);
+      const messageId=Number(data.message_id);
+      const activeMatches=(
+        (chatType==='user'&&active?.type==='user'&&Number(active.data.id)===chatId)
+        ||(chatType==='group'&&active?.type==='group'&&Number(active.data.id)===chatId)
+      );
+      if(activeMatches&&messageId){
+        removeGroupMessageNode(messageId)
+      }
       return
     }
     if(data.type==='message_edited'){
