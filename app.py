@@ -7698,6 +7698,24 @@ def icon_512():
     )
 
 
+@app.get("/app.css")
+def app_stylesheet():
+    return FileResponse(
+        BASE_DIR / "app.css",
+        media_type="text/css",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/app.js")
+def app_javascript():
+    return FileResponse(
+        BASE_DIR / "app.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/sw.js")
 def service_worker():
     return FileResponse(
