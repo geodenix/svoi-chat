@@ -1966,6 +1966,89 @@ function renderGroups(){
   }
 }
 
+function chatListRow(type,id){
+  const root=type==='group'?$('groups'):$('users');
+  if(!root||!id)return null;
+  return root.querySelector(
+    '.item[data-chat-type="'+type+'"][data-chat-id="'+Number(id)+'"]'
+  )
+}
+
+function updateUserRow(userId){
+  const id=Number(userId);
+  const user=users.find(item=>Number(item.id)===id);
+  if(!id||!user)return false;
+  const row=chatListRow('user',id);
+  if(!row)return false;
+
+  row.classList.toggle(
+    'active',
+    active?.type==='user'&&Number(active.data.id)===id
+  );
+  setAvatar(row.querySelector('.avatar'),user);
+  const strong=row.querySelector('.txt strong');
+  if(strong)strong.textContent=user.display_name;
+
+  const draft=draftTextForTarget({type:'user',data:user});
+  const small=row.querySelector('.txt small');
+  if(small){
+    small.classList.toggle('draft-preview',!!draft);
+    small.textContent=draft
+      ?'Черновик: '+draftPreviewText(draft)
+      :('@'+user.username+' · '+(
+        user.blocked_by_me?'🚫 заблокирован':formatLastSeen(user)
+      ))
+  }
+
+  const dot=row.querySelector('.dot');
+  if(dot)dot.classList.toggle('on',!!user.online);
+  renderUnreadBadge(row,user);
+  row.onclick=()=>{
+    const fresh=users.find(item=>Number(item.id)===id)||user;
+    openUser(fresh)
+  };
+  return true
+}
+
+function updateGroupRow(groupId){
+  const id=Number(groupId);
+  const group=groups.find(item=>Number(item.id)===id);
+  if(!id||!group)return false;
+  const row=chatListRow('group',id);
+  if(!row)return false;
+
+  row.classList.toggle(
+    'active',
+    active?.type==='group'&&Number(active.data.id)===id
+  );
+  setGroupAvatar(row.querySelector('.avatar'),group);
+  const strong=row.querySelector('.txt strong');
+  if(strong)strong.textContent=group.name;
+
+  const draft=draftTextForTarget({type:'group',data:group});
+  const small=row.querySelector('.txt small');
+  if(small){
+    small.classList.toggle('draft-preview',!!draft);
+    small.textContent=draft
+      ?'Черновик: '+draftPreviewText(draft)
+      :(Number(group.member_count||0)+' участников')
+  }
+
+  renderUnreadBadge(row,group);
+  row.onclick=()=>{
+    const fresh=groups.find(item=>Number(item.id)===id)||group;
+    openGroup(fresh)
+  };
+  return true
+}
+
+function updateActiveChatRows(){
+  document.querySelectorAll('#users .item.active,#groups .item.active')
+    .forEach(row=>row.classList.remove('active'));
+  if(!active?.data?.id)return;
+  chatListRow(active.type,active.data.id)?.classList.add('active')
+}
+
 function currentChatBackgroundTarget(){
   if(!active)return null;
   return {
@@ -2044,8 +2127,7 @@ async function openUser(u){
   $('chatHead').classList.remove('hidden');
   $('composer').classList.remove('hidden');
   updateHead();
-  renderUsers();
-  renderGroups();
+  updateActiveChatRows();
   restoreCurrentDraft();
   loadCurrentChatBackground().catch(()=>{});
 
@@ -2067,7 +2149,7 @@ async function openUser(u){
         ?{...item,unread_count:0}
         :item
     );
-    renderUsers();
+    updateUserRow(userId);
     updateAppBadge().catch(()=>{});
     renderMessages(msgs);
     initMessageHistoryState(msgs);
@@ -2096,7 +2178,7 @@ async function openGroup(g){
   $('app').classList.add('chat-open');
   $('chatHead').classList.remove('hidden');
   $('composer').classList.remove('hidden');
-  updateHead();renderUsers();renderGroups();restoreCurrentDraft();loadCurrentChatBackground().catch(()=>{});
+  updateHead();updateActiveChatRows();restoreCurrentDraft();loadCurrentChatBackground().catch(()=>{});
 
   const box=$('messages');
   box.innerHTML='<div class="empty">Загрузка переписки…</div>';
@@ -2111,7 +2193,7 @@ async function openGroup(g){
 
     active.data={...active.data,unread_count:0};
     groups=groups.map(item=>Number(item.id)===groupId?{...item,unread_count:0}:item);
-    renderGroups();
+    updateGroupRow(groupId);
     updateAppBadge().catch(()=>{});
     renderMessages(msgs);
     initMessageHistoryState(msgs);
@@ -3797,7 +3879,7 @@ function applyPrivateMessageToChatList(message){
     active.data={...active.data,...updated,unread_count:0}
   }
 
-  renderUsers();
+  if(!updateUserRow(peerId))renderUsers();
   updateAppBadge().catch(()=>{})
 }
 
@@ -9043,6 +9125,8 @@ let wsAckPendingSeq=0;
 let wsBatchingUi=false;
 let wsUsersRenderPending=false;
 let wsGroupsRenderPending=false;
+const wsUserRowsPending=new Set();
+const wsGroupRowsPending=new Set();
 
 function wsSeqStorageKey(){
   return 'svoi_ws_seq_'+String(Number(me?.id)||0)
@@ -9087,14 +9171,32 @@ function commitWsSequence(data){
   scheduleWsAck(seq)
 }
 
-function wsRenderUsers(){
-  if(wsBatchingUi){wsUsersRenderPending=true;return}
-  renderUsers()
+function wsRenderUsers(userId=null){
+  const id=Number(userId)||0;
+  if(wsBatchingUi){
+    if(id)wsUserRowsPending.add(id);
+    else wsUsersRenderPending=true;
+    return
+  }
+  if(id){
+    if(!updateUserRow(id))renderUsers();
+  }else{
+    renderUsers()
+  }
 }
 
-function wsRenderGroups(){
-  if(wsBatchingUi){wsGroupsRenderPending=true;return}
-  renderGroups()
+function wsRenderGroups(groupId=null){
+  const id=Number(groupId)||0;
+  if(wsBatchingUi){
+    if(id)wsGroupRowsPending.add(id);
+    else wsGroupsRenderPending=true;
+    return
+  }
+  if(id){
+    if(!updateGroupRow(id))renderGroups();
+  }else{
+    renderGroups()
+  }
 }
 
 function flushWsUiBatch(){
@@ -9102,8 +9204,31 @@ function flushWsUiBatch(){
   const groupsPending=wsGroupsRenderPending;
   wsUsersRenderPending=false;
   wsGroupsRenderPending=false;
-  if(usersPending)renderUsers();
-  if(groupsPending)renderGroups()
+
+  if(usersPending){
+    renderUsers()
+  }else{
+    for(const userId of wsUserRowsPending){
+      if(!updateUserRow(userId)){
+        renderUsers();
+        break
+      }
+    }
+  }
+
+  if(groupsPending){
+    renderGroups()
+  }else{
+    for(const groupId of wsGroupRowsPending){
+      if(!updateGroupRow(groupId)){
+        renderGroups();
+        break
+      }
+    }
+  }
+
+  wsUserRowsPending.clear();
+  wsGroupRowsPending.clear()
 }
 
 function connectWs(){
@@ -9247,7 +9372,22 @@ function connectWs(){
       if(foundUser?.id===data.user?.id){
         foundUser={...foundUser,...data.user};renderUserSearchResult(foundUser)
       }
-      loadUsers().catch(()=>{});
+      const profileId=Number(data.user?.id);
+      const profileIndex=users.findIndex(
+        item=>Number(item.id)===profileId
+      );
+      if(profileIndex>=0){
+        users=[
+          ...users.slice(0,profileIndex),
+          {...users[profileIndex],...data.user},
+          ...users.slice(profileIndex+1)
+        ];
+        wsRenderUsers(profileId)
+      }
+      if(active?.type==='user'&&Number(active.data.id)===profileId){
+        active.data={...active.data,...data.user};
+        updateHead()
+      }
       return
     }
     if(data.type==='typing'){
@@ -9315,7 +9455,7 @@ function connectWs(){
         if($('groupMembersDialog').open)renderGroupMembers(groupMembersData)
       }
 
-      wsRenderUsers();
+      wsRenderUsers(userId);
       return
     }
     if(data.type==='blocks_updated'){
@@ -9387,7 +9527,7 @@ function connectWs(){
             )
           }
         }
-        wsRenderUsers();
+        wsRenderUsers(chatId);
         updateAppBadge().catch(()=>{})
       }else if(chatType==='group'&&chatId){
         groups=groups.map(item=>
@@ -9398,7 +9538,7 @@ function connectWs(){
         if(active?.type==='group'&&Number(active.data.id)===chatId){
           active.data={...active.data,unread_count:unread}
         }
-        wsRenderGroups();
+        wsRenderGroups(chatId);
         updateAppBadge().catch(()=>{})
       }
       return
@@ -9510,7 +9650,7 @@ function connectWs(){
               :Number(item.unread_count||0)+1);
           return {...item,unread_count:unread}
         });
-        wsRenderGroups();
+        wsRenderGroups(groupId);
         updateAppBadge().catch(()=>{})
       }else{
         // Fallback for a just-added group that has not reached local state yet.
@@ -9558,7 +9698,8 @@ function connectWs(){
       }else{
         groups=[added,...groups]
       }
-      wsRenderGroups();
+      if(exists)wsRenderGroups(added.id);
+      else wsRenderGroups();
       return
     }
     if(data.type==='group_removed'){
@@ -9596,7 +9737,7 @@ function connectWs(){
       if($('groupMembersDialog').open&&active?.type==='group'&&active.data.id===data.group_id){
         loadGroupMembers(data.group_id).catch(()=>{})
       }
-      wsRenderGroups();
+      wsRenderGroups(data.group_id);
       return
     }
     if(data.type==='group_updated'){
@@ -9619,7 +9760,7 @@ function connectWs(){
       if(groupCallState&&Number(groupCallState.groupId)===Number(updated.id)){
         $('groupCallName').textContent=updated.name
       }
-      wsRenderGroups();
+      wsRenderGroups(updated.id);
       return
     }
     if(data.type==='group_created')loadGroups().catch(()=>{})
@@ -10078,7 +10219,7 @@ async function setUserBlocked(userId,blocked){
     active.data={...active.data,blocked_by_me:!!blocked};
     updateHead()
   }
-  renderUsers();
+  if(!updateUserRow(userId))renderUsers();
   return result
 }
 
@@ -10363,11 +10504,11 @@ async function setCurrentChatMute(duration){
     if(targetType==='group'){
       groups=groups.map(item=>Number(item.id)===targetId?{...item,...patch}:item);
       if(active?.type==='group'&&Number(active.data.id)===targetId)active.data={...active.data,...patch};
-      renderGroups()
+      if(!updateGroupRow(targetId))renderGroups()
     }else{
       users=users.map(item=>Number(item.id)===targetId?{...item,...patch}:item);
       if(active?.type==='user'&&Number(active.data.id)===targetId)active.data={...active.data,...patch};
-      renderUsers()
+      if(!updateUserRow(targetId))renderUsers()
     }
     updateHead();
     $('muteChatStatus').textContent=muteStatusText(active.data);
@@ -10467,7 +10608,7 @@ $('saveGroupRename').onclick=async()=>{
       updateHead();
       $('groupInfoCount').textContent='Участников: '+(updated.member_count||0)
     }
-    renderGroups();
+    if(!updateGroupRow(updated.id))renderGroups();
     $('groupRenameDialog').close()
   }catch(err){
     $('groupRenameError').textContent=err.message||'Не удалось изменить название'
