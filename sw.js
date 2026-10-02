@@ -1,4 +1,4 @@
-const CACHE_NAME = 'svoi-shell-v92';
+const CACHE_NAME = 'svoi-shell-v93';
 const SHELL = [
   '/',
   '/manifest.webmanifest',
