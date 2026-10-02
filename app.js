@@ -5208,6 +5208,7 @@ function restoreGroupGridLayout(){
   grid.querySelectorAll('.group-tile.focused')
     .forEach(tile=>tile.classList.remove('focused'));
   grid.classList.remove('has-focus');
+  $('groupCallOverlay')?.classList.remove('group-focused-mode');
   strip.classList.add('hidden');
   if(groupCallState)groupCallState.groupFocusSource='';
   applyGroupAutoLayout();
@@ -5224,6 +5225,7 @@ function showGroupFocusedTile(tile,source='manual'){
 
   if(tile.classList.contains('focused')){
     grid.classList.add('has-focus');
+    $('groupCallOverlay')?.classList.add('group-focused-mode');
     strip.classList.remove('hidden');
     return
   }
@@ -5240,6 +5242,7 @@ function showGroupFocusedTile(tile,source='manual'){
 
   tile.classList.add('focused');
   grid.classList.add('has-focus');
+  $('groupCallOverlay')?.classList.add('group-focused-mode');
   strip.classList.remove('hidden');
 
   for(const other of [...grid.querySelectorAll('.group-tile')]){
@@ -6325,6 +6328,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
     $('groupInviteLinkWrap').classList.toggle('hidden',!linkedToken);
     $('groupCallDuration').textContent='00:00';
     $('groupCallDuration').classList.add('hidden');
+    $('groupCallOverlay').classList.remove('group-focused-mode');
     $('groupCallOverlay').classList.remove('hidden');
     applyGroupAutoLayout();
     updateSpeakerButtons();
@@ -6521,6 +6525,7 @@ function leaveGroupCall(disconnect=true,endReason='local_leave'){
   setGroupConnectionQuality('unknown');
   $('groupCallDuration').textContent='00:00';
   $('groupCallDuration').classList.add('hidden');
+  $('groupCallOverlay').classList.remove('group-focused-mode');
   $('groupCallOverlay').classList.add('hidden');
   $('groupInviteLinkWrap').classList.add('hidden');
   stopLiveCallDurationTimerIfIdle()
