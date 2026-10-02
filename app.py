@@ -87,6 +87,29 @@ WS_IMMEDIATE_TYPES = {
 }
 active_calls: dict[str, dict] = {}
 call_invite_links: dict[str, dict] = {}
+API_METRIC_WINDOW_SECONDS = 60.0
+api_request_metrics = deque(maxlen=12000)
+api_active_requests = 0
+_cpu_previous_sample = None
+
+
+@app.middleware("http")
+async def collect_api_metrics(request: Request, call_next):
+    global api_active_requests
+    if not request.url.path.startswith("/api/"):
+        return await call_next(request)
+
+    started = time.perf_counter()
+    status_code = 500
+    api_active_requests += 1
+    try:
+        response = await call_next(request)
+        status_code = int(response.status_code)
+        return response
+    finally:
+        elapsed_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
+        api_request_metrics.append((time.monotonic(), elapsed_ms, status_code))
+        api_active_requests = max(0, api_active_requests - 1)
 
 
 def now_iso() -> str:
@@ -760,6 +783,106 @@ def _process_rss_bytes() -> int:
     except Exception:
         pass
     return 0
+
+
+def _system_cpu_percent() -> float | None:
+    global _cpu_previous_sample
+    try:
+        parts = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
+        values = [int(value) for value in parts]
+        if len(values) < 4:
+            return None
+        total = sum(values)
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        previous = _cpu_previous_sample
+        _cpu_previous_sample = (total, idle)
+        if previous is None:
+            try:
+                load_1m = float(os.getloadavg()[0])
+                cpu_count = max(1, int(os.cpu_count() or 1))
+                return round(
+                    min(100.0, max(0.0, load_1m * 100.0 / cpu_count)),
+                    1,
+                )
+            except Exception:
+                return None
+        total_delta = total - previous[0]
+        idle_delta = idle - previous[1]
+        if total_delta <= 0:
+            return None
+        busy = 100.0 * (1.0 - max(0, idle_delta) / total_delta)
+        return round(min(100.0, max(0.0, busy)), 1)
+    except Exception:
+        return None
+
+
+def _percentile(values, percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    index = max(
+        0,
+        min(
+            len(ordered) - 1,
+            int((len(ordered) - 1) * percentile + 0.999999),
+        ),
+    )
+    return ordered[index]
+
+
+def _api_metrics_snapshot() -> dict:
+    now_mono = time.monotonic()
+    cutoff = now_mono - API_METRIC_WINDOW_SECONDS
+    while api_request_metrics and api_request_metrics[0][0] < cutoff:
+        api_request_metrics.popleft()
+
+    samples = list(api_request_metrics)
+    latencies = [item[1] for item in samples]
+    errors_5xx = sum(1 for item in samples if int(item[2]) >= 500)
+    elapsed = min(
+        API_METRIC_WINDOW_SECONDS,
+        max(1.0, time.time() - APP_STARTED_AT),
+    )
+    p95 = _percentile(latencies, 0.95)
+    return {
+        "window_seconds": int(API_METRIC_WINDOW_SECONDS),
+        "requests": len(samples),
+        "requests_per_second": round(len(samples) / elapsed, 2),
+        "avg_ms": (
+            round(sum(latencies) / len(latencies), 1)
+            if latencies else None
+        ),
+        "p95_ms": round(p95, 1) if p95 is not None else None,
+        "max_ms": round(max(latencies), 1) if latencies else None,
+        "errors_5xx": errors_5xx,
+        "active_requests": int(api_active_requests),
+    }
+
+
+def _ws_ping_snapshot() -> dict:
+    now_mono = time.monotonic()
+    values = []
+    for sockets in connections.values():
+        for websocket in list(sockets):
+            state = ws_connection_state.get(websocket) or {}
+            updated = float(state.get("ping_updated_at") or 0)
+            ping = state.get("ping_ms")
+            if (
+                ping is not None
+                and updated > 0
+                and now_mono - updated <= 90.0
+            ):
+                values.append(float(ping))
+
+    p95 = _percentile(values, 0.95)
+    return {
+        "samples": len(values),
+        "avg_ms": (
+            round(sum(values) / len(values), 1)
+            if values else None
+        ),
+        "p95_ms": round(p95, 1) if p95 is not None else None,
+    }
 
 
 def _service_state(name: str) -> str:
@@ -1616,6 +1739,9 @@ def admin_overview(
     websocket_connections = sum(
         len(sockets) for sockets in connections.values()
     )
+    api_performance = _api_metrics_snapshot()
+    ws_ping = _ws_ping_snapshot()
+    cpu_percent = _system_cpu_percent()
 
     return {
         "generated_at": now.isoformat(),
@@ -1640,6 +1766,7 @@ def admin_overview(
         },
         "resources": {
             "cpu_count": int(os.cpu_count() or 1),
+            "cpu_percent": cpu_percent,
             "load_1m": round(float(load_1m), 2),
             "load_5m": round(float(load_5m), 2),
             "load_15m": round(float(load_15m), 2),
@@ -1649,6 +1776,10 @@ def admin_overview(
                 DB_PATH.stat().st_size if DB_PATH.is_file() else 0
             ),
             "process_rss_bytes": _process_rss_bytes(),
+        },
+        "performance": {
+            "api": api_performance,
+            "websocket_ping": ws_ping,
         },
         "services": services,
     }
@@ -7031,6 +7162,8 @@ async def websocket_endpoint(
         "last_sent_seq": int(last_seq or 0),
         "dead": False,
         "token_hash": current_session_hash,
+        "ping_ms": None,
+        "ping_updated_at": 0.0,
     }
 
     replay = [
@@ -7112,6 +7245,19 @@ async def websocket_endpoint(
                             "nonce": nonce,
                         },
                     )
+                continue
+
+            if signal_type == "ws_ping_report":
+                try:
+                    ping_ms = float(data.get("ping_ms"))
+                except (TypeError, ValueError):
+                    continue
+                if not 0 < ping_ms <= 10000:
+                    continue
+                state = ws_connection_state.get(websocket)
+                if state is not None:
+                    state["ping_ms"] = round(ping_ms, 1)
+                    state["ping_updated_at"] = time.monotonic()
                 continue
 
             if signal_type == "group_ping_probe":
