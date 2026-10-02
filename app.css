@@ -742,3 +742,24 @@ body.drawer-open{overflow:hidden}
   object-fit:cover!important;
   object-position:center center
 }
+
+
+/* v99: focused group-call participant uses the available portrait area instead of a square crop. */
+.group-call-grid.has-focus .group-tile.focused{
+  width:100%!important;
+  max-width:100%!important;
+  height:100%!important;
+  min-height:0!important;
+  aspect-ratio:auto!important;
+  align-self:stretch!important;
+  background:#050b14
+}
+.group-call-grid.has-focus .group-tile.focused video,
+.group-call-grid:not(.has-focus) .group-tile video,
+.group-call-strip .group-tile video{
+  width:100%!important;
+  height:100%!important;
+  object-fit:contain!important;
+  object-position:center center!important;
+  background:#050b14!important
+}
