@@ -1115,7 +1115,20 @@ function muteStatusText(item){
   })
 }
 
+function hideStartupSplash(){
+  $('startupSplash')?.classList.add('hidden')
+}
+
+function showStartupSplash(message='Подключаемся…'){
+  const splash=$('startupSplash');
+  if(!splash)return;
+  const status=$('startupStatus');
+  if(status)status.textContent=message;
+  splash.classList.remove('hidden')
+}
+
 function showAuth(){
+  hideStartupSplash();
   me=null;active=null;foundUser=null;
   wsHasConnected=false;
   if(wsReconnectSyncTimer){clearTimeout(wsReconnectSyncTimer);wsReconnectSyncTimer=null}
@@ -1150,6 +1163,7 @@ async function enter(){
     $('authError').textContent='';
     $('auth').classList.add('hidden');
     $('app').classList.remove('hidden');
+    hideStartupSplash();
 
     // Signaling is critical for incoming calls, so connect it before the
     // heavier chat-list queries finish.
@@ -1184,8 +1198,9 @@ async function enter(){
     if(err?.status===401){
       token='';localStorage.removeItem('svoi_token');showAuth();return
     }
-    $('app').classList.add('hidden');$('auth').classList.remove('hidden');
-    $('authError').textContent='Связь с сервером потеряна. Вход сохранён — подключаемся снова…';
+    $('app').classList.add('hidden');
+    $('auth').classList.add('hidden');
+    showStartupSplash('Связь с сервером потеряна · подключаемся снова…');
     setTimeout(()=>{if(token)enter()},3000)
   }
 }
@@ -11194,4 +11209,11 @@ $('avatarInput').onchange=async()=>{
 $('logout').onclick=async()=>{closeDrawer();if(messageRecorder||messageRecordBlob)cancelMessageRecording();if(groupCallState)leaveGroupCall(true);if(currentCall||pendingCall)finishCall(true);await removePushSubscription();try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
 $('back').onclick=()=>{stopOwnTyping();clearReplySource();$('app').classList.remove('chat-open')};
 
-if(token)enter();else showAuth();
+if(token){
+  $('auth').classList.add('hidden');
+  $('app').classList.add('hidden');
+  showStartupSplash('Подключаемся…');
+  enter()
+}else{
+  showAuth()
+}
