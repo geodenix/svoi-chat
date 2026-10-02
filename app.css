@@ -763,3 +763,80 @@ body.drawer-open{overflow:hidden}
   object-position:center center!important;
   background:#050b14!important
 }
+
+
+/* v100: focused group participant behaves like the 1-to-1 call stage. */
+.group-call-overlay.group-focused-mode{
+  overflow:hidden
+}
+.group-call-overlay.group-focused-mode .group-call-grid.has-focus{
+  position:absolute;
+  inset:0;
+  z-index:1;
+  width:100%;
+  height:100%;
+  padding:0!important;
+  margin:0;
+  overflow:hidden;
+  background:#050b14
+}
+.group-call-overlay.group-focused-mode .group-call-grid.has-focus .group-tile.focused{
+  width:100%!important;
+  height:100%!important;
+  min-height:0!important;
+  max-width:none!important;
+  aspect-ratio:auto!important;
+  border:0!important;
+  border-radius:0!important;
+  box-shadow:none!important;
+  transform:none!important;
+  background:#050b14
+}
+.group-call-overlay.group-focused-mode .group-call-grid.has-focus .group-tile.focused video{
+  width:100%!important;
+  height:100%!important;
+  object-fit:cover!important;
+  object-position:center center!important;
+  background:#050b14!important
+}
+.group-call-overlay.group-focused-mode .group-call-head{
+  position:relative;
+  z-index:20;
+  border-bottom:0;
+  background:linear-gradient(180deg,#07101ef2 0%,#07101eb8 62%,transparent 100%)
+}
+.group-call-overlay.group-focused-mode .group-call-controls{
+  position:relative;
+  z-index:20;
+  margin-top:auto;
+  border-top:0;
+  background:linear-gradient(180deg,transparent 0%,#0d1a2cdd 24%,#0d1a2c 58%)
+}
+.group-call-overlay.group-focused-mode .group-call-strip:not(.hidden){
+  position:absolute;
+  z-index:25;
+  left:10px;
+  right:10px;
+  bottom:calc(94px + max(var(--safe-bottom),18px));
+  padding:0;
+  border:0;
+  background:transparent;
+  max-height:82px
+}
+.group-call-overlay.group-focused-mode .group-call-strip .group-tile{
+  flex:0 0 88px!important;
+  width:88px!important;
+  height:76px!important;
+  min-height:76px!important;
+  border-radius:15px;
+  border:1px solid #ffffff55;
+  box-shadow:0 7px 22px #0009
+}
+.group-call-overlay.group-focused-mode .group-call-strip .group-tile video{
+  object-fit:cover!important
+}
+.group-call-overlay.group-focused-mode .group-call-invite-wrap{
+  position:relative;
+  z-index:20;
+  margin-top:auto
+}
