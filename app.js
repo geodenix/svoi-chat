@@ -1230,6 +1230,9 @@ function renderAdminOverview(data){
   const counts=data?.counts||{};
   const activity=data?.activity_24h||{};
   const resources=data?.resources||{};
+  const performanceData=data?.performance||{};
+  const apiPerf=performanceData.api||{};
+  const wsPerf=performanceData.websocket_ping||{};
   const memory=resources.memory||{};
   const disk=resources.disk||{};
   const messages24=(Number(activity.private_messages)||0)+(Number(activity.group_messages)||0);
@@ -1237,13 +1240,18 @@ function renderAdminOverview(data){
   const cards=[
     ['Пользователи',String(counts.users||0),(activity.registrations||0)+' новых за 24 ч'],
     ['Сейчас онлайн',String(data.online_users||0),(data.websocket_connections||0)+' подключений'],
+    ['WebSocket',String(data.websocket_connections||0),wsPerf.avg_ms==null?'ping ещё собирается':'средний ping '+Math.round(wsPerf.avg_ms)+' мс · '+(wsPerf.samples||0)+' замеров'],
+    ['API p95',apiPerf.p95_ms==null?'—':Math.round(apiPerf.p95_ms)+' мс',apiPerf.avg_ms==null?'за последние 60 с':'среднее '+Math.round(apiPerf.avg_ms)+' мс · максимум '+Math.round(apiPerf.max_ms||0)+' мс'],
+    ['API запросы',(Number(apiPerf.requests_per_second)||0).toFixed(2)+'/с',(apiPerf.requests||0)+' за '+(apiPerf.window_seconds||60)+' с · активных '+(apiPerf.active_requests||0)],
+    ['API 5xx',String(apiPerf.errors_5xx||0),'за последние '+(apiPerf.window_seconds||60)+' с'],
+    ['CPU',resources.cpu_percent==null?'—':resources.cpu_percent+'%','load '+(resources.load_1m??'—')+' · '+(resources.cpu_count||1)+' vCPU'],
     ['Активные звонки',String(data.active_calls||0),(activity.calls||0)+' звонков за 24 ч'],
     ['Сообщения',String(totalMessages),messages24+' за 24 ч'],
     ['Группы',String(counts.groups||0),'Всего создано'],
     ['Файлы',String(counts.uploads||0),formatAdminBytes(counts.uploads_bytes||0)],
     ['RAM',memory.percent==null?'—':memory.percent+'%',formatAdminBytes(memory.used||0)+' / '+formatAdminBytes(memory.total||0)],
     ['Диск',disk.percent==null?'—':disk.percent+'%',formatAdminBytes(disk.used||0)+' / '+formatAdminBytes(disk.total||0)],
-    ['Нагрузка',String(resources.load_1m??'—'),(resources.cpu_count||1)+' vCPU · 5м '+(resources.load_5m??'—')],
+    ['Нагрузка 5/15 мин',String(resources.load_5m??'—'),'15м '+(resources.load_15m??'—')],
     ['База данных',formatAdminBytes(resources.database_bytes||0),'Процесс: '+formatAdminBytes(resources.process_rss_bytes||0)],
     ['Сессии',String(counts.sessions||0),'Активные токены входа'],
     ['Аптайм приложения',formatAdminUptime(data.app_uptime_seconds||0),'С последнего запуска']
@@ -9120,6 +9128,45 @@ function measureWsPing(timeoutMs=3500){
   })
 }
 
+let wsHealthPingTimer=null;
+let wsHealthPingBusy=false;
+
+async function reportWsHealthPing(){
+  if(
+    wsHealthPingBusy
+    || !token
+    || socket?.readyState!==WebSocket.OPEN
+  )return;
+  wsHealthPingBusy=true;
+  try{
+    const ping=await measureWsPing(3000);
+    if(socket?.readyState===WebSocket.OPEN){
+      wsSend({
+        type:'ws_ping_report',
+        ping_ms:Math.max(1,Math.round(ping))
+      })
+    }
+  }catch{}finally{
+    wsHealthPingBusy=false
+  }
+}
+
+function startWsHealthPingMonitoring(){
+  if(wsHealthPingTimer)clearInterval(wsHealthPingTimer);
+  setTimeout(()=>reportWsHealthPing().catch(()=>{}),900);
+  wsHealthPingTimer=setInterval(()=>{
+    reportWsHealthPing().catch(()=>{})
+  },30000)
+}
+
+function stopWsHealthPingMonitoring(){
+  if(wsHealthPingTimer){
+    clearInterval(wsHealthPingTimer);
+    wsHealthPingTimer=null
+  }
+  wsHealthPingBusy=false
+}
+
 let wsAckTimer=null;
 let wsAckPendingSeq=0;
 let wsBatchingUi=false;
@@ -9236,6 +9283,7 @@ function connectWs(){
   const lastSeq=readWsLastSeq();
   socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token)+'&last_seq='+encodeURIComponent(lastSeq));
   socket.onopen=()=>{
+    startWsHealthPingMonitoring();
     scheduleOutboxFlush(120);
     const reconnect=wsHasConnected;
     wsHasConnected=true;
@@ -9766,6 +9814,7 @@ function connectWs(){
     if(data.type==='group_created')loadGroups().catch(()=>{})
   }
   socket.onclose=event=>{
+    stopWsHealthPingMonitoring();
     clearTimeout(retry);
     if(event?.code===4401){
       token='';
