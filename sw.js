@@ -1,8 +1,8 @@
-const CACHE_NAME = 'svoi-shell-v96';
+const CACHE_NAME = 'svoi-shell-v97';
 const SHELL = [
   '/',
-  '/app.css?v=96',
-  '/app.js?v=96',
+  '/app.css?v=97',
+  '/app.js?v=97',
   '/manifest.webmanifest',
   '/icon-192.svg',
   '/icon-512.svg'
