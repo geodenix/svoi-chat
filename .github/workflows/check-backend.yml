@@ -2,19 +2,6 @@ name: Check Backend
 
 on:
   push:
-    paths:
-      - "app.py"
-      - "app.js"
-      - "index.html"
-      - "deploy.sh"
-      - "svoi-chat.service"
-      - "setup_livekit.py"
-      - "setup_push.py"
-      - "setup_turn.py"
-      - "requirements.txt"
-      - "requirements.lock.txt"
-      - "android-app/package-lock.json"
-      - ".github/workflows/check-backend.yml"
   workflow_dispatch:
 
 permissions:

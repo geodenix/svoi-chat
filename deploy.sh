@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 APP_DIR=/opt/svoi-chat
 REPO=https://github.com/geodenix/svoi-chat.git
+GITHUB_REPO=geodenix/svoi-chat
 SERVICE=svoi-chat.service
 HEALTH_URL=http://127.0.0.1:8010/health
 BACKUP_DIR="$APP_DIR/data/backups"
@@ -95,6 +96,99 @@ ensure_runtime_permissions() {
   done
 }
 
+verify_remote_commit() {
+  local sha="$1"
+
+  if [ "${SVOI_ALLOW_UNVERIFIED_DEPLOY:-0}" = "1" ]; then
+    log "WARNING: CI/PR verification bypassed by SVOI_ALLOW_UNVERIFIED_DEPLOY=1"
+    return 0
+  fi
+
+  local pulls_file checks_file state
+  pulls_file="$(mktemp /tmp/svoi-pulls.XXXXXX.json)"
+  checks_file="$(mktemp /tmp/svoi-checks.XXXXXX.json)"
+
+  if ! curl -fsS --max-time 10       -H "Accept: application/vnd.github+json"       "https://api.github.com/repos/$GITHUB_REPO/commits/$sha/pulls"       -o "$pulls_file"; then
+    rm -f "$pulls_file" "$checks_file"
+    log "Unable to verify merged PR for $sha"
+    return 1
+  fi
+
+  if ! python3 - "$sha" "$pulls_file" <<'PY'
+import json
+import sys
+
+sha, path = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    pulls = json.load(handle)
+
+valid = any(
+    item.get("merged_at")
+    and item.get("merge_commit_sha") == sha
+    for item in pulls
+)
+raise SystemExit(0 if valid else 1)
+PY
+  then
+    rm -f "$pulls_file" "$checks_file"
+    log "Refusing deploy: $sha is not the merge commit of a merged PR"
+    return 1
+  fi
+
+  for _ in $(seq 1 18); do
+    if ! curl -fsS --max-time 10         -H "Accept: application/vnd.github+json"         "https://api.github.com/repos/$GITHUB_REPO/commits/$sha/check-runs"         -o "$checks_file"; then
+      rm -f "$pulls_file" "$checks_file"
+      log "Unable to verify CI checks for $sha"
+      return 1
+    fi
+
+    state="$(
+      python3 - "$checks_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    checks = json.load(handle).get("check_runs", [])
+
+smoke = [item for item in checks if item.get("name") == "smoke"]
+if any(
+    item.get("status") == "completed"
+    and item.get("conclusion") == "success"
+    for item in smoke
+):
+    print("success")
+elif any(
+    item.get("status") == "completed"
+    and item.get("conclusion") not in (None, "success")
+    for item in smoke
+):
+    print("failed")
+else:
+    print("pending")
+PY
+    )"
+
+    case "$state" in
+      success)
+        rm -f "$pulls_file" "$checks_file"
+        log "Verified merged PR and successful smoke CI for $sha"
+        return 0
+        ;;
+      failed)
+        rm -f "$pulls_file" "$checks_file"
+        log "Refusing deploy: smoke CI failed for $sha"
+        return 1
+        ;;
+    esac
+
+    sleep 5
+  done
+
+  rm -f "$pulls_file" "$checks_file"
+  log "Refusing deploy: smoke CI did not finish successfully for $sha"
+  return 1
+}
+
 check_frontend() {
   if ! command -v node >/dev/null 2>&1; then
     log "Node.js not found; skipping JavaScript syntax check"
@@ -185,6 +279,14 @@ backup_database
 
 log "Fetching latest main branch"
 git fetch origin main
+
+TARGET_SHA="$(git rev-parse origin/main)"
+if [ "$TARGET_SHA" != "$PREVIOUS_SHA" ]; then
+  if ! verify_remote_commit "$TARGET_SHA"; then
+    log "Remote commit verification failed; no service changes were applied"
+    exit 1
+  fi
+fi
 
 if ! git merge --ff-only origin/main; then
   log "Fast-forward update failed; no service changes were applied"
