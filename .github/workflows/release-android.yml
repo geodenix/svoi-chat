@@ -36,13 +36,12 @@ jobs:
 
     env:
       SVOI_KEYSTORE_PATH: ${{ github.workspace }}/android-app/android/app/svoi-release.jks
-      RAW_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      RAW_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      RAW_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Resolve release version
         shell: bash
@@ -128,9 +127,14 @@ jobs:
 
           echo "Resolved Android release: $TAG / $VERSION_NAME"
 
-      - name: Normalize signing secrets
+      - name: Restore signing key and build signed release APK
         shell: bash
+        env:
+          RAW_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          RAW_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          RAW_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
+          set -euo pipefail
           set +x
 
           KEYSTORE_B64="${RAW_KEYSTORE_BASE64#ANDROID_KEYSTORE_BASE64=}"
@@ -142,8 +146,6 @@ jobs:
           KEY_ALIAS="${RAW_KEY_ALIAS#ANDROID_KEY_ALIAS=}"
           KEY_ALIAS="$(printf '%s' "$KEY_ALIAS" | tr -d '\r\n')"
 
-          KEY_PASS="$STORE_PASS"
-
           test -n "$KEYSTORE_B64"
           test -n "$STORE_PASS"
           test -n "$KEY_ALIAS"
@@ -151,83 +153,35 @@ jobs:
           echo "::add-mask::$KEYSTORE_B64"
           echo "::add-mask::$STORE_PASS"
           echo "::add-mask::$KEY_ALIAS"
-          echo "::add-mask::$KEY_PASS"
 
-          printf 'SVOI_KEYSTORE_BASE64=%s\n' "$KEYSTORE_B64" >> "$GITHUB_ENV"
-          printf 'SVOI_KEYSTORE_PASSWORD=%s\n' "$STORE_PASS" >> "$GITHUB_ENV"
-          printf 'SVOI_KEY_ALIAS=%s\n' "$KEY_ALIAS" >> "$GITHUB_ENV"
-          printf 'SVOI_KEY_PASSWORD=%s\n' "$KEY_PASS" >> "$GITHUB_ENV"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$SVOI_KEYSTORE_PATH"
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
+          keytool -list \
+            -keystore "$SVOI_KEYSTORE_PATH" \
+            -storepass "$STORE_PASS" >/dev/null
 
-      - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "21"
+          keytool -list \
+            -keystore "$SVOI_KEYSTORE_PATH" \
+            -storepass "$STORE_PASS" \
+            -alias "$KEY_ALIAS" >/dev/null
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
+          export SVOI_KEYSTORE_PASSWORD="$STORE_PASS"
+          export SVOI_KEY_ALIAS="$KEY_ALIAS"
+          export SVOI_KEY_PASSWORD="$STORE_PASS"
 
-      - name: Install Android SDK 36
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
-
-      - name: Install Capacitor
-        run: npm install
-
-      - name: Create Android project
-        run: npx cap add android
-
-      - name: Sync Capacitor
-        run: npx cap sync android
-
-      - name: Patch Android app
-        run: |
-          python3 patch_android.py
-          python3 patch_release.py "$SVOI_VERSION_CODE" "$SVOI_VERSION_NAME"
-
-      - name: Restore and verify signing key
-        shell: bash
-        run: |
-          set +x
-
-          if ! printf '%s' "$SVOI_KEYSTORE_BASE64" | base64 -d > "$SVOI_KEYSTORE_PATH"; then
-            echo "::error::ANDROID_KEYSTORE_BASE64 is invalid"
-            exit 1
-          fi
-
-          if ! keytool -list -keystore "$SVOI_KEYSTORE_PATH" -storepass "$SVOI_KEYSTORE_PASSWORD" >/dev/null 2>&1; then
-            echo "::error::ANDROID_KEYSTORE_PASSWORD does not match the keystore, or the keystore data is wrong"
-            exit 1
-          fi
-
-          if ! keytool -list -keystore "$SVOI_KEYSTORE_PATH" -storepass "$SVOI_KEYSTORE_PASSWORD" -alias "$SVOI_KEY_ALIAS" >/dev/null 2>&1; then
-            echo "::error::ANDROID_KEY_ALIAS does not exist in the keystore"
-            exit 1
-          fi
-
-          echo "Signing keystore verified successfully"
-
-      - name: Build signed release APK
-        run: |
           chmod +x android/gradlew
           cd android
           ./gradlew assembleRelease --stacktrace
           cp app/build/outputs/apk/release/app-release.apk ../svoi.apk
+
+          rm -f "$SVOI_KEYSTORE_PATH"
 
       - name: Verify APK signature
         run: |
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs svoi.apk
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: svoi-android-release-${{ env.SVOI_VERSION_CODE }}
           path: android-app/svoi.apk
