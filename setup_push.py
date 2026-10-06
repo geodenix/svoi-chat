@@ -1,5 +1,6 @@
 import base64
 import os
+import shutil
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -23,7 +24,12 @@ else:
             encryption_algorithm=serialization.NoEncryption(),
         )
     )
-    os.chmod(PRIVATE_PATH, 0o600)
+    shutil.chown(PRIVATE_PATH, user="root", group="daemon")
+    os.chmod(PRIVATE_PATH, 0o640)
+
+# Normalize permissions even when the key already existed.
+shutil.chown(PRIVATE_PATH, user="root", group="daemon")
+os.chmod(PRIVATE_PATH, 0o640)
 
 numbers = private_key.public_key().public_numbers()
 public_bytes = (
@@ -47,7 +53,8 @@ existing["VAPID_SUBJECT"] = SUBJECT
 ENV_PATH.write_text(
     "".join(f"{key}={value}\n" for key, value in existing.items())
 )
-os.chmod(ENV_PATH, 0o600)
+shutil.chown(ENV_PATH, user="root", group="daemon")
+os.chmod(ENV_PATH, 0o640)
 
 print("Push keys ready.")
 print("Public VAPID key:", public_key)

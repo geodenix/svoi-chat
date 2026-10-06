@@ -77,6 +77,24 @@ ensure_venv() {
   "$APP_DIR/venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
 }
 
+ensure_runtime_permissions() {
+  if ! id daemon >/dev/null 2>&1; then
+    log "Required runtime user daemon is missing"
+    return 1
+  fi
+
+  chown -R daemon:daemon "$APP_DIR/data"
+
+  local secret
+  for secret in     /etc/svoi-chat.env     /etc/svoi-vapid-private.pem     "$APP_DIR/firebase-admin.json"
+  do
+    if [ -f "$secret" ]; then
+      chown root:daemon "$secret"
+      chmod 640 "$secret"
+    fi
+  done
+}
+
 check_frontend() {
   if ! command -v node >/dev/null 2>&1; then
     log "Node.js not found; skipping JavaScript syntax check"
@@ -149,6 +167,7 @@ rollback() {
   log "Deployment failed. Rolling back to $PREVIOUS_SHA"
   git reset --hard "$PREVIOUS_SHA"
   ensure_venv
+  ensure_runtime_permissions || true
   cp "$APP_DIR/svoi-chat.service" /etc/systemd/system/svoi-chat.service
   systemctl daemon-reload
   systemctl restart "$SERVICE"
@@ -196,7 +215,7 @@ if [ "$FETCHED_SHA" = "$PREVIOUS_SHA" ]; then
   exit 1
 fi
 
-if ! ensure_venv || ! validate_release; then
+if ! ensure_venv || ! validate_release || ! ensure_runtime_permissions; then
   rollback
   exit 1
 fi

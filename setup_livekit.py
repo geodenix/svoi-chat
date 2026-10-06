@@ -45,7 +45,8 @@ keys:
 """
 
 CONFIG_FILE.write_text(config)
-os.chmod(CONFIG_FILE, 0o600)
+shutil.chown(CONFIG_FILE, user="root", group="nogroup")
+os.chmod(CONFIG_FILE, 0o640)
 
 existing["LIVEKIT_API_KEY"] = api_key
 existing["LIVEKIT_API_SECRET"] = api_secret
@@ -53,7 +54,8 @@ existing["LIVEKIT_WS_URL"] = f"wss://{DOMAIN}"
 ENV_FILE.write_text(
     "".join(f"{key}={value}\n" for key, value in existing.items())
 )
-os.chmod(ENV_FILE, 0o600)
+shutil.chown(ENV_FILE, user="root", group="daemon")
+os.chmod(ENV_FILE, 0o640)
 
 service = f"""[Unit]
 Description=LiveKit SFU for Svoi
@@ -66,7 +68,14 @@ ExecStart={binary} --config {CONFIG_FILE}
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
-User=root
+User=svoi-livekit
+DynamicUser=yes
+SupplementaryGroups=nogroup
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

@@ -380,8 +380,10 @@ function currentSessionDeviceLabel(){
   return platform+'|'+mode
 }
 
+const authHeaders=()=>token?{Authorization:'Bearer '+token}:{};
+
 const api=async(path,opt={})=>{
-  opt.headers={...(opt.headers||{}),'X-Svoi-Device':currentSessionDeviceLabel(),...(token?{Authorization:'Bearer '+token}:{})};
+  opt.headers={...(opt.headers||{}),'X-Svoi-Device':currentSessionDeviceLabel(),...authHeaders()};
   if(opt.body&&typeof opt.body!=='string'){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(opt.body)}
   const r=await fetch(path,opt);let data=null;try{data=await r.json()}catch{}
   if(!r.ok){const err=new Error(data?.detail||'Ошибка сервера');err.status=r.status;throw err}
@@ -463,7 +465,7 @@ function clientDiagnosticContext(){
 }
 
 async function reportClientError(kind,message,extra={}){
-  if(!token||!me)return;
+  if(!me)return;
   const safeMessage=scrubDiagnosticText(
     message||extra?.stack||'Неизвестная ошибка',
     1200
@@ -518,7 +520,7 @@ async function reportClientError(kind,message,extra={}){
       method:'POST',
       headers:{
         'Content-Type':'application/json',
-        Authorization:'Bearer '+token
+        ...authHeaders()
       },
       body:JSON.stringify(payload),
       keepalive:true
@@ -772,7 +774,7 @@ function clearOutboxFlushTimer(){
 }
 
 function scheduleOutboxFlush(delay=null){
-  if(!me||!token||!readOutbox().length)return;
+  if(!me||!readOutbox().length)return;
   if(!navigator.onLine)return;
   clearOutboxFlushTimer();
   const wait=delay==null
@@ -835,7 +837,7 @@ async function deliverOutboxEntry(entry){
 }
 
 async function flushOutbox(){
-  if(outboxFlushRunning||!me||!token)return;
+  if(outboxFlushRunning||!me)return;
   if(!navigator.onLine){
     for(const entry of readOutbox()){
       if(activeMatchesOutbox(entry))setOutboxMessageState(entry,'waiting')
@@ -940,8 +942,8 @@ $('passwordRecoveryForm').onsubmit=async event=>{
         new_password:newPassword
       }
     });
-    token=data.token;
-    localStorage.setItem('svoi_token',token);
+    token='';
+    localStorage.removeItem('svoi_token');
     $('passwordRecoveryDialog').close();
     await enter();
     showRecoveryCode(
@@ -1013,8 +1015,8 @@ $('authForm').onsubmit=async e=>{
     const body={username:$('username').value.trim(),password:$('password').value};
     if(mode==='register')body.display_name=$('displayName').value.trim();
     const data=await api(mode==='register'?'/api/register':'/api/login',{method:'POST',body});
-    token=data.token;
-    localStorage.setItem('svoi_token',token);
+    token='';
+    localStorage.removeItem('svoi_token');
     await enter();
     if(data.recovery_code){
       showRecoveryCode(
@@ -1154,6 +1156,9 @@ function retryStartupLoader(loader,delay=1800){
 
 async function enter(){
   try{
+    await api('/api/session/bootstrap',{method:'POST'});
+    token='';
+    localStorage.removeItem('svoi_token');
     me=await api('/api/me');
     startClientDiagnostics();
     $('meName').textContent=me.display_name;
@@ -1201,7 +1206,7 @@ async function enter(){
     $('app').classList.add('hidden');
     $('auth').classList.add('hidden');
     showStartupSplash('Связь с сервером потеряна · подключаемся снова…');
-    setTimeout(()=>{if(token)enter()},3000)
+    setTimeout(()=>enter(),3000)
   }
 }
 
@@ -4117,7 +4122,7 @@ async function uploadAndSendRecorded(blob,kind,mime,target){
 
   const uploadResponse=await fetch('/api/uploads',{
     method:'POST',
-    headers:{Authorization:'Bearer '+token},
+    headers:{...authHeaders()},
     body:form
   });
   let attachment=null;
@@ -4456,7 +4461,7 @@ $('groupAvatarInput').onchange=async()=>{
   try{
     const r=await fetch('/api/groups/'+groupId+'/avatar',{
       method:'POST',
-      headers:{Authorization:'Bearer '+token},
+      headers:{...authHeaders()},
       body:form
     });
     let data=null;
@@ -4646,7 +4651,7 @@ $('fileInput').onchange=async()=>{
     const saved=Math.max(0,file.size-uploadFile.size);
     $('pendingFileName').textContent=(saved>64*1024?'Сжато '+formatSize(file.size)+' → '+formatSize(uploadFile.size)+' · ':'Загрузка: ')+uploadFile.name;
     const form=new FormData();form.append('file',uploadFile);
-    const r=await fetch('/api/uploads',{method:'POST',headers:{Authorization:'Bearer '+token},body:form});
+    const r=await fetch('/api/uploads',{method:'POST',headers:{...authHeaders()},body:form});
     const data=await r.json();if(!r.ok)throw new Error(data?.detail||'Ошибка загрузки');
     pendingAttachment=data;$('pendingFileName').textContent='📎 '+data.name+' · '+formatSize(data.size)
   }catch(err){clearPending();alert(err.message)}
@@ -9050,7 +9055,7 @@ async function resumeIncomingCallFromUrl(){
       // WebSocket reconnect can retry it once the app is fully ready.
       setTimeout(()=>{
         const retry=readPendingNativeCallAction();
-        if(retry&&token){
+        if(retry&&me){
           restoreIncomingCallAction(retry).catch(()=>{})
         }
       },1200)
@@ -9154,7 +9159,7 @@ let wsHealthPingBusy=false;
 async function reportWsHealthPing(){
   if(
     wsHealthPingBusy
-    || !token
+    || !me
     || socket?.readyState!==WebSocket.OPEN
   )return;
   wsHealthPingBusy=true;
@@ -9301,7 +9306,8 @@ function flushWsUiBatch(){
 function connectWs(){
   if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';
   const lastSeq=readWsLastSeq();
-  socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token)+'&last_seq='+encodeURIComponent(lastSeq));
+  const params=new URLSearchParams({last_seq:String(lastSeq)});
+  socket=new WebSocket(proto+'://'+location.host+'/ws?'+params.toString());
   socket.onopen=()=>{
     startWsHealthPingMonitoring();
     scheduleOutboxFlush(120);
@@ -9843,9 +9849,17 @@ function connectWs(){
       location.reload();
       return
     }
+    if(event?.code===4403){
+      reportClientError(
+        'manual',
+        'WebSocket отклонён политикой Origin',
+        {context:'code=4403'}
+      ).catch(()=>{});
+      return
+    }
     // WebRTC media can stay alive when only the signaling WebSocket drops.
     // Keep the call and reconnect signaling faster instead of hanging up.
-    if(token)retry=setTimeout(connectWs,(currentCall||pendingCall)?700:2500)
+    if(me)retry=setTimeout(connectWs,(currentCall||pendingCall)?700:2500)
   }
 }
 
@@ -10192,7 +10206,7 @@ $('chatBackgroundInput').onchange=async()=>{
       +'&chat_id='+target.chat_id,
       {
         method:'POST',
-        headers:{Authorization:'Bearer '+token},
+        headers:{...authHeaders()},
         body:form
       }
     );
@@ -10978,7 +10992,11 @@ $('openSessions').onclick=async()=>{
   $('sessionsDialog').showModal();
   $('sessionsList').innerHTML='<div class="empty">Загрузка…</div>';
   try{await loadAccountSessions()}catch(err){
-    $('sessionsList').innerHTML='<div class="error" style="padding:12px">'+(err.message||'Не удалось загрузить сессии')+'</div>'
+    const errorBox=document.createElement('div');
+    errorBox.className='error';
+    errorBox.style.padding='12px';
+    errorBox.textContent=err.message||'Не удалось загрузить сессии';
+    $('sessionsList').replaceChildren(errorBox)
   }
 };
 $('closeSessions').onclick=()=>$('sessionsDialog').close();
@@ -11002,7 +11020,11 @@ $('openBlacklist').onclick=async()=>{
   closeDrawer();
   $('blacklistDialog').showModal();
   try{await renderBlacklist()}catch(err){
-    $('blacklistList').innerHTML='<div class="error" style="padding:12px">'+(err.message||'Не удалось загрузить чёрный список')+'</div>'
+    const errorBox=document.createElement('div');
+    errorBox.className='error';
+    errorBox.style.padding='12px';
+    errorBox.textContent=err.message||'Не удалось загрузить чёрный список';
+    $('blacklistList').replaceChildren(errorBox)
   }
 };
 $('closeBlacklist').onclick=()=>$('blacklistDialog').close();
@@ -11200,7 +11222,7 @@ $('avatarInput').onchange=async()=>{
   try{
     const r=await fetch('/api/me/avatar',{
       method:'POST',
-      headers:{Authorization:'Bearer '+token},
+      headers:{...authHeaders()},
       body:form
     });
     let data=null;try{data=await r.json()}catch{}
@@ -11214,11 +11236,7 @@ $('avatarInput').onchange=async()=>{
 $('logout').onclick=async()=>{closeDrawer();if(messageRecorder||messageRecordBlob)cancelMessageRecording();if(groupCallState)leaveGroupCall(true);if(currentCall||pendingCall)finishCall(true);await removePushSubscription();try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
 $('back').onclick=()=>{stopOwnTyping();clearReplySource();$('app').classList.remove('chat-open')};
 
-if(token){
-  $('auth').classList.add('hidden');
-  $('app').classList.add('hidden');
-  showStartupSplash('Подключаемся…');
-  enter()
-}else{
-  showAuth()
-}
+$('auth').classList.add('hidden');
+$('app').classList.add('hidden');
+showStartupSplash('Подключаемся…');
+enter()
