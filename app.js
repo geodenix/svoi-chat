@@ -10978,7 +10978,11 @@ $('openSessions').onclick=async()=>{
   $('sessionsDialog').showModal();
   $('sessionsList').innerHTML='<div class="empty">Загрузка…</div>';
   try{await loadAccountSessions()}catch(err){
-    $('sessionsList').innerHTML='<div class="error" style="padding:12px">'+(err.message||'Не удалось загрузить сессии')+'</div>'
+    const errorBox=document.createElement('div');
+    errorBox.className='error';
+    errorBox.style.padding='12px';
+    errorBox.textContent=err.message||'Не удалось загрузить сессии';
+    $('sessionsList').replaceChildren(errorBox)
   }
 };
 $('closeSessions').onclick=()=>$('sessionsDialog').close();
@@ -11002,7 +11006,11 @@ $('openBlacklist').onclick=async()=>{
   closeDrawer();
   $('blacklistDialog').showModal();
   try{await renderBlacklist()}catch(err){
-    $('blacklistList').innerHTML='<div class="error" style="padding:12px">'+(err.message||'Не удалось загрузить чёрный список')+'</div>'
+    const errorBox=document.createElement('div');
+    errorBox.className='error';
+    errorBox.style.padding='12px';
+    errorBox.textContent=err.message||'Не удалось загрузить чёрный список';
+    $('blacklistList').replaceChildren(errorBox)
   }
 };
 $('closeBlacklist').onclick=()=>$('blacklistDialog').close();
