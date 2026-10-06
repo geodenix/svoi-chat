@@ -1,5 +1,6 @@
 import os
 import secrets
+import shutil
 import socket
 from pathlib import Path
 
@@ -65,7 +66,8 @@ existing["TURN_HOST"] = HOST
 ENV_FILE.write_text(
     "".join(f"{key}={value}\n" for key, value in existing.items())
 )
-os.chmod(ENV_FILE, 0o600)
+shutil.chown(ENV_FILE, user="root", group="www-data")
+os.chmod(ENV_FILE, 0o640)
 
 print("TURN configured.")
 print("Host:", HOST)
