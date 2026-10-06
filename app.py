@@ -622,6 +622,13 @@ def init_db():
            )"""
     )
 
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_attachment ON messages(attachment_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_messages_attachment ON group_messages(attachment_id)"
+    )
+
     conn.commit()
     conn.close()
 
@@ -3690,6 +3697,65 @@ async def upload(
     }
 
 
+def upload_accessible_to_user(conn, upload_id: int, user_id: int) -> bool:
+    if conn.execute(
+        "SELECT 1 FROM uploads WHERE id=? AND owner_id=?",
+        (upload_id, user_id),
+    ).fetchone():
+        return True
+
+    # User avatars are visible to signed-in users throughout search, contacts,
+    # calls and chat lists.
+    if conn.execute(
+        "SELECT 1 FROM users WHERE avatar_id=? LIMIT 1",
+        (upload_id,),
+    ).fetchone():
+        return True
+
+    # Group avatars are visible only to current members of that group.
+    if conn.execute(
+        """SELECT 1
+           FROM chat_groups g
+           JOIN group_members gm ON gm.group_id=g.id
+           WHERE g.avatar_id=? AND gm.user_id=?
+           LIMIT 1""",
+        (upload_id, user_id),
+    ).fetchone():
+        return True
+
+    # Personal chat backgrounds belong only to the user who configured them.
+    if conn.execute(
+        """SELECT 1 FROM chat_backgrounds
+           WHERE upload_id=? AND user_id=?
+           LIMIT 1""",
+        (upload_id, user_id),
+    ).fetchone():
+        return True
+
+    # Private-message attachments are available only to the two participants.
+    if conn.execute(
+        """SELECT 1 FROM messages
+           WHERE attachment_id=?
+             AND (sender_id=? OR recipient_id=?)
+           LIMIT 1""",
+        (upload_id, user_id, user_id),
+    ).fetchone():
+        return True
+
+    # Group attachments require current membership in the group.
+    if conn.execute(
+        """SELECT 1
+           FROM group_messages gm
+           JOIN group_members member ON member.group_id=gm.group_id
+           WHERE gm.attachment_id=? AND member.user_id=?
+           LIMIT 1""",
+        (upload_id, user_id),
+    ).fetchone():
+        return True
+
+    return False
+
+
 @app.get("/uploads/thumb/{thumb_name}")
 def get_upload_thumbnail(
     thumb_name: str,
@@ -3700,10 +3766,14 @@ def get_upload_thumbnail(
         raise HTTPException(404, "Превью не найдено")
     stored_name = thumb_name[:-4]
     row = conn.execute(
-        "SELECT 1 FROM uploads WHERE stored_name=?",
+        "SELECT id FROM uploads WHERE stored_name=?",
         (stored_name,),
     ).fetchone()
-    if not row:
+    if not row or not upload_accessible_to_user(
+        conn,
+        int(row["id"]),
+        int(user["id"]),
+    ):
         raise HTTPException(404, "Превью не найдено")
     path = THUMB_DIR / thumb_name
     if not path.is_file():
@@ -3724,11 +3794,15 @@ def get_upload(
     if Path(stored_name).name != stored_name:
         raise HTTPException(404, "Файл не найден")
     row = conn.execute(
-        """SELECT stored_name,original_name,mime_type
+        """SELECT id,stored_name,original_name,mime_type
            FROM uploads WHERE stored_name=?""",
         (stored_name,),
     ).fetchone()
-    if not row:
+    if not row or not upload_accessible_to_user(
+        conn,
+        int(row["id"]),
+        int(user["id"]),
+    ):
         raise HTTPException(404, "Файл не найден")
     path = UPLOAD_DIR / row["stored_name"]
     if not path.is_file():
