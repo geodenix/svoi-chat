@@ -8,6 +8,8 @@ on:
       - "index.html"
       - "deploy.sh"
       - "requirements.txt"
+      - "requirements.lock.txt"
+      - "android-app/package-lock.json"
       - ".github/workflows/check-backend.yml"
   workflow_dispatch:
 
@@ -25,7 +27,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.lock.txt
 
       - name: Compile backend
         run: python -m py_compile app.py
