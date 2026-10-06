@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Set
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
@@ -68,6 +68,18 @@ SERVER_ADMIN_IDS = {
     if value.strip().isdigit()
 }
 APP_STARTED_AT = time.time()
+SESSION_COOKIE_NAME = "svoi_session"
+SESSION_TTL_DAYS = max(7, min(365, int(os.getenv("SVOI_SESSION_TTL_DAYS", "90"))))
+SESSION_COOKIE_MAX_AGE = SESSION_TTL_DAYS * 24 * 60 * 60
+WS_ALLOWED_ORIGINS = {
+    value.strip()
+    for value in os.getenv(
+        "SVOI_ALLOWED_ORIGINS",
+        "https://epl-gruz.duckdns.org,capacitor://localhost,http://localhost",
+    ).split(",")
+    if value.strip()
+}
+auth_rate_state: dict[str, deque] = {}
 
 app = FastAPI(title="Свои", version="0.1.0")
 app.add_middleware(GZipMiddleware, minimum_size=1024)
@@ -116,6 +128,44 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def session_expiry_iso() -> str:
+    return (
+        datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)
+    ).isoformat()
+
+
+def client_ip(request: Request) -> str:
+    forwarded = str(request.headers.get("x-forwarded-for") or "").split(",", 1)[0].strip()
+    if forwarded:
+        return forwarded[:80]
+    if request.client and request.client.host:
+        return str(request.client.host)[:80]
+    return "unknown"
+
+
+def enforce_auth_rate_limit(
+    request: Request,
+    bucket: str,
+    limit: int,
+    window_seconds: int,
+    subject: str = "",
+) -> None:
+    now = time.monotonic()
+    key = f"{bucket}:{client_ip(request)}:{subject.strip().lower()[:80]}"
+    events = auth_rate_state.setdefault(key, deque())
+    cutoff = now - float(window_seconds)
+    while events and events[0] <= cutoff:
+        events.popleft()
+    if len(events) >= limit:
+        retry_after = max(1, int(window_seconds - (now - events[0])))
+        raise HTTPException(
+            429,
+            "Слишком много попыток. Попробуй позже.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    events.append(now)
+
+
 def connect_db():
     conn = sqlite3.connect(
         DB_PATH,
@@ -160,7 +210,8 @@ def init_db():
       device_label TEXT,
       user_agent TEXT,
       created_at TEXT NOT NULL,
-      last_seen_at TEXT
+      last_seen_at TEXT,
+      expires_at TEXT
     );
     CREATE TABLE IF NOT EXISTS contacts (
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -413,6 +464,20 @@ def init_db():
         conn.execute("ALTER TABLE sessions ADD COLUMN user_agent TEXT")
     if "last_seen_at" not in session_columns:
         conn.execute("ALTER TABLE sessions ADD COLUMN last_seen_at TEXT")
+    if "expires_at" not in session_columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN expires_at TEXT")
+
+    legacy_expiry = (
+        datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)
+    ).isoformat()
+    conn.execute(
+        "UPDATE sessions SET expires_at=? WHERE expires_at IS NULL OR expires_at=''",
+        (legacy_expiry,),
+    )
+    conn.execute(
+        "DELETE FROM sessions WHERE expires_at<=?",
+        (now_iso(),),
+    )
 
     legacy_sessions = conn.execute(
         "SELECT token_hash FROM sessions WHERE session_id IS NULL OR session_id=''"
@@ -427,6 +492,9 @@ def init_db():
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sessions_user_seen ON sessions(user_id,last_seen_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)"
     )
 
     for table in ("messages", "group_messages"):
@@ -649,6 +717,28 @@ def request_session_meta(request: Request | None) -> tuple[str, str]:
     return device_label, user_agent
 
 
+def set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        max_age=SESSION_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(
+        SESSION_COOKIE_NAME,
+        path="/",
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+
+
 def make_session(
     conn,
     user_id: int,
@@ -659,8 +749,8 @@ def make_session(
     device_label, user_agent = request_session_meta(request)
     conn.execute(
         """INSERT INTO sessions(
-             token_hash,session_id,user_id,device_label,user_agent,created_at,last_seen_at
-           ) VALUES(?,?,?,?,?,?,?)""",
+             token_hash,session_id,user_id,device_label,user_agent,created_at,last_seen_at,expires_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
         (
             token_hash(token),
             secrets.token_urlsafe(12),
@@ -669,6 +759,7 @@ def make_session(
             user_agent,
             now,
             now,
+            session_expiry_iso(),
         ),
     )
     conn.commit()
@@ -710,25 +801,46 @@ def group_json(row):
 
 
 def get_user_from_token(conn, token: str):
+    if not token:
+        return None
+    hashed = token_hash(token)
     row = conn.execute(
         """SELECT u.id,u.username,u.display_name,
                   a.stored_name AS avatar_stored_name
            FROM sessions s
            JOIN users u ON u.id=s.user_id
            LEFT JOIN uploads a ON a.id=u.avatar_id
-           WHERE s.token_hash=?""",
-        (token_hash(token),),
+           WHERE s.token_hash=?
+             AND (s.expires_at IS NULL OR s.expires_at>?)""",
+        (hashed, now_iso()),
     ).fetchone()
-    return row
+    if row:
+        return row
+    conn.execute(
+        "DELETE FROM sessions WHERE token_hash=? AND expires_at IS NOT NULL AND expires_at<=?",
+        (hashed, now_iso()),
+    )
+    conn.commit()
+    return None
+
+
+def request_session_token(
+    request: Request,
+    authorization: str | None = None,
+) -> str:
+    if authorization and authorization.startswith("Bearer "):
+        return authorization[7:].strip()
+    return str(request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
 
 
 def current_user(
+    request: Request,
     authorization: str | None = Header(default=None),
     conn=Depends(db),
 ):
-    if not authorization or not authorization.startswith("Bearer "):
+    token = request_session_token(request, authorization)
+    if not token:
         raise HTTPException(401, "Нужна авторизация")
-    token = authorization[7:]
     row = get_user_from_token(conn, token)
     if not row:
         raise HTTPException(401, "Сессия недействительна")
@@ -1064,8 +1176,14 @@ def health():
 
 
 @app.post("/api/register")
-def register(data: RegisterIn, request: Request, conn=Depends(db)):
+def register(
+    data: RegisterIn,
+    request: Request,
+    response: Response,
+    conn=Depends(db),
+):
     username = data.username.strip().lower()
+    enforce_auth_rate_limit(request, "register", 5, 3600, username)
     if conn.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
         raise HTTPException(409, "Такой логин уже занят")
     password_hash, salt = hash_password(data.password)
@@ -1092,25 +1210,36 @@ def register(data: RegisterIn, request: Request, conn=Depends(db)):
            WHERE u.id=?""",
         (cur.lastrowid,),
     ).fetchone()
+    token = make_session(conn, row["id"], request)
+    set_session_cookie(response, token)
     return {
-        "token": make_session(conn, row["id"], request),
+        "token": token,
         "user": user_json(row),
         "recovery_code": recovery_code,
     }
 
 
 @app.post("/api/login")
-def login(data: LoginIn, request: Request, conn=Depends(db)):
+def login(
+    data: LoginIn,
+    request: Request,
+    response: Response,
+    conn=Depends(db),
+):
+    username = data.username.strip().lower()
+    enforce_auth_rate_limit(request, "login", 10, 300, username)
     row = conn.execute(
         """SELECT u.*, a.stored_name AS avatar_stored_name
            FROM users u
            LEFT JOIN uploads a ON a.id=u.avatar_id
            WHERE u.username=?""",
-        (data.username.strip().lower(),),
+        (username,),
     ).fetchone()
     if not row or not verify_password(data.password, row["password_hash"], row["salt"]):
         raise HTTPException(401, "Неверный логин или пароль")
-    return {"token": make_session(conn, row["id"], request), "user": user_json(row)}
+    token = make_session(conn, row["id"], request)
+    set_session_cookie(response, token)
+    return {"token": token, "user": user_json(row)}
 
 
 @app.get("/api/account/recovery")
@@ -1164,9 +1293,11 @@ def create_recovery_code(
 async def recover_password(
     data: PasswordRecoverIn,
     request: Request,
+    response: Response,
     conn=Depends(db),
 ):
     username = data.username.strip().lower().lstrip("@")
+    enforce_auth_rate_limit(request, "password-recover", 5, 900, username)
     code_hash = recovery_code_hash(data.recovery_code)
     row = conn.execute(
         """SELECT u.*, a.stored_name AS avatar_stored_name
@@ -1213,6 +1344,7 @@ async def recover_password(
     conn.commit()
 
     new_token = make_session(conn, row["id"], request)
+    set_session_cookie(response, new_token)
 
     for websocket in list(connections.get(row["id"], set())):
         try:
@@ -1240,6 +1372,20 @@ async def recover_password(
     }
 
 
+@app.post("/api/session/bootstrap")
+def bootstrap_session_cookie(
+    request: Request,
+    response: Response,
+    authorization: str | None = Header(default=None),
+    user=Depends(current_user),
+):
+    token = request_session_token(request, authorization)
+    if not token:
+        raise HTTPException(401, "Нужна авторизация")
+    set_session_cookie(response, token)
+    return {"ok": True}
+
+
 def authorization_token_hash(authorization: str | None) -> str | None:
     if not authorization or not authorization.startswith("Bearer "):
         return None
@@ -1253,6 +1399,7 @@ def session_json(row, current_hash: str | None = None) -> dict:
         "device_label": row["device_label"] or "Неизвестное устройство",
         "created_at": row["created_at"],
         "last_seen_at": row["last_seen_at"] or row["created_at"],
+        "expires_at": row["expires_at"] if "expires_at" in row.keys() else None,
         "current": bool(current_hash and row["token_hash"] == current_hash),
         "client": (
             "Android"
@@ -1283,8 +1430,13 @@ def list_account_sessions(
             (device_label, user_agent, now_iso(), current_hash),
         )
         conn.commit()
+    conn.execute(
+        "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at<=?",
+        (now_iso(),),
+    )
+    conn.commit()
     rows = conn.execute(
-        """SELECT token_hash,session_id,device_label,user_agent,created_at,last_seen_at
+        """SELECT token_hash,session_id,device_label,user_agent,created_at,last_seen_at,expires_at
            FROM sessions
            WHERE user_id=?
            ORDER BY COALESCE(last_seen_at,created_at) DESC,created_at DESC""",
@@ -1362,13 +1514,20 @@ async def revoke_other_account_sessions(
 
 @app.post("/api/logout")
 def logout(
+    request: Request,
+    response: Response,
     authorization: str | None = Header(default=None),
     user=Depends(current_user),
     conn=Depends(db),
 ):
-    if authorization:
-        conn.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash(authorization[7:]),))
+    token = request_session_token(request, authorization)
+    if token:
+        conn.execute(
+            "DELETE FROM sessions WHERE token_hash=?",
+            (token_hash(token),),
+        )
         conn.commit()
+    clear_session_cookie(response)
     return {"ok": True}
 
 
@@ -3532,7 +3691,11 @@ async def upload(
 
 
 @app.get("/uploads/thumb/{thumb_name}")
-def get_upload_thumbnail(thumb_name: str, conn=Depends(db)):
+def get_upload_thumbnail(
+    thumb_name: str,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
     if Path(thumb_name).name != thumb_name or not thumb_name.endswith(".jpg"):
         raise HTTPException(404, "Превью не найдено")
     stored_name = thumb_name[:-4]
@@ -3553,7 +3716,11 @@ def get_upload_thumbnail(thumb_name: str, conn=Depends(db)):
 
 
 @app.get("/uploads/{stored_name}")
-def get_upload(stored_name: str, conn=Depends(db)):
+def get_upload(
+    stored_name: str,
+    user=Depends(current_user),
+    conn=Depends(db),
+):
     if Path(stored_name).name != stored_name:
         raise HTTPException(404, "Файл не найден")
     row = conn.execute(
@@ -7126,13 +7293,27 @@ async def finish_answered_call_after_disconnect_grace(
 @app.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
-    token: str = Query(...),
+    token: str | None = Query(default=None),
     last_seq: int = Query(default=0, ge=0),
 ):
+    origin = str(websocket.headers.get("origin") or "").strip()
+    if origin and origin not in WS_ALLOWED_ORIGINS:
+        await websocket.close(code=4403)
+        return
+
+    session_token = str(
+        websocket.cookies.get(SESSION_COOKIE_NAME)
+        or token
+        or ""
+    ).strip()
+    if not session_token:
+        await websocket.close(code=4401)
+        return
+
     conn = connect_db()
     conn.row_factory = sqlite3.Row
-    row = get_user_from_token(conn, token)
-    current_session_hash = token_hash(token)
+    row = get_user_from_token(conn, session_token)
+    current_session_hash = token_hash(session_token)
     if row:
         conn.execute(
             "UPDATE sessions SET last_seen_at=? WHERE token_hash=?",
