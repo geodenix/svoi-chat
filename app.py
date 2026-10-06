@@ -68,6 +68,8 @@ SERVER_ADMIN_IDS = {
     if value.strip().isdigit()
 }
 APP_STARTED_AT = time.time()
+PBKDF2_ITERATIONS = 600_000
+LEGACY_PBKDF2_ITERATIONS = 240_000
 SESSION_COOKIE_NAME = "svoi_session"
 SESSION_TTL_DAYS = max(7, min(365, int(os.getenv("SVOI_SESSION_TTL_DAYS", "90"))))
 SESSION_COOKIE_MAX_AGE = SESSION_TTL_DAYS * 24 * 60 * 60
@@ -196,6 +198,7 @@ def init_db():
       display_name TEXT NOT NULL,
       password_hash TEXT NOT NULL,
       salt TEXT NOT NULL,
+      password_iterations INTEGER NOT NULL DEFAULT 240000,
       recovery_code_hash TEXT,
       phone_hash TEXT,
       phone_last4 TEXT,
@@ -565,6 +568,10 @@ def init_db():
         row[1]
         for row in conn.execute("PRAGMA table_info(users)").fetchall()
     }
+    if "password_iterations" not in user_columns:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN password_iterations INTEGER NOT NULL DEFAULT 240000"
+        )
     if "avatar_id" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN avatar_id INTEGER")
     if "last_seen_at" not in user_columns:
@@ -638,15 +645,40 @@ def startup():
     init_db()
 
 
-def hash_password(password: str, salt_hex: str | None = None):
+def hash_password(
+    password: str,
+    salt_hex: str | None = None,
+    iterations: int = PBKDF2_ITERATIONS,
+):
     salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 240_000)
+    rounds = max(LEGACY_PBKDF2_ITERATIONS, int(iterations or LEGACY_PBKDF2_ITERATIONS))
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, rounds)
     return digest.hex(), salt.hex()
 
 
-def verify_password(password: str, expected: str, salt: str) -> bool:
-    digest, _ = hash_password(password, salt)
+def verify_password(
+    password: str,
+    expected: str,
+    salt: str,
+    iterations: int = LEGACY_PBKDF2_ITERATIONS,
+) -> bool:
+    digest, _ = hash_password(password, salt, iterations)
     return secrets.compare_digest(digest, expected)
+
+
+def verify_user_password(password: str, row) -> bool:
+    keys = set(row.keys()) if hasattr(row, "keys") else set()
+    iterations = (
+        int(row["password_iterations"] or LEGACY_PBKDF2_ITERATIONS)
+        if "password_iterations" in keys
+        else LEGACY_PBKDF2_ITERATIONS
+    )
+    return verify_password(
+        password,
+        row["password_hash"],
+        row["salt"],
+        iterations,
+    )
 
 
 def token_hash(token: str) -> str:
@@ -1024,7 +1056,7 @@ def _service_state(name: str) -> str:
 class RegisterIn(BaseModel):
     username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
     display_name: str = Field(min_length=1, max_length=60)
-    password: str = Field(min_length=6, max_length=128)
+    password: str = Field(min_length=10, max_length=128)
 
 
 class LoginIn(BaseModel):
@@ -1039,7 +1071,7 @@ class RecoveryCodeCreateIn(BaseModel):
 class PasswordRecoverIn(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     recovery_code: str = Field(min_length=12, max_length=128)
-    new_password: str = Field(min_length=6, max_length=128)
+    new_password: str = Field(min_length=10, max_length=128)
 
 
 class PhoneLinkIn(BaseModel):
@@ -1199,13 +1231,14 @@ def register(
     recovery_code = make_recovery_code()
     cur = conn.execute(
         """INSERT INTO users(
-             username,display_name,password_hash,salt,recovery_code_hash,created_at
-           ) VALUES(?,?,?,?,?,?)""",
+             username,display_name,password_hash,salt,password_iterations,recovery_code_hash,created_at
+           ) VALUES(?,?,?,?,?,?,?)""",
         (
             username,
             data.display_name.strip(),
             password_hash,
             salt,
+            PBKDF2_ITERATIONS,
             recovery_code_hash(recovery_code),
             now_iso(),
         ),
@@ -1244,8 +1277,27 @@ def login(
            WHERE u.username=?""",
         (username,),
     ).fetchone()
-    if not row or not verify_password(data.password, row["password_hash"], row["salt"]):
+    if not row or not verify_user_password(data.password, row):
         raise HTTPException(401, "Неверный логин или пароль")
+
+    current_iterations = int(
+        row["password_iterations"] or LEGACY_PBKDF2_ITERATIONS
+    )
+    if current_iterations < PBKDF2_ITERATIONS:
+        upgraded_hash, upgraded_salt = hash_password(data.password)
+        conn.execute(
+            """UPDATE users
+               SET password_hash=?,salt=?,password_iterations=?
+               WHERE id=?""",
+            (
+                upgraded_hash,
+                upgraded_salt,
+                PBKDF2_ITERATIONS,
+                row["id"],
+            ),
+        )
+        conn.commit()
+
     token = make_session(conn, row["id"], request)
     set_session_cookie(response, token)
     return {"token": token, "user": user_json(row)}
@@ -1274,15 +1326,14 @@ def create_recovery_code(
     conn=Depends(db),
 ):
     row = conn.execute(
-        """SELECT id,password_hash,salt
+        """SELECT id,password_hash,salt,password_iterations
            FROM users
            WHERE id=?""",
         (user["id"],),
     ).fetchone()
-    if not row or not verify_password(
+    if not row or not verify_user_password(
         data.current_password,
-        row["password_hash"],
-        row["salt"],
+        row,
     ):
         raise HTTPException(401, "Неверный текущий пароль")
 
@@ -1337,11 +1388,13 @@ async def recover_password(
         """UPDATE users
            SET password_hash=?,
                salt=?,
+               password_iterations=?,
                recovery_code_hash=?
            WHERE id=?""",
         (
             password_hash,
             salt,
+            PBKDF2_ITERATIONS,
             recovery_code_hash(next_recovery_code),
             row["id"],
         ),
@@ -1578,15 +1631,14 @@ def link_account_phone(
     conn=Depends(db),
 ):
     account = conn.execute(
-        """SELECT id,password_hash,salt
+        """SELECT id,password_hash,salt,password_iterations
            FROM users
            WHERE id=?""",
         (user["id"],),
     ).fetchone()
-    if not account or not verify_password(
+    if not account or not verify_user_password(
         data.current_password,
-        account["password_hash"],
-        account["salt"],
+        account,
     ):
         raise HTTPException(401, "Неверный текущий пароль")
 
@@ -1651,15 +1703,14 @@ def unlink_account_phone(
     conn=Depends(db),
 ):
     account = conn.execute(
-        """SELECT id,password_hash,salt
+        """SELECT id,password_hash,salt,password_iterations
            FROM users
            WHERE id=?""",
         (user["id"],),
     ).fetchone()
-    if not account or not verify_password(
+    if not account or not verify_user_password(
         data.current_password,
-        account["password_hash"],
-        account["salt"],
+        account,
     ):
         raise HTTPException(401, "Неверный текущий пароль")
 
