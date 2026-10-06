@@ -24,8 +24,12 @@ else:
             encryption_algorithm=serialization.NoEncryption(),
         )
     )
-    shutil.chown(PRIVATE_PATH, user="root", group="www-data")
+    shutil.chown(PRIVATE_PATH, user="root", group="daemon")
     os.chmod(PRIVATE_PATH, 0o640)
+
+# Normalize permissions even when the key already existed.
+shutil.chown(PRIVATE_PATH, user="root", group="daemon")
+os.chmod(PRIVATE_PATH, 0o640)
 
 numbers = private_key.public_key().public_numbers()
 public_bytes = (
@@ -49,7 +53,7 @@ existing["VAPID_SUBJECT"] = SUBJECT
 ENV_PATH.write_text(
     "".join(f"{key}={value}\n" for key, value in existing.items())
 )
-shutil.chown(ENV_PATH, user="root", group="www-data")
+shutil.chown(ENV_PATH, user="root", group="daemon")
 os.chmod(ENV_PATH, 0o640)
 
 print("Push keys ready.")
