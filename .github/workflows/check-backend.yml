@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "app.py"
+      - "app.js"
       - "index.html"
       - "deploy.sh"
       - "requirements.txt"
@@ -34,6 +35,7 @@ jobs:
 
       - name: Check frontend JavaScript
         run: |
+          node --check app.js
           python - <<'PY'
           import re
           from pathlib import Path
