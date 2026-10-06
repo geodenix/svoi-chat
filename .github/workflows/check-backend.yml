@@ -7,6 +7,10 @@ on:
       - "app.js"
       - "index.html"
       - "deploy.sh"
+      - "svoi-chat.service"
+      - "setup_livekit.py"
+      - "setup_push.py"
+      - "setup_turn.py"
       - "requirements.txt"
       - "requirements.lock.txt"
       - "android-app/package-lock.json"
@@ -29,8 +33,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.lock.txt
 
-      - name: Compile backend
-        run: python -m py_compile app.py
+      - name: Compile backend and setup scripts
+        run: |
+          python -m py_compile app.py
+          python -m py_compile setup_livekit.py setup_push.py setup_turn.py
+
+      - name: Validate Android lockfile
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix android-app
 
       - name: Check deploy script
         run: bash -n deploy.sh
