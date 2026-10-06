@@ -10,7 +10,13 @@ EnvironmentFile=-/etc/svoi-chat.env
 ExecStart=/opt/svoi-chat/venv/bin/uvicorn server:app --host 127.0.0.1 --port 8010
 Restart=always
 RestartSec=3
-User=root
+User=www-data
+Group=www-data
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target
