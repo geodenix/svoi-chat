@@ -74,7 +74,7 @@ ensure_venv() {
     log "Creating Python virtual environment"
     python3 -m venv "$APP_DIR/venv"
   fi
-  "$APP_DIR/venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
+  "$APP_DIR/venv/bin/pip" install -q -r "$APP_DIR/requirements.lock.txt"
 }
 
 ensure_runtime_permissions() {

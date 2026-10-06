@@ -149,7 +149,7 @@ jobs:
           sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Install Capacitor
-        run: npm install
+        run: npm ci
 
       - name: Create Android project
         run: npx cap add android

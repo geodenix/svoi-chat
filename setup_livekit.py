@@ -2,6 +2,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 from pathlib import Path
 
 DOMAIN = "epl-gruz.duckdns.org"
@@ -15,6 +16,7 @@ CONFIG_FILE = Path("/etc/livekit.yaml")
 SERVICE_FILE = Path("/etc/systemd/system/livekit.service")
 CADDY_FILE = Path("/etc/caddy/Caddyfile")
 CADDY_BACKUP = Path("/etc/caddy/Caddyfile.before-livekit")
+SYSCTL_FILE = Path("/etc/sysctl.d/99-livekit.conf")
 
 binary = shutil.which("livekit-server")
 if not binary:
@@ -48,6 +50,14 @@ CONFIG_FILE.write_text(config)
 shutil.chown(CONFIG_FILE, user="root", group="nogroup")
 os.chmod(CONFIG_FILE, 0o640)
 
+SYSCTL_FILE.write_text(
+    "# LiveKit/WebRTC UDP socket buffers.\n"
+    "net.core.rmem_max = 5000000\n"
+    "net.core.wmem_max = 5000000\n"
+)
+os.chmod(SYSCTL_FILE, 0o644)
+subprocess.run(["sysctl", "--system"], check=True)
+
 existing["LIVEKIT_API_KEY"] = api_key
 existing["LIVEKIT_API_SECRET"] = api_secret
 existing["LIVEKIT_WS_URL"] = f"wss://{DOMAIN}"
@@ -76,6 +86,19 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 RestrictSUIDSGID=true
+ProtectSystem=strict
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

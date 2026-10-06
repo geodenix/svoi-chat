@@ -17,6 +17,21 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 RestrictSUIDSGID=true
+Environment=PYTHONDONTWRITEBYTECODE=1
+ProtectSystem=strict
+ReadWritePaths=/opt/svoi-chat/data
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
