@@ -836,7 +836,9 @@ def request_session_token(
     authorization: str | None = None,
 ) -> str:
     if authorization and authorization.startswith("Bearer "):
-        return authorization[7:].strip()
+        bearer = authorization[7:].strip()
+        if bearer:
+            return bearer
     return str(request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
 
 
@@ -1393,10 +1395,12 @@ def bootstrap_session_cookie(
     return {"ok": True}
 
 
-def authorization_token_hash(authorization: str | None) -> str | None:
-    if not authorization or not authorization.startswith("Bearer "):
-        return None
-    return token_hash(authorization[7:])
+def authorization_token_hash(
+    request: Request,
+    authorization: str | None = None,
+) -> str | None:
+    token = request_session_token(request, authorization)
+    return token_hash(token) if token else None
 
 
 def session_json(row, current_hash: str | None = None) -> dict:
@@ -1427,7 +1431,7 @@ def list_account_sessions(
     user=Depends(current_user),
     conn=Depends(db),
 ):
-    current_hash = authorization_token_hash(authorization)
+    current_hash = authorization_token_hash(request, authorization)
     if current_hash:
         device_label, user_agent = request_session_meta(request)
         conn.execute(
