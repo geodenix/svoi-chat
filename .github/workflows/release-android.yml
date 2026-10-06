@@ -127,6 +127,41 @@ jobs:
 
           echo "Resolved Android release: $TAG / $VERSION_NAME"
 
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Setup Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install Capacitor
+        run: npm install
+
+      - name: Create Android project
+        run: npx cap add android
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Patch Android app
+        run: |
+          python3 patch_android.py
+          python3 patch_release.py "$SVOI_VERSION_CODE" "$SVOI_VERSION_NAME"
+
       - name: Restore signing key and build signed release APK
         shell: bash
         env:
@@ -139,10 +174,8 @@ jobs:
 
           KEYSTORE_B64="${RAW_KEYSTORE_BASE64#ANDROID_KEYSTORE_BASE64=}"
           KEYSTORE_B64="$(printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]')"
-
           STORE_PASS="${RAW_KEYSTORE_PASSWORD#ANDROID_KEYSTORE_PASSWORD=}"
           STORE_PASS="$(printf '%s' "$STORE_PASS" | tr -d '\r\n')"
-
           KEY_ALIAS="${RAW_KEY_ALIAS#ANDROID_KEY_ALIAS=}"
           KEY_ALIAS="$(printf '%s' "$KEY_ALIAS" | tr -d '\r\n')"
 
@@ -155,15 +188,8 @@ jobs:
           echo "::add-mask::$KEY_ALIAS"
 
           printf '%s' "$KEYSTORE_B64" | base64 -d > "$SVOI_KEYSTORE_PATH"
-
-          keytool -list \
-            -keystore "$SVOI_KEYSTORE_PATH" \
-            -storepass "$STORE_PASS" >/dev/null
-
-          keytool -list \
-            -keystore "$SVOI_KEYSTORE_PATH" \
-            -storepass "$STORE_PASS" \
-            -alias "$KEY_ALIAS" >/dev/null
+          keytool -list -keystore "$SVOI_KEYSTORE_PATH" -storepass "$STORE_PASS" >/dev/null
+          keytool -list -keystore "$SVOI_KEYSTORE_PATH" -storepass "$STORE_PASS" -alias "$KEY_ALIAS" >/dev/null
 
           export SVOI_KEYSTORE_PASSWORD="$STORE_PASS"
           export SVOI_KEY_ALIAS="$KEY_ALIAS"
