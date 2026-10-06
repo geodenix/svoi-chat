@@ -78,18 +78,18 @@ ensure_venv() {
 }
 
 ensure_runtime_permissions() {
-  if ! id www-data >/dev/null 2>&1; then
-    log "Required runtime user www-data is missing"
+  if ! id daemon >/dev/null 2>&1; then
+    log "Required runtime user daemon is missing"
     return 1
   fi
 
-  chown -R www-data:www-data "$APP_DIR/data"
+  chown -R daemon:daemon "$APP_DIR/data"
 
   local secret
   for secret in     /etc/svoi-chat.env     /etc/svoi-vapid-private.pem     "$APP_DIR/firebase-admin.json"
   do
     if [ -f "$secret" ]; then
-      chown root:www-data "$secret"
+      chown root:daemon "$secret"
       chmod 640 "$secret"
     fi
   done
