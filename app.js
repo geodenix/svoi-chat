@@ -1154,6 +1154,7 @@ function retryStartupLoader(loader,delay=1800){
 
 async function enter(){
   try{
+    await api('/api/session/bootstrap',{method:'POST'});
     me=await api('/api/me');
     startClientDiagnostics();
     $('meName').textContent=me.display_name;
@@ -9298,10 +9299,12 @@ function flushWsUiBatch(){
   wsGroupRowsPending.clear()
 }
 
-function connectWs(){
+function connectWs(useTokenFallback=false){
   if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';
   const lastSeq=readWsLastSeq();
-  socket=new WebSocket(proto+'://'+location.host+'/ws?token='+encodeURIComponent(token)+'&last_seq='+encodeURIComponent(lastSeq));
+  const params=new URLSearchParams({last_seq:String(lastSeq)});
+  if(useTokenFallback&&token)params.set('token',token);
+  socket=new WebSocket(proto+'://'+location.host+'/ws?'+params.toString());
   socket.onopen=()=>{
     startWsHealthPingMonitoring();
     scheduleOutboxFlush(120);
@@ -9837,15 +9840,27 @@ function connectWs(){
     stopWsHealthPingMonitoring();
     clearTimeout(retry);
     if(event?.code===4401){
+      if(!useTokenFallback&&token){
+        retry=setTimeout(()=>connectWs(true),250);
+        return
+      }
       token='';
       localStorage.removeItem('svoi_token');
       try{closePrewarmedPrivateCall()}catch{}
       location.reload();
       return
     }
+    if(event?.code===4403){
+      reportClientError(
+        'manual',
+        'WebSocket отклонён политикой Origin',
+        {context:'code=4403'}
+      ).catch(()=>{});
+      return
+    }
     // WebRTC media can stay alive when only the signaling WebSocket drops.
     // Keep the call and reconnect signaling faster instead of hanging up.
-    if(token)retry=setTimeout(connectWs,(currentCall||pendingCall)?700:2500)
+    if(token)retry=setTimeout(()=>connectWs(false),(currentCall||pendingCall)?700:2500)
   }
 }
 
