@@ -66,7 +66,7 @@ existing["TURN_HOST"] = HOST
 ENV_FILE.write_text(
     "".join(f"{key}={value}\n" for key, value in existing.items())
 )
-shutil.chown(ENV_FILE, user="root", group="www-data")
+shutil.chown(ENV_FILE, user="root", group="daemon")
 os.chmod(ENV_FILE, 0o640)
 
 print("TURN configured.")
