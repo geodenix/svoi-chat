@@ -381,13 +381,14 @@ public class MainActivity extends BridgeActivity {
                     && currentUrl != null
                     && currentUrl.startsWith(APP_URL);
 
-                if (appAlreadyLoaded && openActiveCall) {
+                if (appAlreadyLoaded && (openActiveCall || incomingCall)) {
                     String js =
-                        "window.handleNativeCallAction"
-                        + " ? window.handleNativeCallAction("
+                        "(function(){"
+                        + "if(typeof window.handleNativeCallAction"
+                        + " !== 'function')return false;"
+                        + "return window.handleNativeCallAction("
                         + JSONObject.quote(actionPath)
-                        + ")"
-                        + " : false";
+                        + ");})()";
                     bridge.getWebView().evaluateJavascript(
                         js,
                         result -> {
