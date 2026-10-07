@@ -264,11 +264,14 @@ public class MainActivity extends BridgeActivity {
     private static final String PREF_DOWNLOAD_VERSION_CODE = "download_version_code";
     private static final String PREF_DOWNLOAD_VERSION_NAME = "download_version_name";
     private static final String PREF_LAST_CHECK_AT = "last_check_at";
+    private static final String PREF_FAILED_CHECK_AT = "failed_check_at";
     private static final String PREF_DISMISSED_VERSION_CODE = "dismissed_version_code";
     private static final String PREF_DISMISSED_AT = "dismissed_at";
     private static final String PREF_INSTALL_REMIND_AT = "install_remind_at";
     private static final long UPDATE_CHECK_INTERVAL_MS =
         6L * 60L * 60L * 1000L;
+    private static final long UPDATE_FAILURE_RETRY_MS =
+        15L * 60L * 1000L;
     private static final long UPDATE_DISMISS_INTERVAL_MS =
         24L * 60L * 60L * 1000L;
     private static final long INSTALL_REMIND_INTERVAL_MS =
@@ -617,17 +620,16 @@ public class MainActivity extends BridgeActivity {
             updateCheckRunning
             || now - lastUpdateCheckAt < 10000L
             || now - lastPersistentCheck < UPDATE_CHECK_INTERVAL_MS
+            || now - updaterPrefs.getLong(PREF_FAILED_CHECK_AT, 0L)
+                < UPDATE_FAILURE_RETRY_MS
         ) {
             return;
         }
         updateCheckRunning = true;
         lastUpdateCheckAt = now;
-        updaterPrefs.edit()
-            .putLong(PREF_LAST_CHECK_AT, now)
-            .apply();
-
         new Thread(() -> {
             HttpURLConnection connection = null;
+            boolean validCheck = false;
             try {
                 connection = (HttpURLConnection)
                     new URL(LATEST_RELEASE).openConnection();
@@ -670,6 +672,11 @@ public class MainActivity extends BridgeActivity {
                 } catch (Exception ignored) {
                     return;
                 }
+
+                if (latestCode < 1) {
+                    return;
+                }
+                validCheck = true;
 
                 int installedCode = currentVersionCode();
                 if (latestCode <= installedCode) {
@@ -717,6 +724,16 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception ignored) {
                 // Update checks must never block app startup.
             } finally {
+                if (validCheck) {
+                    updaterPrefs.edit()
+                        .putLong(PREF_LAST_CHECK_AT, System.currentTimeMillis())
+                        .remove(PREF_FAILED_CHECK_AT)
+                        .apply();
+                } else {
+                    updaterPrefs.edit()
+                        .putLong(PREF_FAILED_CHECK_AT, System.currentTimeMillis())
+                        .apply();
+                }
                 updateCheckRunning = false;
                 if (connection != null) {
                     connection.disconnect();
