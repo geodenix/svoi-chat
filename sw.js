@@ -1,8 +1,8 @@
-const CACHE_NAME = 'svoi-shell-v105';
+const CACHE_NAME = 'svoi-shell-v106';
 const SHELL = [
   '/',
-  '/app.css?v=105',
-  '/app.js?v=105',
+  '/app.css?v=106',
+  '/app.js?v=106',
   '/manifest.webmanifest',
   '/icon-192.svg',
   '/icon-512.svg'
@@ -45,8 +45,13 @@ self.addEventListener('fetch', event => {
     event.respondWith((async () => {
       try {
         const fresh = await fetch(request);
-        const cache = await caches.open(CACHE_NAME);
-        cache.put('/', fresh.clone());
+        if (!fresh.ok) {
+          return (await caches.match('/')) || fresh;
+        }
+        try {
+          const cache = await caches.open(CACHE_NAME);
+          await cache.put('/', fresh.clone());
+        } catch {}
         return fresh;
       } catch {
         return (await caches.match('/')) || Response.error();
