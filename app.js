@@ -360,7 +360,59 @@ $('vibrationBtn').onclick=()=>{
   updateVibrationButton()
 };
 
+let pendingNotificationOpen=null;
+
+async function openNotificationTarget(action){
+  const url=new URL(String(action?.url||'/'),location.origin);
+  if(url.origin!==location.origin)return;
+  if(!me){pendingNotificationOpen=action;return}
+  const callId=url.searchParams.get('incoming_call');
+  if(callId){
+    if(groupCallState||(currentCall&&String(currentCall.callId)!==callId))return;
+    window.handleNativeCallAction(url.href);
+    return
+  }
+  const groupId=Number(url.searchParams.get('group_call'));
+  if(groupId){
+    if(currentCall||pendingCall||groupCallState)return;
+    await joinGroupCall(groupId,url.searchParams.get('video')==='1',false);
+    return
+  }
+  const tag=String(action?.tag||url.searchParams.get('notification_chat')||'');
+  const match=/^(user|group)-([1-9]\d*)$/.exec(tag);
+  if(!match)return;
+  const id=Number(match[2]);
+  if(!Number.isSafeInteger(id))return;
+  const isUser=match[1]==='user';
+  let target=(isUser?users:groups).find(item=>Number(item.id)===id);
+  if(!target){
+    await (isUser?loadUsers():loadGroups());
+    target=(isUser?users:groups).find(item=>Number(item.id)===id)
+  }
+  if(!target)return;
+  if(currentCall)minimizePrivateCall();
+  if(groupCallState)minimizeGroupCall();
+  await (isUser?openUser(target):openGroup(target))
+}
+
+function resumeNotificationOpen(){
+  const url=new URL(location.href);
+  const tag=url.searchParams.get('notification_chat');
+  const action=pendingNotificationOpen||(tag?{url:url.href,tag}:null);
+  if(!action)return;
+  pendingNotificationOpen=null;
+  if(tag){
+    url.searchParams.delete('notification_chat');
+    history.replaceState({},'',url.pathname+url.search+url.hash)
+  }
+  openNotificationTarget(action).catch(err=>console.warn('notification open failed',err))
+}
+
 if('serviceWorker' in navigator){
+  navigator.serviceWorker.addEventListener('message',event=>{
+    if(event.data?.type!=='svoi_notification_open')return;
+    openNotificationTarget(event.data).catch(err=>console.warn('notification open failed',err))
+  });
   navigator.serviceWorker.register('/sw.js')
     .then(registration=>registration.update().catch(()=>{}))
     .catch(()=>{})
@@ -1219,6 +1271,7 @@ async function enter(){
     Promise.allSettled([usersLoad,groupsLoad]).then(results=>{
       if(results[0].status==='rejected')retryStartupLoader(loadUsers);
       if(results[1].status==='rejected')retryStartupLoader(loadGroups);
+      resumeNotificationOpen();
 
       // Offline outbox may refresh chat lists after delivery, so run it only
       // after the first list requests settle to avoid duplicate startup work.

@@ -1,8 +1,8 @@
-const CACHE_NAME = 'svoi-shell-v107';
+const CACHE_NAME = 'svoi-shell-v108';
 const SHELL = [
   '/',
-  '/app.css?v=107',
-  '/app.js?v=107',
+  '/app.css?v=108',
+  '/app.js?v=108',
   '/manifest.webmanifest',
   '/icon-192.svg',
   '/icon-512.svg'
@@ -110,7 +110,8 @@ self.addEventListener('push', event => {
       icon: '/icon-192.svg',
       badge: '/icon-192.svg',
       data: {
-        url: data.url || '/'
+        url: data.url || '/',
+        tag
       }
     };
     if (!silent) {
@@ -126,7 +127,9 @@ self.addEventListener('notificationclick', event => {
   const targetUrl = new URL(
     event.notification.data?.url || '/',
     self.location.origin
-  ).href;
+  );
+  if(targetUrl.origin!==self.location.origin)return;
+  const tag=String(event.notification.data?.tag||event.notification.tag||'');
 
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({
@@ -134,16 +137,20 @@ self.addEventListener('notificationclick', event => {
       includeUncontrolled: true
     });
 
-    for (const client of windows) {
-      if (client.url.startsWith(self.location.origin)) {
+    const appWindows=windows.filter(client=>new URL(client.url).origin===self.location.origin);
+    appWindows.sort((a,b)=>Number(b.focused)-Number(a.focused)
+      ||Number(b.visibilityState==='visible')-Number(a.visibilityState==='visible'));
+    for (const client of appWindows) {
+      try {
         await client.focus();
-        if ('navigate' in client) {
-          await client.navigate(targetUrl);
-        }
+        client.postMessage({type:'svoi_notification_open',url:targetUrl.href,tag});
         return;
-      }
+      } catch {}
     }
 
-    await self.clients.openWindow(targetUrl);
+    if(/^(user|group)-[1-9]\d*$/.test(tag)){
+      targetUrl.searchParams.set('notification_chat',tag)
+    }
+    await self.clients.openWindow(targetUrl.href);
   })());
 });
