@@ -78,7 +78,7 @@ def send_fcm_one(token: str, payload: dict) -> dict:
         return {"ok": False, "stale": stale, "error": error}
 
 
-async def send_push(
+async def _send_android_push(
     user_id: int,
     title: str,
     body: str,
@@ -88,38 +88,25 @@ async def send_push(
     silent: bool = False,
     prepared_context: dict | None = None,
 ):
-    web_stats = await _original_send_web_push(
-        user_id,
-        title,
-        body,
-        url,
-        tag,
-        force,
-        silent,
-        prepared_context=prepared_context,
-    )
-
-    stats = dict(web_stats)
-    stats["web_configured"] = bool(web_stats.get("configured"))
-    stats["android_configured"] = firebase_configured()
-    stats["web_attempted"] = int(web_stats.get("attempted", 0))
-    stats["web_sent"] = int(web_stats.get("sent", 0))
-    stats["android_attempted"] = 0
-    stats["android_sent"] = 0
-    stats["configured"] = bool(
-        stats["web_configured"] or stats["android_configured"]
-    )
-
-    if not stats["android_configured"]:
+    stats = {
+        "configured": firebase_configured(),
+        "attempted": 0,
+        "sent": 0,
+        "stale": 0,
+        "errors": [],
+    }
+    if not stats["configured"]:
         return stats
 
     conn = core.connect_db()
-    rows = conn.execute(
-        "SELECT token FROM android_push_tokens WHERE user_id=?",
-        (user_id,),
-    ).fetchall()
-    unread_count = core.unread_count_for_user(conn, user_id)
-    conn.close()
+    try:
+        rows = conn.execute(
+            "SELECT token FROM android_push_tokens WHERE user_id=?",
+            (user_id,),
+        ).fetchall()
+        unread_count = core.unread_count_for_user(conn, user_id)
+    finally:
+        conn.close()
 
     stale_tokens = []
     payload = {
@@ -132,7 +119,7 @@ async def send_push(
         "unread_count": unread_count,
     }
 
-    stats["android_attempted"] = len(rows)
+    stats["attempted"] = len(rows)
     for row in rows:
         result = await asyncio.to_thread(
             send_fcm_one,
@@ -140,7 +127,7 @@ async def send_push(
             payload,
         )
         if result["ok"]:
-            stats["android_sent"] += 1
+            stats["sent"] += 1
         else:
             if result["error"]:
                 stats.setdefault("errors", []).append(result["error"])
@@ -149,19 +136,64 @@ async def send_push(
 
     if stale_tokens:
         conn = core.connect_db()
-        conn.executemany(
-            "DELETE FROM android_push_tokens WHERE token=?",
-            [(token,) for token in stale_tokens],
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.executemany(
+                "DELETE FROM android_push_tokens WHERE token=?",
+                [(token,) for token in stale_tokens],
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
-    stats["attempted"] = (
-        stats["web_attempted"] + stats["android_attempted"]
+    stats["stale"] = len(stale_tokens)
+    stats["errors"] = stats["errors"][:3]
+    return stats
+
+
+async def send_push(
+    user_id: int,
+    title: str,
+    body: str,
+    url: str = "/",
+    tag: str = "svoi",
+    force: bool = False,
+    silent: bool = False,
+    prepared_context: dict | None = None,
+):
+    # Neither provider should prevent the other channel from starting.
+    results = await asyncio.gather(
+        _original_send_web_push(
+            user_id, title, body, url, tag, force, silent,
+            prepared_context=prepared_context,
+        ),
+        _send_android_push(user_id, title, body, url, tag, force, silent),
+        return_exceptions=True,
     )
-    stats["sent"] = stats["web_sent"] + stats["android_sent"]
-    stats["stale"] = int(stats.get("stale", 0)) + len(stale_tokens)
-    stats["errors"] = stats.get("errors", [])[:3]
+    channels = []
+    for name, result in zip(("web", "android"), results):
+        if isinstance(result, Exception):
+            result = {
+                "configured": (
+                    core.push_configured() if name == "web"
+                    else firebase_configured()
+                ),
+                "attempted": 0,
+                "sent": 0,
+                "stale": 0,
+                "errors": [name + ": " + str(result)[:180]],
+            }
+        channels.append(result)
+
+    web, android = channels
+    stats = dict(web)
+    for name, channel in zip(("web", "android"), channels):
+        stats[name + "_configured"] = bool(channel.get("configured"))
+        stats[name + "_attempted"] = int(channel.get("attempted", 0))
+        stats[name + "_sent"] = int(channel.get("sent", 0))
+    stats["configured"] = stats["web_configured"] or stats["android_configured"]
+    for key in ("attempted", "sent", "stale"):
+        stats[key] = int(web.get(key, 0)) + int(android.get(key, 0))
+    stats["errors"] = (list(web.get("errors", [])) + list(android.get("errors", [])))[:3]
     return stats
 
 
