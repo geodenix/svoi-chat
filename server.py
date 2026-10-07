@@ -86,6 +86,7 @@ async def send_push(
     tag: str = "svoi",
     force: bool = False,
     silent: bool = False,
+    prepared_context: dict | None = None,
 ):
     web_stats = await _original_send_web_push(
         user_id,
@@ -95,6 +96,7 @@ async def send_push(
         tag,
         force,
         silent,
+        prepared_context=prepared_context,
     )
 
     stats = dict(web_stats)

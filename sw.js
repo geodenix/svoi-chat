@@ -1,8 +1,8 @@
-const CACHE_NAME = 'svoi-shell-v104';
+const CACHE_NAME = 'svoi-shell-v105';
 const SHELL = [
   '/',
-  '/app.css?v=104',
-  '/app.js?v=104',
+  '/app.css?v=105',
+  '/app.js?v=105',
   '/manifest.webmanifest',
   '/icon-192.svg',
   '/icon-512.svg'
@@ -77,7 +77,9 @@ self.addEventListener('push', event => {
       includeUncontrolled: true
     });
 
-    const unreadCount = Math.max(0, Number(data.unread_count) || 0);
+    const unreadCount = data.unread_count == null
+      ? null
+      : Math.max(0, Number(data.unread_count) || 0);
     try {
       if (unreadCount > 0 && typeof navigator.setAppBadge === 'function') {
         await navigator.setAppBadge(unreadCount);
