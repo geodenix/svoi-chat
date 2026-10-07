@@ -8792,9 +8792,19 @@ $('cameraCall').onclick=async()=>{
 $('switchCamera').onclick=async()=>{
   if(!currentCall||!localVideoTrack())return;
   const button=$('switchCamera');
+  if(button.disabled)return;
   button.disabled=true;
 
-  const oldTrack=currentCall.localStream.getVideoTracks()[0];
+  const call=currentCall;
+  const isActive=()=>currentCall===call&&call.pc?.signalingState!=='closed';
+  const pendingStreams=new Set();
+  const openCamera=async constraints=>{
+    const stream=await navigator.mediaDevices.getUserMedia(constraints);
+    pendingStreams.add(stream);
+    return stream
+  };
+  let oldTrackRemoved=false;
+  const oldTrack=call.localStream.getVideoTracks()[0];
   const oldFacing=cameraFacing;
   const nextFacing=oldFacing==='user'?'environment':'user';
 
@@ -8805,6 +8815,7 @@ $('switchCamera').onclick=async()=>{
         .filter(device=>device.kind==='videoinput')
     }catch{}
 
+    if(!isActive())return;
     if(devices.length===1){
       throw new Error('Браузер видит только одну камеру')
     }
@@ -8830,7 +8841,8 @@ $('switchCamera').onclick=async()=>{
     if(oldTrack){
       oldTrack.enabled=false;
       oldTrack.stop();
-      currentCall.localStream.removeTrack(oldTrack)
+      call.localStream.removeTrack(oldTrack);
+      oldTrackRemoved=true
     }
 
     let constraints;
@@ -8842,46 +8854,64 @@ $('switchCamera').onclick=async()=>{
 
     let newStream;
     try{
-      newStream=await navigator.mediaDevices.getUserMedia(constraints)
+      newStream=await openCamera(constraints)
     }catch(firstError){
-      newStream=await navigator.mediaDevices.getUserMedia({
+      if(!isActive())return;
+      newStream=await openCamera({
         video:getCallVideoConstraints(nextFacing),
         audio:false
       })
     }
 
+    if(!isActive())return;
     const newTrack=newStream.getVideoTracks()[0];
     if(!newTrack)throw new Error('Новая камера не открылась');
 
-    const sender=currentCall.pc.getSenders().find(s=>s.track?.kind==='video');
+    const sender=call.pc.getSenders().find(s=>s.track?.kind==='video');
     if(!sender)throw new Error('Видеотрек звонка не найден');
 
     await sender.replaceTrack(newTrack);
-    currentCall.localStream.addTrack(newTrack);
+    if(!isActive())return;
+    newTrack.enabled=!call.cameraOff;
+    call.localStream.addTrack(newTrack);
+    pendingStreams.delete(newStream);
     cameraFacing=nextFacing;
 
-    $('localVideo').srcObject=currentCall.localStream;
+    $('localVideo').srcObject=call.localStream;
     updatePrivateLocalMirror();
     $('localVideo').play().catch(()=>{})
   }catch(err){
+    if(!isActive())return;
+    for(const stream of pendingStreams){
+      stream.getTracks().forEach(track=>track.stop())
+    }
+    pendingStreams.clear();
     try{
-      const restore=await navigator.mediaDevices.getUserMedia({
+      if(!oldTrackRemoved)throw err;
+      const restore=await openCamera({
         video:getCallVideoConstraints(oldFacing),
         audio:false
       });
+      if(!isActive())return;
       const restoreTrack=restore.getVideoTracks()[0];
-      const sender=currentCall?.pc?.getSenders().find(s=>s.track?.kind==='video');
+      const sender=call.pc.getSenders().find(s=>s.track?.kind==='video');
       if(sender&&restoreTrack){
         await sender.replaceTrack(restoreTrack);
-        currentCall.localStream.addTrack(restoreTrack);
+        if(!isActive())return;
+        restoreTrack.enabled=!call.cameraOff;
+        call.localStream.addTrack(restoreTrack);
+        pendingStreams.delete(restore);
         cameraFacing=oldFacing;
-        $('localVideo').srcObject=currentCall.localStream;
+        $('localVideo').srcObject=call.localStream;
         updatePrivateLocalMirror();
         $('localVideo').play().catch(()=>{})
       }
     }catch{}
-    alert(err.message||'Не удалось переключить камеру')
+    if(isActive())alert(err.message||'Не удалось переключить камеру')
   }finally{
+    for(const stream of pendingStreams){
+      stream.getTracks().forEach(track=>track.stop())
+    }
     button.disabled=false
   }
 };
