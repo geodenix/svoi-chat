@@ -1066,6 +1066,42 @@ function nativeBadgePlugin(){
   return window.Capacitor?.Plugins?.NativeBadge||null
 }
 
+function isActiveChatVisible(chatType,chatId){
+  if(document.visibilityState!=='visible')return false;
+  if(active?.type!==chatType||Number(active.data.id)!==Number(chatId))return false;
+  if($('app')?.classList.contains('hidden'))return false;
+  if(window.matchMedia?.('(max-width:720px)').matches){
+    return !!$('app')?.classList.contains('chat-open')
+  }
+  return true
+}
+
+let foregroundReadSyncRunning=false;
+async function syncForegroundChatRead(){
+  if(foregroundReadSyncRunning||!me||!active)return;
+  const {type,data}=active;
+  const id=Number(data.id);
+  if(!isActiveChatVisible(type,id))return;
+  foregroundReadSyncRunning=true;
+  try{
+    if(type==='user'){
+      await markPrivateChatRead(id)
+    }else if(type==='group'){
+      // History marks the selected group read on the server. Do not replace
+      // the messages already appended while this window was in the background.
+      await api('/api/groups/'+id+'/messages?limit=1')
+    }
+    await Promise.allSettled([loadUsers(),loadGroups()]);
+    await updateAppBadge()
+  }finally{
+    foregroundReadSyncRunning=false
+  }
+}
+
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible')syncForegroundChatRead().catch(()=>{})
+});
+
 function totalUnreadCount(){
   return [...users,...groups].reduce(
     (sum,item)=>sum+Math.max(0,Number(item?.unread_count)||0),
@@ -3890,7 +3926,7 @@ function applyPrivateMessageToChatList(message){
     return
   }
 
-  const activeHere=active?.type==='user'&&Number(active.data.id)===peerId;
+  const activeHere=isActiveChatVisible('user',peerId);
   const incoming=senderId!==myId;
   const previous=users[index];
   const nextUnread=incoming
@@ -9609,7 +9645,7 @@ function connectWs(){
         ?Number(active.data.id)
         :0;
 
-      if(senderId!==Number(me?.id)&&!isChatMuted('user',senderId)){
+      if(document.visibilityState==='visible'&&senderId!==Number(me?.id)&&!isChatMuted('user',senderId)){
         playMessageSound().catch(()=>{});
         vibrateMessage()
       }
@@ -9620,7 +9656,7 @@ function connectWs(){
       ){
         appendMessage(m);
 
-        if(senderId===activeUserId){
+        if(senderId===activeUserId&&isActiveChatVisible('user',activeUserId)){
           markPrivateChatRead(activeUserId).catch(()=>{})
         }
       }
@@ -9742,20 +9778,21 @@ function connectWs(){
           )
         }
       }
-      const activeHere=active?.type==='group'&&Number(active.data.id)===groupId;
+      const selectedHere=active?.type==='group'&&Number(active.data.id)===groupId;
+      const activeHere=isActiveChatVisible('group',groupId);
       const shouldNotifyHere=!m.has_mentions||!!m.mentioned_me;
 
       if(!mine){
         ackGroupMessageDelivered(m)
       }
 
-      if(!mine&&shouldNotifyHere&&!isChatMuted('group',groupId)){
+      if(document.visibilityState==='visible'&&!mine&&shouldNotifyHere&&!isChatMuted('group',groupId)){
         playMessageSound().catch(()=>{});
         vibrateMessage()
       }
 
+      if(selectedHere)appendMessage(m);
       if(activeHere){
-        appendMessage(m);
         active.data={...active.data,unread_count:0};
         if(!mine){
           api(
