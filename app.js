@@ -6354,8 +6354,10 @@ async function renderGroupLocalTracks(){
   updateGroupMicBadge(p,true)
 }
 
+let groupCallJoining=false;
+
 async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
-  if(groupCallState)return;
+  if(groupCallJoining||groupCallState)return;
   if(currentCall||pendingCall){
     alert('Сначала заверши текущий личный звонок');return
   }
@@ -6363,6 +6365,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
     alert('Модуль групповых звонков не загрузился');return
   }
 
+  groupCallJoining=true;
   let room=null;
   try{
     const tokenEndpoint=linkedToken
@@ -6372,6 +6375,9 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
       method:'POST',
       body:{video:!!video,invite:!!invite}
     });
+    if(currentCall||pendingCall){
+      alert('Сначала заверши текущий личный звонок');return false
+    }
     const callVideo=linkedToken?!!credentials.video:!!video;
 
     room=new LivekitClient.Room({
@@ -6608,6 +6614,8 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
     $('groupCallOverlay').classList.add('hidden');
     alert(err?.message||'Не удалось подключиться к групповому звонку');
     return false
+  }finally{
+    groupCallJoining=false
   }
 }
 
