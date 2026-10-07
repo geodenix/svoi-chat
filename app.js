@@ -9016,7 +9016,7 @@ async function restoreIncomingCallAction(action){
   }
 }
 
-window.handleNativeCallAction=async path=>{
+window.handleNativeCallAction=path=>{
   try{
     const url=new URL(String(path||''),location.origin);
     const action={
@@ -9026,7 +9026,11 @@ window.handleNativeCallAction=async path=>{
     };
     if(!action.callId)return false;
     savePendingNativeCallAction(action);
-    await restoreIncomingCallAction(action);
+    // Android evaluateJavascript needs a synchronous acknowledgement.
+    // Keep recovery asynchronous without reloading the live call screen.
+    resumeIncomingCallAction(action).catch(err=>{
+      console.warn('native call action failed',err)
+    });
     return true
   }catch(err){
     console.warn('native call action failed',err);
@@ -9037,9 +9041,13 @@ window.handleNativeCallAction=async path=>{
 async function resumeIncomingCallFromUrl(){
   const fromUrl=incomingActionFromLocation();
   const saved=readPendingNativeCallAction();
-  const action=fromUrl||saved;
+  // A notification answer takes priority over the ringing URL already open.
+  const action=saved?.nativeAccept?saved:(fromUrl||saved);
   if(!action)return;
+  return resumeIncomingCallAction(action)
+}
 
+async function resumeIncomingCallAction(action){
   savePendingNativeCallAction(action);
 
   try{
@@ -9051,8 +9059,8 @@ async function resumeIncomingCallFromUrl(){
       history.replaceState({},'',location.pathname);
       alert('Этот звонок уже завершён')
     }else{
-      // Do not discard the action during a cold start. enter() or the
-      // WebSocket reconnect can retry it once the app is fully ready.
+      // Preserve the answer on warm launches too, while the socket/media
+      // becomes ready. Never reload an active WebView to retry acceptance.
       setTimeout(()=>{
         const retry=readPendingNativeCallAction();
         if(retry&&me){
