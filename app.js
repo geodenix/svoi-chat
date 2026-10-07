@@ -1151,7 +1151,10 @@ async function syncForegroundChatRead(){
 }
 
 document.addEventListener('visibilitychange',()=>{
-  if(document.visibilityState==='visible')syncForegroundChatRead().catch(()=>{})
+  if(document.visibilityState==='visible'){
+    ensureWsConnection();
+    syncForegroundChatRead().catch(()=>{})
+  }
 });
 
 function totalUnreadCount(){
@@ -6699,6 +6702,7 @@ window.addEventListener('offline',()=>{
 });
 
 window.addEventListener('online',()=>{
+  ensureWsConnection();
   const state=groupCallState;
   if(state&&state.needsRecovery&&!state.manualLeave){
     setGroupCallStatus('Интернет появился · переподключаемся…');
@@ -6711,6 +6715,7 @@ window.addEventListener('online',()=>{
     && call.pc
     && !['connected','closed'].includes(call.pc.connectionState)
   ){
+    if(!call.recovering)call.recoveryAttempts=0;
     schedulePrivateCallRecovery(call,120)
   }
 });
@@ -9362,17 +9367,32 @@ async function reportWsHealthPing(){
     || !me
     || socket?.readyState!==WebSocket.OPEN
   )return;
+  const checkedSocket=socket;
   wsHealthPingBusy=true;
   try{
     const ping=await measureWsPing(3000);
-    if(socket?.readyState===WebSocket.OPEN){
+    if(socket===checkedSocket&&socket?.readyState===WebSocket.OPEN){
       wsSend({
         type:'ws_ping_report',
         ping_ms:Math.max(1,Math.round(ping))
       })
     }
-  }catch{}finally{
-    wsHealthPingBusy=false
+  }catch{
+    if(me&&navigator.onLine!==false&&socket===checkedSocket
+      &&checkedSocket.readyState===WebSocket.OPEN){
+      connectWs()
+    }
+  }finally{
+    if(socket===checkedSocket)wsHealthPingBusy=false
+  }
+}
+
+function ensureWsConnection(){
+  if(!me||navigator.onLine===false)return;
+  if(socket?.readyState===WebSocket.OPEN){
+    reportWsHealthPing().catch(()=>{})
+  }else if(socket?.readyState!==WebSocket.CONNECTING){
+    connectWs()
   }
 }
 
@@ -9504,11 +9524,20 @@ function flushWsUiBatch(){
 }
 
 function connectWs(){
-  if(socket)socket.close();const proto=location.protocol==='https:'?'wss':'ws';
+  clearTimeout(retry);
+  retry=null;
+  if(!me||navigator.onLine===false)return;
+  stopWsHealthPingMonitoring();
+  const oldSocket=socket;
+  socket=null;
+  if(oldSocket)oldSocket.close();
+  const proto=location.protocol==='https:'?'wss':'ws';
   const lastSeq=readWsLastSeq();
   const params=new URLSearchParams({last_seq:String(lastSeq)});
-  socket=new WebSocket(proto+'://'+location.host+'/ws?'+params.toString());
-  socket.onopen=()=>{
+  const ws=new WebSocket(proto+'://'+location.host+'/ws?'+params.toString());
+  socket=ws;
+  ws.onopen=()=>{
+    if(socket!==ws)return;
     startWsHealthPingMonitoring();
     scheduleOutboxFlush(120);
     const reconnect=wsHasConnected;
@@ -9517,7 +9546,7 @@ function connectWs(){
       if(wsReconnectSyncTimer)clearTimeout(wsReconnectSyncTimer);
       wsReconnectSyncTimer=setTimeout(()=>{
         wsReconnectSyncTimer=null;
-        if(!me||socket?.readyState!==WebSocket.OPEN)return;
+        if(!me||socket!==ws||ws.readyState!==WebSocket.OPEN)return;
         Promise.allSettled([loadUsers(),loadGroups()]).catch(()=>{})
       },350)
     }
@@ -9528,13 +9557,19 @@ function connectWs(){
     }
     if(currentCall?.callId){
       sendPrivateMuteState(true);
-      sendPrivateVideoState(true)
+      sendPrivateVideoState(true);
+      if(currentCall.answered&&!currentCall.recovering&&currentCall.pc
+        &&!['connected','closed'].includes(currentCall.pc.connectionState)){
+        currentCall.recoveryAttempts=0;
+        schedulePrivateCallRecovery(currentCall,120)
+      }
     }
     if(groupCallState){
       sendGroupPingProbe(groupCallState)
     }
   };
-  socket.onmessage=e=>{
+  ws.onmessage=e=>{
+    if(socket!==ws)return;
     let packet=null;
     try{packet=JSON.parse(e.data)}catch{return}
     if(packet?.type==='ws_batch'&&Array.isArray(packet.events)){
@@ -10040,7 +10075,8 @@ function connectWs(){
     }
     if(data.type==='group_created')loadGroups().catch(()=>{})
   }
-  socket.onclose=event=>{
+  ws.onclose=event=>{
+    if(socket!==ws)return;
     stopWsHealthPingMonitoring();
     clearTimeout(retry);
     if(event?.code===4401){
@@ -10060,7 +10096,9 @@ function connectWs(){
     }
     // WebRTC media can stay alive when only the signaling WebSocket drops.
     // Keep the call and reconnect signaling faster instead of hanging up.
-    if(me)retry=setTimeout(connectWs,(currentCall||pendingCall)?700:2500)
+    if(me&&navigator.onLine!==false){
+      retry=setTimeout(connectWs,(currentCall||pendingCall)?700:2500)
+    }
   }
 }
 
