@@ -15,6 +15,7 @@ let recordingAudioContext=null,recordingAnalyser=null,recordingWaveRaf=null;
 let currentCall=null,pendingCall=null,pendingIce=[],cameraFacing='user',acceptingCall=false,preparedMediaStream=null,earModeActive=false,earUnlockTimer=null;
 let callSignalChain=Promise.resolve();
 let callAudioSinkId='',callSpeakerMode=false;
+let audioOutputSwitching=false,nativeAudioRouteChain=Promise.resolve(),audioRouteGeneration=0;
 let soundsEnabled=localStorage.getItem('svoi_sounds')!=='0',vibrationEnabled=localStorage.getItem('svoi_vibration')!=='0',audioContext=null,ringtoneTimer=null,outgoingToneTimer=null;
 let deferredInstallPrompt=null;
 let adminRefreshTimer=null;
@@ -4863,14 +4864,23 @@ function nativeAudioRoutePlugin(){
 async function applyNativeSpeakerMode(enabled){
   const plugin=nativeAudioRoutePlugin();
   if(!plugin)return false;
-  const result=await plugin.setSpeaker({enabled:!!enabled});
+  const result=await queueNativeAudioRoute(()=>plugin.setSpeaker({enabled:!!enabled}));
   return result?.applied!==false
 }
 
+function queueNativeAudioRoute(action){
+  const result=nativeAudioRouteChain.then(action);
+  nativeAudioRouteChain=result.catch(()=>{});
+  return result
+}
+
 async function resetNativeAudioRoute(){
+  const generation=++audioRouteGeneration;
   const plugin=nativeAudioRoutePlugin();
-  if(!plugin)return;
-  try{await plugin.reset()}catch{}
+  if(plugin){
+    try{await queueNativeAudioRoute(()=>plugin.reset())}catch{}
+  }
+  if(generation!==audioRouteGeneration)return;
   callSpeakerMode=false;
   callAudioSinkId='';
   updateSpeakerButtons()
@@ -5030,7 +5040,7 @@ function updateMiniCallBar(){
 function audioOutputElements(){
   return [
     $('remoteVideo'),
-    ...document.querySelectorAll('#groupCallGrid audio')
+    ...document.querySelectorAll('#groupCallGrid audio, #groupCallStrip audio')
   ].filter(Boolean)
 }
 
@@ -5064,69 +5074,87 @@ function updateSpeakerButtons(){
 }
 
 async function chooseSpeakerOutput(){
-  const nativePlugin=nativeAudioRoutePlugin();
-
-  if(nativePlugin){
-    const next=!callSpeakerMode;
-    try{
-      const applied=await applyNativeSpeakerMode(next);
-      if(!applied)throw new Error('Android не смог переключить аудиовыход');
-      callSpeakerMode=next;
-      callAudioSinkId='';
-      updateSpeakerButtons();
-      return
-    }catch(err){
-      alert(err?.message||'Не удалось переключить динамик');
-      return
-    }
+  if(audioOutputSwitching)return;
+  audioOutputSwitching=true;
+  const generation=audioRouteGeneration;
+  for(const id of ['speakerCall','groupSpeakerBtn']){
+    if($(id))$(id).disabled=true
   }
-
-  const media=navigator.mediaDevices;
-  const remote=$('remoteVideo');
-
-  if(!remote||typeof remote.setSinkId!=='function'){
-    alert('Этот браузер не поддерживает переключение аудиовыхода.');
-    return
-  }
-
-  if(callSpeakerMode){
-    callAudioSinkId='';
-    callSpeakerMode=false;
-    await applyAudioOutputToAll();
-    updateSpeakerButtons();
-    return
-  }
-
   try{
-    let device=null;
+    const nativePlugin=nativeAudioRoutePlugin();
 
-    try{
-      const outputs=(await media.enumerateDevices()).filter(d=>d.kind==='audiooutput');
-      device=outputs.find(d=>/speaker|loudspeaker|speakerphone|динамик|громк/i.test(d.label||''))
-    }catch{}
-
-    if(!device&&typeof media.selectAudioOutput==='function'){
-      device=await media.selectAudioOutput()
+    if(nativePlugin){
+      const next=!callSpeakerMode;
+      try{
+        const applied=await applyNativeSpeakerMode(next);
+        if(generation!==audioRouteGeneration)return;
+        if(!applied)throw new Error('Android не смог переключить аудиовыход');
+        callSpeakerMode=next;
+        callAudioSinkId='';
+        updateSpeakerButtons();
+        return
+      }catch(err){
+        if(generation!==audioRouteGeneration)return;
+        alert(err?.message||'Не удалось переключить динамик');
+        return
+      }
     }
 
-    if(!device?.deviceId){
-      throw new Error('Аудиовыходом управляет система устройства')
+    const media=navigator.mediaDevices;
+    const remote=$('remoteVideo');
+
+    if(!remote||typeof remote.setSinkId!=='function'){
+      alert('Этот браузер не поддерживает переключение аудиовыхода.');
+      return
     }
 
-    callAudioSinkId=device.deviceId;
-    callSpeakerMode=true;
-    const applied=await applyAudioOutputToAll();
-    if(!applied){
+    if(callSpeakerMode){
       callAudioSinkId='';
       callSpeakerMode=false;
-      throw new Error('Не удалось переключить аудиовыход')
+      await applyAudioOutputToAll();
+      updateSpeakerButtons();
+      return
     }
-    updateSpeakerButtons()
-  }catch(err){
-    if(err?.name==='NotAllowedError'){
-      alert('Разреши выбор аудиовыхода для этого сайта')
-    }else if(err?.name!=='AbortError'){
-      alert(err?.message||'Не удалось включить громкую связь')
+
+    try{
+      let device=null;
+
+      try{
+        const outputs=(await media.enumerateDevices()).filter(d=>d.kind==='audiooutput');
+        device=outputs.find(d=>/speaker|loudspeaker|speakerphone|динамик|громк/i.test(d.label||''))
+      }catch{}
+
+      if(!device&&typeof media.selectAudioOutput==='function'){
+        device=await media.selectAudioOutput()
+      }
+
+      if(!device?.deviceId){
+        throw new Error('Аудиовыходом управляет система устройства')
+      }
+
+      if(generation!==audioRouteGeneration)return;
+      callAudioSinkId=device.deviceId;
+      callSpeakerMode=true;
+      const applied=await applyAudioOutputToAll();
+      if(generation!==audioRouteGeneration)return;
+      if(!applied){
+        callAudioSinkId='';
+        callSpeakerMode=false;
+        throw new Error('Не удалось переключить аудиовыход')
+      }
+      updateSpeakerButtons()
+    }catch(err){
+      if(generation!==audioRouteGeneration)return;
+      if(err?.name==='NotAllowedError'){
+        alert('Разреши выбор аудиовыхода для этого сайта')
+      }else if(err?.name!=='AbortError'){
+        alert(err?.message||'Не удалось включить громкую связь')
+      }
+    }
+  }finally{
+    audioOutputSwitching=false;
+    for(const id of ['speakerCall','groupSpeakerBtn']){
+      if($(id))$(id).disabled=false
     }
   }
 }
@@ -7197,7 +7225,7 @@ async function upgradeCurrentCallToVideo(){
   let sender=null;
   try{
     const videoStream=await navigator.mediaDevices.getUserMedia({
-      video:{facingMode:{ideal:cameraFacing}},
+      video:getCallVideoConstraints(),
       audio:false
     });
     newTrack=videoStream.getVideoTracks()[0];
@@ -7956,15 +7984,19 @@ function getCallAudioConstraints(){
   return audio
 }
 
+function getCallVideoConstraints(facing=cameraFacing){
+  return {
+    facingMode:{ideal:facing},
+    width:{ideal:1280,max:1280},
+    height:{ideal:720,max:720},
+    frameRate:{ideal:30,max:30}
+  }
+}
+
 async function getCallMedia(video){
   const request=navigator.mediaDevices.getUserMedia({
     audio:getCallAudioConstraints(),
-    video:video?{
-      facingMode:{ideal:cameraFacing},
-      width:{ideal:1280,max:1280},
-      height:{ideal:720,max:720},
-      frameRate:{ideal:30,max:30}
-    }:false
+    video:video?getCallVideoConstraints():false
   });
   const timeout=new Promise((_,reject)=>setTimeout(()=>{
     const err=new Error(video?'Камера не ответила. Проверь разрешение камеры.':'Микрофон не ответил. Проверь разрешение.');
@@ -8767,9 +8799,9 @@ $('switchCamera').onclick=async()=>{
 
     let constraints;
     if(targetDevice?.deviceId){
-      constraints={video:{deviceId:{exact:targetDevice.deviceId}},audio:false}
+      constraints={video:{...getCallVideoConstraints(nextFacing),deviceId:{exact:targetDevice.deviceId}},audio:false}
     }else{
-      constraints={video:{facingMode:{exact:nextFacing}},audio:false}
+      constraints={video:{...getCallVideoConstraints(nextFacing),facingMode:{exact:nextFacing}},audio:false}
     }
 
     let newStream;
@@ -8777,7 +8809,7 @@ $('switchCamera').onclick=async()=>{
       newStream=await navigator.mediaDevices.getUserMedia(constraints)
     }catch(firstError){
       newStream=await navigator.mediaDevices.getUserMedia({
-        video:{facingMode:{ideal:nextFacing}},
+        video:getCallVideoConstraints(nextFacing),
         audio:false
       })
     }
@@ -8798,7 +8830,7 @@ $('switchCamera').onclick=async()=>{
   }catch(err){
     try{
       const restore=await navigator.mediaDevices.getUserMedia({
-        video:{facingMode:{ideal:oldFacing}},
+        video:getCallVideoConstraints(oldFacing),
         audio:false
       });
       const restoreTrack=restore.getVideoTracks()[0];
