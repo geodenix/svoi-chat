@@ -8095,11 +8095,32 @@ async function getCallMedia(video){
     audio:getCallAudioConstraints(),
     video:video?getCallVideoConstraints():false
   });
-  const timeout=new Promise((_,reject)=>setTimeout(()=>{
-    const err=new Error(video?'Камера не ответила. Проверь разрешение камеры.':'Микрофон не ответил. Проверь разрешение.');
-    err.name='MediaTimeoutError';reject(err)
-  },12000));
-  return Promise.race([request,timeout])
+  return new Promise((resolve,reject)=>{
+    let settled=false;
+    const timer=setTimeout(()=>{
+      settled=true;
+      const err=new Error(video?'Камера не ответила. Проверь разрешение камеры.':'Микрофон не ответил. Проверь разрешение.');
+      err.name='MediaTimeoutError';reject(err)
+    },12000);
+    request.then(stream=>{
+      if(settled){
+        // getUserMedia cannot be cancelled while permission/capture is pending.
+        // Release every track if it arrives after our caller timed out.
+        for(const track of stream.getTracks()){
+          try{track.stop()}catch{}
+        }
+        return
+      }
+      settled=true;
+      clearTimeout(timer);
+      resolve(stream)
+    },err=>{
+      if(settled)return;
+      settled=true;
+      clearTimeout(timer);
+      reject(err)
+    })
+  })
 }
 
 function clearPrivateRecovery(call){
