@@ -11,7 +11,7 @@
 <link rel="icon" href="/icon-192.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon-512.svg">
 <title>Свои</title>
-<link rel="stylesheet" href="/app.css?v=111">
+<link rel="stylesheet" href="/app.css?v=115">
 
 
 
@@ -209,10 +209,10 @@
   </div>
   <div id="groupCallGrid" class="group-call-grid"></div>
   <div id="groupCallStrip" class="group-call-strip hidden"></div>
-  <div id="groupInviteLinkWrap" class="group-call-invite-wrap hidden">
-    <button id="groupInviteLinkBtn" class="group-call-invite-action" type="button">➕ Пригласить в звонок</button>
-  </div>
-  <div class="group-call-controls">
+  <div id="groupCallControls" class="group-call-controls">
+    <div id="groupInviteLinkWrap" class="group-call-invite-wrap hidden">
+      <button id="groupInviteLinkBtn" class="group-call-invite-action" type="button">➕ Пригласить в звонок</button>
+    </div>
     <button id="groupMuteBtn" type="button" title="Микрофон">🎤</button>
     <button id="groupSpeakerBtn" type="button" title="Аудиовыход: обычный">🔈</button>
     <button id="groupCameraBtn" type="button" title="Камера">📷</button>
@@ -239,10 +239,10 @@
       <button id="mediaPermissionBtn" type="button">Разрешить камеру и микрофон</button>
       <small id="mediaPermissionText">Нужен доступ для видеозвонка</small>
     </div>
-    <div id="privateInviteCallWrap" class="call-invite-action-wrap hidden">
-      <button id="privateInviteCall" class="call-invite-action" type="button">➕ Пригласить в звонок</button>
-    </div>
     <div id="activeCallControls" class="call-controls hidden">
+      <div id="privateInviteCallWrap" class="call-invite-action-wrap hidden">
+        <button id="privateInviteCall" class="call-invite-action" type="button">➕ Пригласить в звонок</button>
+      </div>
       <button id="muteCall" class="round-call" type="button" title="Микрофон">🎤</button>
       <button id="speakerCall" class="round-call" type="button" title="Аудиовыход: обычный">🔈</button>
       <button id="earModeBtn" class="round-call" type="button" title="Режим у уха">👂</button>
@@ -593,4 +593,4 @@
 </dialog>
 
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.22.3/dist/livekit-client.umd.min.js"></script>
-<script src="/app.js?v=111"></script></body></html>
+<script src="/app.js?v=115"></script></body></html>
