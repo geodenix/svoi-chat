@@ -888,3 +888,19 @@ body.drawer-open{overflow:hidden}
     padding-bottom:calc(var(--call-toolbar-height,210px) + 12px)
   }
 }
+
+.call-invite-dialog{width:min(94vw,440px);max-height:88dvh;overflow:auto;padding:18px}
+.call-invite-dialog h2{font-size:20px;margin:0 0 5px}
+.call-invite-dialog .chat-menu-head{align-items:flex-start;gap:12px}
+.call-invite-dialog .chat-menu-close{flex-shrink:0}
+.call-invite-search{box-sizing:border-box;width:100%;margin:14px 0 10px;border:1px solid #354b68;background:#0f1d30;color:#fff;border-radius:12px;padding:12px;font-size:16px}
+.call-invite-contacts{display:grid;gap:8px;max-height:50dvh;overflow:auto}
+.call-invite-contact{display:flex;align-items:center;gap:11px;width:100%;border:0;border-radius:14px;background:#17283f;color:#fff;padding:11px;text-align:left}
+.call-invite-contact .avatar{flex-shrink:0}
+.call-invite-contact-copy{min-width:0;flex:1}
+.call-invite-contact-copy strong,.call-invite-contact-copy small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.call-invite-contact-copy small{color:#9fb0c8;font-size:12px;margin-top:4px}
+.call-invite-contact-action{flex-shrink:0;font-size:22px;padding:5px}
+.call-invite-contact:disabled{opacity:.6}
+.call-invite-empty{padding:22px 10px;text-align:center;color:#9fb0c8}
+.call-invite-status{min-height:22px;padding-top:12px;font-size:13px;overflow-wrap:anywhere}
