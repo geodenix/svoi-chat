@@ -6359,7 +6359,7 @@ async function renderGroupLocalTracks(){
 
 let groupCallJoining=false;
 
-async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
+async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',invitationVideo=null){
   if(groupCallJoining||groupCallState)return;
   if(currentCall||pendingCall){
     alert('Сначала заверши текущий личный звонок');return
@@ -6381,7 +6381,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
     if(currentCall||pendingCall){
       alert('Сначала заверши текущий личный звонок');return false
     }
-    const callVideo=linkedToken?!!credentials.video:!!video;
+    const callVideo=invitationVideo==null?(linkedToken?!!credentials.video:!!video):!!invitationVideo;
 
     room=new LivekitClient.Room({
       adaptiveStream:true,
@@ -6468,7 +6468,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
     $('groupCallGrid').classList.add('layout-1');
     $('groupCallName').textContent=credentials.group_name;
     $('groupCallStatus').textContent='Подключение…';
-    $('groupInviteLinkWrap').classList.toggle('hidden',!linkedToken);
+    $('groupInviteLinkWrap').classList.remove('hidden');
     $('groupCallDuration').textContent='00:00';
     $('groupCallDuration').classList.add('hidden');
     $('groupCallOverlay').classList.remove('group-focused-mode');
@@ -6640,6 +6640,7 @@ function leaveGroupCall(disconnect=true,endReason='local_leave'){
   resetNativeAudioRoute().catch(()=>{});
   const state=groupCallState;
   if(state){
+    cancelOutgoingConferenceInvites(state);
     reportGroupCallQuality(state,endReason,true).catch(()=>{});
     state.manualLeave=true;
     stopGroupPingMonitoring(state);
@@ -6789,52 +6790,147 @@ $('groupCallProfileMute').onclick=()=>{
 };
 
 
-$('privateInviteCall').onclick=()=>createAndOpenPrivateInvite();
 
-$('groupInviteLinkBtn').onclick=()=>{
-  const token=groupCallState?.kind==='link'
-    ?groupCallState.inviteToken
-    :'';
-  if(token)openCallInviteDialog(token,'Ссылка готова к отправке')
-};
+let callInviteContext=null,callInviteSending=false;
+const outgoingConferenceInvites=new Map(),conferenceInviteStatuses=new Map();
 
-$('closeCallInvite').onclick=()=>$('callInviteDialog').close();
-$('callInviteDialog').addEventListener('click',event=>{
-  if(event.target===$('callInviteDialog'))$('callInviteDialog').close()
-});
-
-$('copyCallInvite').onclick=async()=>{
-  const url=$('callInviteUrl').value;
-  if(!url)return;
+function callInviteParticipants(){
+  const ids=new Set([Number(me?.id)]);
+  if(currentCall)ids.add(Number(currentCall.peerId));
+  for(const participant of groupCallState?.room?.remoteParticipants?.values?.()||[]){
+    const match=/^user-(\d+)$/.exec(String(participant.identity||''));
+    if(match)ids.add(Number(match[1]));
+  }
+  return ids;
+}
+function renderCallInviteContacts(){
+  const list=$('callInviteContacts');
+  if(!list)return;
+  list.replaceChildren();
+  const excluded=callInviteParticipants(),query=$('callInviteSearch').value.trim().toLowerCase();
+  const statuses={ringing:'Звоним…',accepted:'Приглашение принято',rejected:'Отклонено',missed:'Не ответил',cancelled:'Отменено'};
+  const contacts=users.filter(user=>!excluded.has(Number(user.id))
+    &&(!query||(user.display_name+' @'+user.username).toLowerCase().includes(query)));
+  for(const user of contacts){
+    const item=document.createElement('button');item.type='button';item.className='call-invite-contact';
+    const avatar=document.createElement('span');avatar.className='avatar';setAvatar(avatar,user);
+    const copy=document.createElement('span');copy.className='call-invite-contact-copy';
+    const name=document.createElement('strong');name.textContent=user.display_name;
+    const invite=outgoingConferenceInvites.get(Number(user.id));
+    const active=invite?.state===groupCallState;
+    const detail=document.createElement('small');
+    detail.textContent=active?(statuses[invite.status]||''):(user.online?'В сети':'@'+user.username);
+    copy.append(name,detail);
+    const action=document.createElement('span');action.className='call-invite-contact-action';
+    action.textContent=active&&invite.status==='ringing'?'…':'📞';
+    item.disabled=callInviteSending||(active&&['ringing','accepted'].includes(invite.status));
+    item.append(avatar,copy,action);
+    item.onclick=()=>inviteContactToCall(user);
+    list.append(item);
+  }
+  if(!contacts.length){
+    const empty=document.createElement('div');empty.className='call-invite-empty';
+    empty.textContent=query?'Никого не найдено':'Нет других контактов для приглашения';
+    list.append(empty);
+  }
+}
+async function openCallContactPicker(){
+  if(!groupCallState&&!currentCall?.answered)return;
+  callInviteContext=groupCallState?{kind:'group',state:groupCallState}:{kind:'private',call:currentCall};
+  $('callInviteSearch').value='';$('callInviteStatus').textContent='';
+  renderCallInviteContacts();
+  if(!$('callInviteDialog').open)$('callInviteDialog').showModal();
+  try{await loadUsers();if($('callInviteDialog').open)renderCallInviteContacts();}
+  catch(err){$('callInviteStatus').textContent=err.message||'Не удалось загрузить контакты';}
+}
+async function inviteContactToCall(user){
+  if(callInviteSending||!callInviteContext)return;
+  callInviteSending=true;renderCallInviteContacts();
   try{
-    await navigator.clipboard.writeText(url);
-    $('callInviteStatus').textContent='Ссылка скопирована'
-  }catch{
-    $('callInviteUrl').focus();
-    $('callInviteUrl').select();
-    document.execCommand?.('copy');
-    $('callInviteStatus').textContent='Ссылка скопирована'
-  }
-};
-
-$('shareCallInvite').onclick=async()=>{
-  const url=$('callInviteUrl').value;
-  if(!url)return;
-  if(typeof navigator.share==='function'){
-    try{
-      await navigator.share({
-        title:'Приглашение в звонок «Свои»',
-        text:'Присоединяйся к звонку',
-        url
-      });
-      $('callInviteStatus').textContent='Окно отправки открыто'
-      return
-    }catch(err){
-      if(err?.name==='AbortError')return
+    const context=callInviteContext;
+    if(context.kind==='private'){
+      if(currentCall!==context.call||!context.call.answered)throw new Error('Личный звонок уже завершён');
+      $('callInviteStatus').textContent='Подключаем конференцию…';
+      const result=await api('/api/calls/'+encodeURIComponent(context.call.callId)+'/invite-link',{method:'POST'});
+      if(currentCall!==context.call)throw new Error('Личный звонок уже завершён');
+      const promoted=await promotePrivateCallToConference(result.invite_token,!!result.video);
+      await api('/api/calls/'+encodeURIComponent(promoted.callId)+'/activate-conference',
+        {method:'POST',body:{invite_token:result.invite_token}});
+      callInviteContext={kind:'group',state:groupCallState};
     }
+    const state=callInviteContext.state;
+    if(!state||groupCallState!==state||state.manualLeave)throw new Error('Звонок уже завершён');
+    const body={target_user_id:Number(user.id),video:!!(state.video||!state.cameraOff)};
+    if(state.kind==='link')body.invite_token=state.inviteToken;
+    else body.group_id=Number(state.groupId);
+    $('callInviteStatus').textContent='Звоним: '+user.display_name+'…';
+    const result=await api('/api/conference-invitations',{method:'POST',body});
+    if(groupCallState!==state){
+      api('/api/conference-invitations/'+encodeURIComponent(result.call_id)+'/cancel',{method:'POST'}).catch(()=>{});
+      throw new Error('Звонок уже завершён');
+    }
+    outgoingConferenceInvites.set(Number(user.id),{
+      callId:result.call_id,state,status:conferenceInviteStatuses.get(result.call_id)||'ringing'
+    });
+    $('callInviteStatus').textContent='Вызов отправлен: '+user.display_name;
+  }catch(err){
+    $('callInviteStatus').textContent=err.message||'Не удалось пригласить собеседника';
+  }finally{
+    callInviteSending=false;renderCallInviteContacts();
   }
-  $('copyCallInvite').click()
-};
+}
+function handleConferenceInviteStatus(data){
+  conferenceInviteStatuses.set(data.call_id,data.status);
+  if(conferenceInviteStatuses.size>100)conferenceInviteStatuses.delete(conferenceInviteStatuses.keys().next().value);
+  for(const invite of outgoingConferenceInvites.values()){
+    if(invite.callId===data.call_id)invite.status=data.status;
+  }
+  if(pendingCall?.call_id===data.call_id&&data.status==='accepted'&&!acceptingCall){
+    finishCall(false);
+  }
+  if($('callInviteDialog').open)renderCallInviteContacts();
+}
+function cancelOutgoingConferenceInvites(state){
+  for(const [userId,invite] of outgoingConferenceInvites){
+    if(invite.state!==state)continue;
+    if(invite.status==='ringing'){
+      api('/api/conference-invitations/'+encodeURIComponent(invite.callId)+'/cancel',{method:'POST'}).catch(()=>{});
+    }
+    outgoingConferenceInvites.delete(userId);
+  }
+  if(callInviteContext?.state===state){
+    callInviteContext=null;
+    if($('callInviteDialog').open)$('callInviteDialog').close();
+  }
+}
+async function acceptIncomingConferenceInvitation(options={}){
+  const data=pendingCall;
+  if(!data?.conference_invitation||acceptingCall)return false;
+  acceptingCall=true;stopRingtone();clearNativeCallNotification(data.call_id);
+  $('acceptCall').disabled=true;$('rejectCall').disabled=true;
+  try{
+    const result=await api('/api/conference-invitations/'+encodeURIComponent(data.call_id)+'/accept',{method:'POST'});
+    if(pendingCall?.call_id!==data.call_id)throw new Error('Приглашение уже завершено');
+    pendingCall=null;resetCallUi();
+    const joined=await joinGroupCall(null,!!result.video,false,result.invite_token,!!result.video);
+    if(!joined)throw new Error('Не удалось подключиться к конференции');
+    return true;
+  }catch(err){
+    pendingCall=null;resetCallUi();
+    if(!options.suppressFailureAlert)alert(err.message||'Не удалось принять приглашение');
+    return false;
+  }finally{
+    acceptingCall=false;$('acceptCall').disabled=false;$('rejectCall').disabled=false;
+  }
+}
+
+$('privateInviteCall').onclick=openCallContactPicker;
+$('groupInviteLinkBtn').onclick=openCallContactPicker;
+$('closeCallInvite').onclick=()=>$('callInviteDialog').close();
+$('callInviteSearch').oninput=renderCallInviteContacts;
+$('callInviteDialog').addEventListener('click',event=>{
+  if(event.target===$('callInviteDialog'))$('callInviteDialog').close();
+});
 
 $('groupMuteBtn').onclick=async()=>{
   if(!groupCallState)return;
@@ -8487,7 +8583,7 @@ function incomingCall(data,suppressRingtone=false,nativeSystemControls=false){
     }
     return
   }
-  if(currentCall||pendingCall){
+  if(currentCall||pendingCall||groupCallState||groupCallJoining){
     try{wsSend({type:'call_reject',to_user_id:data.from_user_id,call_id:data.call_id})}catch{}
     return
   }
@@ -8506,8 +8602,9 @@ function incomingCall(data,suppressRingtone=false,nativeSystemControls=false){
     nativeSystemControls
   );
   if(!suppressRingtone)startRingtone().catch(()=>{});
-  $('mediaPermission').classList.toggle('hidden',!data.video);
-  if(data.video){
+  $('mediaPermission').classList.toggle('hidden',!data.video||!!data.conference_invitation);
+  if(data.conference_invitation)$('callStatus').textContent='Приглашение: '+(data.conference_name||'Конференция');
+  if(data.video&&!data.conference_invitation){
     $('mediaPermissionText').textContent='Нужен доступ к камере и микрофону';
     $('mediaPermissionBtn').textContent='Разрешить камеру и микрофон';
     $('mediaPermissionBtn').disabled=false
@@ -8543,6 +8640,7 @@ $('mediaPermissionBtn').onclick=requestIncomingMediaPermission;
 
 async function acceptIncomingCall(options={}){
   if(!pendingCall||acceptingCall)return false;
+  if(pendingCall.conference_invitation)return acceptIncomingConferenceInvitation(options);
   const nativeResume=!!options.nativeResume;
   const suppressFailureAlert=!!options.suppressFailureAlert;
   stopRingtone();
@@ -8674,20 +8772,6 @@ function closePrivateCallForConference(){
   return call
 }
 
-function callInviteUrl(inviteToken){
-  return new URL(
-    '/?call_invite='+encodeURIComponent(inviteToken),
-    location.origin
-  ).href
-}
-
-function openCallInviteDialog(inviteToken,status=''){
-  if(!inviteToken)return;
-  $('callInviteUrl').value=callInviteUrl(inviteToken);
-  $('callInviteStatus').textContent=status;
-  if(!$('callInviteDialog').open)$('callInviteDialog').showModal()
-}
-
 async function promotePrivateCallToConference(inviteToken,video=false){
   const call=currentCall;
   if(!call?.answered)throw new Error('Личный звонок уже завершён');
@@ -8701,44 +8785,6 @@ async function promotePrivateCallToConference(inviteToken,video=false){
     return {callId,video:callVideo}
   }catch(err){
     throw err
-  }
-}
-
-async function createAndOpenPrivateInvite(){
-  const button=$('privateInviteCall');
-  const call=currentCall;
-  if(!call?.answered||button?.disabled)return;
-
-  if(button)button.disabled=true;
-  try{
-    $('callStatus').textContent='Создаём ссылку…';
-    const result=await api(
-      '/api/calls/'+encodeURIComponent(call.callId)+'/invite-link',
-      {method:'POST'}
-    );
-
-    $('callStatus').textContent='Переводим звонок в конференцию…';
-    const promoted=await promotePrivateCallToConference(
-      result.invite_token,
-      !!result.video
-    );
-
-    await api(
-      '/api/calls/'+encodeURIComponent(promoted.callId)+'/activate-conference',
-      {
-        method:'POST',
-        body:{invite_token:result.invite_token}
-      }
-    );
-
-    openCallInviteDialog(
-      result.invite_token,
-      'Готово · можно отправить ссылку дополнительному участнику'
-    )
-  }catch(err){
-    alert(err?.message||'Не удалось создать приглашение в звонок')
-  }finally{
-    if(button)button.disabled=false
   }
 }
 
@@ -9754,6 +9800,9 @@ function connectWs(){
       return
     }
 
+    if(data.type==='conference_invite_status'){
+      handleConferenceInviteStatus(data);return;
+    }
     if(data.type==='private_call_room_upgrade'){
       if(
         currentCall
