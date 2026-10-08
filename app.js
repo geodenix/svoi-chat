@@ -12,7 +12,7 @@ let messageRecorder=null,messageRecordStream=null,messageRecordChunks=[],message
 let messageRecordFacing='user';
 let messageMicStream=null,messageCameraStream=null,messageRecordCanvas=null,messageRecordCanvasRaf=null;
 let recordingAudioContext=null,recordingAnalyser=null,recordingWaveRaf=null;
-let currentCall=null,pendingCall=null,pendingIce=[],cameraFacing='user',acceptingCall=false,preparedMediaStream=null,earModeActive=false,earUnlockTimer=null;
+let currentCall=null,pendingCall=null,pendingIce=[],cameraFacing='user',acceptingCall=false,preparedMediaStream=null,incomingMediaRequest=null,earModeActive=false,earUnlockTimer=null;
 let callSignalChain=Promise.resolve();
 let callAudioSinkId='',callSpeakerMode=false;
 let audioOutputSwitching=false,nativeAudioRouteChain=Promise.resolve(),audioRouteGeneration=0;
@@ -6602,7 +6602,18 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken=''){
     if(nativeAudioRoutePlugin()){
       await applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
     }
-    if(callVideo)await room.localParticipant.setCameraEnabled(true);
+    if(callVideo){
+      const state=groupCallState;
+      if(!state||state.room!==room||state.manualLeave)return false;
+      try{
+        await retryCameraStart(()=>room.localParticipant.setCameraEnabled(true),()=>groupCallState===state&&!state.manualLeave);
+      }catch(err){
+        if(groupCallState!==state||state.manualLeave)return false;
+        state.cameraOff=true;
+        updateGroupCameraControls(state);
+        alert(cameraStartErrorMessage(err)+' Разговор продолжится без камеры; её можно включить кнопкой 📷.');
+      }
+    }
 
     await renderGroupLocalTracks();
     refreshGroupCount();
@@ -6842,38 +6853,66 @@ $('groupMuteBtn').onclick=async()=>{
 
 $('groupSpeakerBtn').onclick=()=>chooseSpeakerOutput();
 
+
 $('groupCameraBtn').onclick=async()=>{
-  if(!groupCallState)return;
+  const state=groupCallState;
+  if(!state||state.cameraChanging)return;
+  const nextOff=!state.cameraOff;
+  state.cameraChanging=true;
+  updateGroupCameraControls(state);
   try{
-    groupCallState.cameraOff=!groupCallState.cameraOff;
-    await groupCallState.room.localParticipant.setCameraEnabled(!groupCallState.cameraOff);
-    if(!groupCallState.cameraOff){
-      startNativeCallService($('groupCallName').textContent,true,true).catch(()=>{})
-    }
-    $('groupCameraBtn').classList.toggle('off',groupCallState.cameraOff);
-    $('groupCameraBtn').textContent=groupCallState.cameraOff?'🎥':'📷';
-    $('groupCameraBtn').title=groupCallState.cameraOff
-      ?'Переключить в видеорежим'
-      :'Переключить в аудиорежим';
-    $('groupSwitchCameraBtn').classList.toggle('hidden',groupCallState.cameraOff);
+    if(nextOff)await state.room.localParticipant.setCameraEnabled(false);
+    else await retryCameraStart(
+      ()=>state.room.localParticipant.setCameraEnabled(true),
+      ()=>groupCallState===state&&!state.manualLeave
+    );
+    if(groupCallState!==state)return;
+    state.cameraOff=nextOff;
+    if(!nextOff)startNativeCallService($('groupCallName').textContent,true,true).catch(()=>{});
     await renderGroupLocalTracks();
-    updateGroupScreenShareControls()
-  }catch(err){alert(err.message||'Не удалось изменить камеру')}
+    updateGroupScreenShareControls();
+  }catch(err){
+    if(groupCallState===state)alert(cameraStartErrorMessage(err,'Не удалось изменить камеру'));
+  }finally{
+    state.cameraChanging=false;
+    updateGroupCameraControls(state);
+  }
 };
 
 $('groupSwitchCameraBtn').onclick=async()=>{
-  if(!groupCallState||groupCallState.cameraOff)return;
+  const state=groupCallState;
+  if(!state||state.cameraOff||state.cameraChanging)return;
+  const isActive=()=>groupCallState===state&&!state.manualLeave;
+  let videoTrack=null;
+  for(const pub of state.room.localParticipant.videoTrackPublications.values()){
+    if(pub.track){videoTrack=pub.track;break;}
+  }
+  if(!videoTrack){alert('Камера не найдена');return;}
+  const oldFacing=state.facing;
+  const nextFacing=oldFacing==='user'?'environment':'user';
+  state.cameraChanging=true;
+  updateGroupCameraControls(state);
   try{
-    const p=groupCallState.room.localParticipant;
-    let videoTrack=null;
-    for(const pub of p.videoTrackPublications.values()){
-      if(pub.track){videoTrack=pub.track;break}
+    await retryCameraStart(()=>videoTrack.restartTrack({facingMode:nextFacing}),isActive);
+    if(!isActive())return;
+    state.facing=nextFacing;
+    await renderGroupLocalTracks();
+  }catch(err){
+    if(!isActive())return;
+    try{
+      await retryCameraStart(()=>videoTrack.restartTrack({facingMode:oldFacing}),isActive);
+    }catch{
+      state.cameraOff=true;
+      try{await state.room.localParticipant.setCameraEnabled(false)}catch{}
     }
-    if(!videoTrack)throw new Error('Камера не найдена');
-    groupCallState.facing=groupCallState.facing==='user'?'environment':'user';
-    await videoTrack.restartTrack({facingMode:groupCallState.facing});
-    await renderGroupLocalTracks()
-  }catch(err){alert(err.message||'Не удалось переключить камеру')}
+    if(isActive()){
+      await renderGroupLocalTracks();
+      alert(cameraStartErrorMessage(err,'Не удалось переключить камеру'));
+    }
+  }finally{
+    state.cameraChanging=false;
+    updateGroupCameraControls(state);
+  }
 };
 
 $('groupEndBtn').onclick=()=>leaveGroupCall(true);
@@ -7314,6 +7353,7 @@ function updatePrivateVideoControls(){
 
 async function upgradeCurrentCallToVideo(){
   if(!currentCall||currentCall.renegotiating)return;
+  const upgradingCall=currentCall;
   exitEarMode();
   if(!currentCall.answered){
     alert('Дождись, пока собеседник примет звонок');
@@ -7326,10 +7366,10 @@ async function upgradeCurrentCallToVideo(){
   let newTrack=null;
   let sender=null;
   try{
-    const videoStream=await navigator.mediaDevices.getUserMedia({
+    const videoStream=await retryCameraStart(()=>navigator.mediaDevices.getUserMedia({
       video:getCallVideoConstraints(),
       audio:false
-    });
+    }),()=>currentCall===upgradingCall&&upgradingCall.pc?.signalingState!=='closed');
     newTrack=videoStream.getVideoTracks()[0];
     if(!newTrack)throw new Error('Камера не открылась');
 
@@ -7375,7 +7415,7 @@ async function upgradeCurrentCallToVideo(){
     $('callStatus').textContent='Соединено';
     alert(err?.name==='NotAllowedError'
       ?'Разреши доступ к камере для этого сайта'
-      :(err?.message||'Не удалось включить видео'))
+      :cameraStartErrorMessage(err,'Не удалось включить видео'))
   }finally{
     if(currentCall)currentCall.renegotiating=false;
     if(button)button.disabled=false
@@ -8095,15 +8135,76 @@ function getCallVideoConstraints(facing=cameraFacing){
   }
 }
 
-async function getCallMedia(video){
-  const request=navigator.mediaDevices.getUserMedia({
+
+function cameraStartErrorMessage(err,fallback='Не удалось включить камеру'){
+  if(err?.name==='NotAllowedError'||err?.name==='PermissionDeniedError'){
+    return 'Разреши доступ к камере в настройках приложения или сайта';
+  }
+  if(isTransientCameraStartError(err)){
+    return 'Камера не запустилась. Закрой другие приложения, использующие камеру, и попробуй снова';
+  }
+  return err?.message||fallback;
+}
+function isTransientCameraStartError(err){
+  return ['NotReadableError','TrackStartError','AbortError'].includes(err?.name)
+    || /could not start video source|could not start video|camera.*(busy|in use)/i.test(err?.message||'');
+}
+async function retryCameraStart(start,isActive=()=>true){
+  for(let attempt=0;attempt<3;attempt++){
+    if(!isActive())throw Object.assign(new Error('Запуск камеры отменён'),{name:'CameraCancelledError'});
+    try{
+      const result=await start();
+      if(!isActive()){
+        for(const track of result?.getTracks?.()||[])try{track.stop()}catch{}
+        throw Object.assign(new Error('Запуск камеры отменён'),{name:'CameraCancelledError'});
+      }
+      return result;
+    }catch(err){
+      if(!isActive()||!isTransientCameraStartError(err)||attempt===2)throw err;
+      await new Promise(resolve=>setTimeout(resolve,attempt===0?250:600));
+    }
+  }
+}
+async function getIncomingCallMedia(data){
+  if(preparedMediaStream)return preparedMediaStream;
+  if(incomingMediaRequest?.callId===data.call_id)return incomingMediaRequest.promise;
+  const request={callId:data.call_id,promise:null};
+  request.promise=getCallMedia(!!data.video,()=>pendingCall?.call_id===data.call_id)
+    .then(stream=>{
+      if(pendingCall?.call_id!==data.call_id){
+        stream.getTracks().forEach(track=>track.stop());
+        throw Object.assign(new Error('Входящий звонок завершён'),{name:'CameraCancelledError'});
+      }
+      preparedMediaStream=stream;
+      return stream;
+    }).finally(()=>{
+      if(incomingMediaRequest===request)incomingMediaRequest=null;
+    });
+  incomingMediaRequest=request;
+  return request.promise;
+}
+function updateGroupCameraControls(state){
+  if(groupCallState!==state)return;
+  $('groupCameraBtn').classList.toggle('off',state.cameraOff);
+  $('groupCameraBtn').textContent=state.cameraOff?'🎥':'📷';
+  $('groupCameraBtn').title=state.cameraOff?'Переключить в видеорежим':'Переключить в аудиорежим';
+  $('groupSwitchCameraBtn').classList.toggle('hidden',state.cameraOff);
+  $('groupCameraBtn').disabled=!!state.cameraChanging;
+  $('groupSwitchCameraBtn').disabled=!!state.cameraChanging;
+}
+
+async function getCallMedia(video,isActive=()=>true){
+  let mediaRequestActive=true;
+  const start=()=>navigator.mediaDevices.getUserMedia({
     audio:getCallAudioConstraints(),
     video:video?getCallVideoConstraints():false
   });
+  const request=video?retryCameraStart(start,()=>mediaRequestActive&&isActive()):start();
   return new Promise((resolve,reject)=>{
     let settled=false;
     const timer=setTimeout(()=>{
       settled=true;
+      mediaRequestActive=false;
       const err=new Error(video?'Камера не ответила. Проверь разрешение камеры.':'Микрофон не ответил. Проверь разрешение.');
       err.name='MediaTimeoutError';reject(err)
     },12000);
@@ -8370,7 +8471,7 @@ async function startCallTo(u,video){
     startOutgoingTone().catch(()=>{})
   }catch(err){
     finishCall(false);
-    alert(err.name==='NotAllowedError'?'Нужен доступ к микрофону/камере':(err.message||'Не удалось начать звонок'))
+    alert(err.name==='NotAllowedError'?'Нужен доступ к микрофону/камере':(video?cameraStartErrorMessage(err,'Не удалось начать видеозвонок'):(err.message||'Не удалось начать звонок')))
   }
 }
 
@@ -8414,27 +8515,26 @@ function incomingCall(data,suppressRingtone=false,nativeSystemControls=false){
 }
 
 async function requestIncomingMediaPermission(){
-  if(!pendingCall?.video)return;
+  if(!pendingCall?.video||acceptingCall||$('mediaPermissionBtn').disabled)return;
+  const data=pendingCall;
   $('mediaPermissionBtn').disabled=true;
   $('mediaPermissionText').textContent='Запрашиваем доступ…';
   try{
-    const stream=await getCallMedia(true);
-    if(preparedMediaStream){
-      try{preparedMediaStream.getTracks().forEach(t=>t.stop())}catch{}
-    }
-    preparedMediaStream=stream;
+    const stream=await getIncomingCallMedia(data);
+    if(pendingCall?.call_id!==data.call_id||acceptingCall)return;
     $('mediaPermissionText').textContent='Доступ получен — нажми ✓';
     $('mediaPermissionBtn').textContent='Камера разрешена ✅';
     $('localVideo').srcObject=stream;$('localVideo').classList.remove('hidden');
     updatePrivateLocalMirror();
     $('localVideo').play().catch(()=>{})
   }catch(err){
+    if(pendingCall?.call_id!==data.call_id||acceptingCall)return;
     $('mediaPermissionBtn').disabled=false;
     $('mediaPermissionBtn').textContent='Попробовать снова';
     if(err.name==='NotAllowedError'){
       $('mediaPermissionText').textContent='Камера/микрофон запрещены в настройках браузера для этого сайта'
     }else{
-      $('mediaPermissionText').textContent=err.message||'Не удалось открыть камеру'
+      $('mediaPermissionText').textContent=cameraStartErrorMessage(err,'Не удалось открыть камеру')
     }
   }
 }
@@ -8459,7 +8559,7 @@ async function acceptIncomingCall(options={}){
     false
   );
   try{
-    const stream=preparedMediaStream||await getCallMedia(!!data.video);
+    const stream=await getIncomingCallMedia(data);
     preparedMediaStream=null;
     if(!pendingCall||pendingCall.call_id!==data.call_id){
       stream.getTracks().forEach(t=>t.stop());
@@ -8531,7 +8631,7 @@ async function acceptIncomingCall(options={}){
     finishCall(false);
     const message=err.name==='NotAllowedError'
       ?'Нужен доступ к микрофону и камере'
-      :(err.message||'Не удалось принять звонок');
+      :(data.video?cameraStartErrorMessage(err,'Не удалось принять видеозвонок'):(err.message||'Не удалось принять звонок'));
     alert(message);
     return false
   }finally{
@@ -8594,6 +8694,7 @@ async function promotePrivateCallToConference(inviteToken,video=false){
   const callId=call.callId;
   const callVideo=!!(video||call.video);
   closePrivateCallForConference();
+  await new Promise(resolve=>setTimeout(resolve,250));
   try{
     const joined=await joinGroupCall(null,callVideo,false,inviteToken);
     if(!joined)throw new Error('Не удалось перейти в конференцию');
@@ -8887,7 +8988,7 @@ $('switchCamera').onclick=async()=>{
   const isActive=()=>currentCall===call&&call.pc?.signalingState!=='closed';
   const pendingStreams=new Set();
   const openCamera=async constraints=>{
-    const stream=await navigator.mediaDevices.getUserMedia(constraints);
+    const stream=await retryCameraStart(()=>navigator.mediaDevices.getUserMedia(constraints),isActive);
     pendingStreams.add(stream);
     return stream
   };
@@ -8930,7 +9031,9 @@ $('switchCamera').onclick=async()=>{
       oldTrack.enabled=false;
       oldTrack.stop();
       call.localStream.removeTrack(oldTrack);
-      oldTrackRemoved=true
+      oldTrackRemoved=true;
+      await new Promise(resolve=>setTimeout(resolve,200));
+      if(!isActive())return
     }
 
     let constraints;
@@ -8945,6 +9048,7 @@ $('switchCamera').onclick=async()=>{
       newStream=await openCamera(constraints)
     }catch(firstError){
       if(!isActive())return;
+      if(['NotAllowedError','PermissionDeniedError'].includes(firstError?.name))throw firstError;
       newStream=await openCamera({
         video:getCallVideoConstraints(nextFacing),
         audio:false
@@ -8995,7 +9099,7 @@ $('switchCamera').onclick=async()=>{
         $('localVideo').play().catch(()=>{})
       }
     }catch{}
-    if(isActive())alert(err.message||'Не удалось переключить камеру')
+    if(isActive())alert(cameraStartErrorMessage(err,'Не удалось переключить камеру'))
   }finally{
     for(const stream of pendingStreams){
       stream.getTracks().forEach(track=>track.stop())
