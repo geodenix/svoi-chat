@@ -11,7 +11,7 @@
 <link rel="icon" href="/icon-192.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon-512.svg">
 <title>Свои</title>
-<link rel="stylesheet" href="/app.css?v=116">
+<link rel="stylesheet" href="/app.css?v=117">
 
 
 
@@ -276,21 +276,12 @@
 
 <dialog id="callInviteDialog" class="call-invite-dialog">
   <div class="chat-menu-head">
-    <div>
-      <h2>Пригласить в звонок</h2>
-      <small class="muted">Ссылка действует до 2 часов. Войти сможет пользователь «Своих».</small>
-    </div>
+    <div><h2>Пригласить в звонок</h2><small class="muted">Выбери человека — ему поступит входящий вызов.</small></div>
     <button id="closeCallInvite" class="chat-menu-close" type="button" aria-label="Закрыть">×</button>
   </div>
-  <div class="field">
-    <label>Ссылка на звонок</label>
-    <input id="callInviteUrl" type="text" readonly>
-  </div>
-  <div id="callInviteStatus" class="muted" style="min-height:20px"></div>
-  <div class="dialog-actions">
-    <button id="copyCallInvite" type="button">📋 Копировать</button>
-    <button id="shareCallInvite" class="primary" type="button">↗️ Поделиться</button>
-  </div>
+  <input id="callInviteSearch" class="call-invite-search" type="search" placeholder="Имя или @ник" aria-label="Поиск контакта" autocomplete="off">
+  <div id="callInviteContacts" class="call-invite-contacts"></div>
+  <div id="callInviteStatus" class="call-invite-status muted" role="status" aria-live="polite"></div>
 </dialog>
 
 <dialog id="groupCallProfileDialog" class="group-call-profile-dialog">
@@ -593,4 +584,4 @@
 </dialog>
 
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.22.3/dist/livekit-client.umd.min.js"></script>
-<script src="/app.js?v=116"></script></body></html>
+<script src="/app.js?v=117"></script></body></html>
