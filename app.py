@@ -97,7 +97,7 @@ WS_IMMEDIATE_TYPES = {
     "call_offer", "call_answer", "call_video_offer", "call_video_answer",
     "call_video_state", "call_mute", "ice_candidate", "call_reject",
     "call_end", "call_unavailable", "private_call_room_upgrade",
-    "group_call_invite", "group_force_mute", "group_force_mute_sent",
+    "group_call_invite", "group_force_mute", "group_force_mute_sent", "conference_invite_status",
 }
 active_calls: dict[str, dict] = {}
 call_invite_links: dict[str, dict] = {}
@@ -6665,6 +6665,9 @@ async def create_private_call_invite_link(
             "room_name": room_name,
             "source_call_id": call_id,
             "creator_id": user_id,
+            "authorized_ids": sorted(participants),
+            "initial_participants": sorted(participants),
+            "group_name": "Конференция",
             "video": bool(call.get("video")),
             "created_at": now_iso(),
             "expires_at_ts": time.time() + 7200,
@@ -6742,6 +6745,8 @@ def private_call_invite_token(
     if not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
         raise HTTPException(503, "Сервер конференций пока не настроен")
 
+    if "authorized_ids" in invite and int(user["id"]) not in invite["authorized_ids"]:
+        raise HTTPException(403, "Сначала прими адресованное тебе приглашение")
     room_name = str(invite["room_name"])
     identity = f"user-{user['id']}"
 
@@ -6783,12 +6788,187 @@ def private_call_invite_token(
         "participant_token": token,
         "room_name": room_name,
         "group_id": None,
-        "group_name": "Личный звонок",
+        "group_name": invite.get("group_name", "Конференция"),
         "video": bool(invite.get("video")),
         "is_admin": False,
         "max_participants": 10,
         "invite_token": invite_token,
     }
+
+
+
+conference_invitation_lock = asyncio.Lock()
+
+
+class ConferenceCallInviteIn(BaseModel):
+    target_user_id: int = Field(gt=0)
+    invite_token: str | None = Field(default=None, min_length=16, max_length=160)
+    group_id: int | None = Field(default=None, gt=0)
+    video: bool = False
+
+
+def incoming_call_payload(call: dict) -> dict:
+    payload = {"type": "call_offer", "call_id": call["call_id"],
+               "from_user_id": call["caller_id"], "from_name": call["caller_name"],
+               "from_avatar_url": call.get("caller_avatar_url"), "video": bool(call["video"]),
+               "sdp": call.get("offer_sdp", {}), "ice_candidates": call.get("caller_ice", [])}
+    if call.get("conference_invitation"):
+        payload.update(conference_invitation=True, conference_name=call["conference_name"])
+    return payload
+
+
+async def conference_room_participants(room_name: str) -> set[str]:
+    client = livekit_api.LiveKitAPI(
+        url=os.getenv("LIVEKIT_ADMIN_URL", "http://127.0.0.1:7880"),
+        api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
+    try:
+        result = await client.room.list_participants(livekit_api.ListParticipantsRequest(room=room_name))
+        return {participant.identity for participant in result.participants}
+    except Exception:
+        raise HTTPException(503, "Не удалось проверить участников звонка. Попробуй ещё раз")
+    finally:
+        await client.aclose()
+
+
+async def finish_conference_invitation(call: dict, status: str):
+    call_id = call["call_id"]
+    active_calls.pop(call_id, None)
+    finish_call_history(call_id, "rejected" if status == "rejected" else "missed")
+    await push(call["caller_id"], {"type": "conference_invite_status", "call_id": call_id,
+                                  "target_user_id": call["callee_id"], "status": status})
+    await push(call["callee_id"], {"type": "call_end", "call_id": call_id,
+                                  "from_user_id": call["caller_id"], "from_name": call["caller_name"]})
+
+
+async def expire_conference_invitation(call_id: str):
+    await asyncio.sleep(45)
+    call = active_calls.get(call_id)
+    if not call or not call.get("conference_invitation"):
+        return
+    if call.get("answered"):
+        finish_call_history(call_id, "completed")
+        active_calls.pop(call_id, None)
+        return
+    await notify_missed_call(call)
+    await finish_conference_invitation(call, "missed")
+
+
+@app.post("/api/conference-invitations")
+async def invite_conference_contact(data: ConferenceCallInviteIn, user=Depends(current_user), conn=Depends(db)):
+    if bool(data.invite_token) == bool(data.group_id):
+        raise HTTPException(400, "Укажи один текущий звонок")
+    if not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        raise HTTPException(503, "Сервер конференций пока не настроен")
+    user_id, target_id = int(user["id"]), int(data.target_user_id)
+    if target_id == user_id:
+        raise HTTPException(400, "Нельзя пригласить себя")
+    if not conn.execute("SELECT 1 FROM users WHERE id=?", (target_id,)).fetchone():
+        raise HTTPException(404, "Пользователь не найден")
+    if users_blocked(conn, user_id, target_id):
+        raise HTTPException(403, "Звонки с этим пользователем недоступны")
+    async with conference_invitation_lock:
+        if data.invite_token:
+            invite = call_invite_link_for_token(data.invite_token)
+            if not invite:
+                raise HTTPException(410, "Конференция уже завершена или истекла")
+        else:
+            group = group_for_user(conn, data.group_id, user_id)
+            if not group:
+                raise HTTPException(403, "Нет доступа к этому групповому звонку")
+            room_name = f"svoi-group-{data.group_id}"
+            invite = next((item for item in call_invite_links.values()
+                           if item.get("room_name") == room_name and item.get("source_group_id") == data.group_id
+                           and item.get("expires_at_ts", 0) > time.time()), None)
+            if not invite:
+                token = secrets.token_urlsafe(32)
+                invite = {"invite_token": token, "room_name": room_name, "source_group_id": data.group_id,
+                          "creator_id": user_id, "group_name": group["name"], "video": bool(data.video),
+                          "authorized_ids": [user_id], "expires_at_ts": time.time() + 7200}
+                call_invite_links[token] = invite
+                asyncio.create_task(expire_call_invite_link(token))
+        room_name = str(invite["room_name"])
+        participants = await conference_room_participants(room_name)
+        if f"user-{user_id}" not in participants:
+            raise HTTPException(403, "Ты уже не участвуешь в этом звонке")
+        if f"user-{target_id}" in participants or target_id in invite.get("initial_participants", []):
+            raise HTTPException(409, "Этот человек уже участвует в звонке")
+        now = time.time()
+        reservations = [call for call in active_calls.values()
+                        if call.get("conference_invitation") and call.get("conference_room") == room_name
+                        and call.get("expires_at_ts", 0) > now and f"user-{call['callee_id']}" not in participants]
+        duplicate = next((call for call in reservations if call["callee_id"] == target_id), None)
+        if duplicate:
+            return {"call_id": duplicate["call_id"], "status": "ringing"}
+        if len(participants) + len(reservations) >= 10:
+            raise HTTPException(409, "В звонке уже 10 участников или ожидающих приглашений")
+        if any(not call.get("promoted_to_room") and target_id in (call.get("caller_id"), call.get("callee_id"))
+               for call in active_calls.values()):
+            raise HTTPException(409, "Этот человек сейчас занят другим звонком")
+        call_id = "conf-" + secrets.token_urlsafe(24)
+        call = {"call_id": call_id, "caller_id": user_id, "caller_name": user["display_name"],
+                "caller_avatar_url": user_json(user).get("avatar_url"), "callee_id": target_id,
+                "video": bool(data.video or invite.get("video")), "offer_sdp": {}, "caller_ice": [],
+                "started_at": now_iso(), "answered": False, "missed_notified": False,
+                "action_token": secrets.token_urlsafe(24), "conference_invitation": True,
+                "conference_name": invite.get("group_name", "Конференция"),
+                "conference_room": room_name, "conference_token": invite["invite_token"], "expires_at_ts": now + 45}
+        active_calls[call_id] = call
+        save_call_started(call)
+        asyncio.create_task(expire_conference_invitation(call_id))
+    await push(target_id, incoming_call_payload(call))
+    await send_web_push(target_id, "Приглашение в звонок",
+                        f"Звонит {user['display_name']} · {call['conference_name']}",
+                        f"/?incoming_call={call_id}&native_ring=1&action_token={call['action_token']}",
+                        f"incoming-call-{call_id}", False)
+    return {"call_id": call_id, "status": "ringing"}
+
+
+@app.post("/api/conference-invitations/{call_id}/accept")
+async def accept_conference_invitation(call_id: str, user=Depends(current_user)):
+    async with conference_invitation_lock:
+        call = active_calls.get(call_id)
+        if not call or not call.get("conference_invitation") or call.get("expires_at_ts", 0) <= time.time():
+            raise HTTPException(410, "Приглашение уже завершено")
+        if call["callee_id"] != int(user["id"]):
+            raise HTTPException(403, "Приглашение адресовано другому человеку")
+        if call.get("answered"):
+            raise HTTPException(409, "Приглашение уже принято на другом устройстве")
+        invite = call_invite_link_for_token(call["conference_token"])
+        if not invite:
+            raise HTTPException(410, "Конференция уже завершена")
+        participants = await conference_room_participants(call["conference_room"])
+        if f"user-{call['caller_id']}" not in participants:
+            raise HTTPException(410, "Пригласивший собеседник уже вышел из звонка")
+        if active_calls.get(call_id) is not call or call.get("answered"):
+            raise HTTPException(410, "Приглашение уже завершено или принято")
+        if len(participants) >= 10 and f"user-{user['id']}" not in participants:
+            raise HTTPException(409, "В конференции уже 10 участников")
+        if any(other is not call and not other.get("conference_invitation") and not other.get("promoted_to_room")
+               and int(user["id"]) in (other.get("caller_id"), other.get("callee_id"))
+               for other in active_calls.values()):
+            raise HTTPException(409, "Сначала заверши другой звонок")
+        authorized = set(invite.get("authorized_ids", []))
+        authorized.add(int(user["id"]))
+        invite["authorized_ids"] = sorted(authorized)
+        call["answered"] = True
+        mark_call_answered(call_id)
+    for recipient in (call["caller_id"], call["callee_id"]):
+        await push(recipient, {"type": "conference_invite_status", "call_id": call_id,
+                               "target_user_id": call["callee_id"], "status": "accepted"})
+    return {"invite_token": call["conference_token"], "video": call["video"]}
+
+
+@app.post("/api/conference-invitations/{call_id}/cancel")
+async def cancel_conference_invitation(call_id: str, user=Depends(current_user)):
+    async with conference_invitation_lock:
+        call = active_calls.get(call_id)
+        if not call or not call.get("conference_invitation"):
+            return {"ok": True}
+        if call["caller_id"] != int(user["id"]):
+            raise HTTPException(403, "Нет доступа к этому приглашению")
+        if not call.get("answered"):
+            await finish_conference_invitation(call, "cancelled")
+    return {"ok": True}
 
 
 def save_call_started(call: dict):
@@ -7245,16 +7425,7 @@ def pending_call(
     call = active_calls.get(call_id)
     if not call or call.get("callee_id") != user["id"] or call.get("answered"):
         raise HTTPException(404, "Вызов уже завершён")
-    return {
-        "type": "call_offer",
-        "call_id": call["call_id"],
-        "from_user_id": call["caller_id"],
-        "from_name": call["caller_name"],
-        "from_avatar_url": call.get("caller_avatar_url"),
-        "video": call["video"],
-        "sdp": call["offer_sdp"],
-        "ice_candidates": call.get("caller_ice", []),
-    }
+    return incoming_call_payload(call)
 
 
 @app.post("/api/calls/native-action/{call_id}/reject")
@@ -7272,6 +7443,10 @@ async def native_reject_call(
 
     if call.get("answered"):
         return {"ok": False, "status": "answered"}
+
+    if call.get("conference_invitation"):
+        await finish_conference_invitation(call, "rejected")
+        return {"ok": True, "status": "rejected"}
 
     finish_call_history(call_id, "rejected")
     await push(
@@ -7508,16 +7683,7 @@ async def websocket_endpoint(
         if call.get("callee_id") == user_id and not call.get("answered"):
             await send_ws_direct(
                 websocket,
-                {
-                    "type": "call_offer",
-                    "from_user_id": call["caller_id"],
-                    "from_name": call["caller_name"],
-                    "from_avatar_url": call.get("caller_avatar_url"),
-                    "call_id": call["call_id"],
-                    "video": call["video"],
-                    "sdp": call["offer_sdp"],
-                    "ice_candidates": call.get("caller_ice", []),
-                }
+                incoming_call_payload(call)
             )
 
     try:
@@ -7852,6 +8018,16 @@ async def websocket_endpoint(
                 continue
 
             call = active_calls.get(call_id)
+
+            if call and call.get("conference_invitation"):
+                participants = {call["caller_id"], call["callee_id"]}
+                if user_id not in participants or target_id not in participants:
+                    continue
+                if signal_type == "call_reject" and user_id == call["callee_id"] and not call.get("answered"):
+                    await finish_conference_invitation(call, "rejected")
+                elif signal_type == "call_end" and user_id == call["caller_id"] and not call.get("answered"):
+                    await finish_conference_invitation(call, "cancelled")
+                continue
 
             if signal_type == "call_video_state":
                 if not call:
