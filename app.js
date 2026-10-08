@@ -8500,7 +8500,8 @@ async function acceptIncomingCall(options={}){
       $('callOverlay').classList.remove('incoming-call-state');
       $('callOverlay').classList.add('active-call-state');
       updateMiniCallBar();
-      updateEarModeButton()
+      updateEarModeButton();
+      updatePrivateInviteButton()
     }
     return true
   }catch(err){
@@ -11474,6 +11475,31 @@ $('avatarInput').onchange=async()=>{
 
 $('logout').onclick=async()=>{closeDrawer();if(messageRecorder||messageRecordBlob)cancelMessageRecording();if(groupCallState)leaveGroupCall(true);if(currentCall||pendingCall)finishCall(true);await removePushSubscription();try{await api('/api/logout',{method:'POST'})}catch{}token='';localStorage.removeItem('svoi_token');showAuth()};
 $('back').onclick=()=>{stopOwnTyping();clearReplySource();$('app').classList.remove('chat-open')};
+
+
+function initializeCallToolbarLayout(){
+  for(const [overlayId,controlsId] of [
+    ['callOverlay','activeCallControls'],
+    ['groupCallOverlay','groupCallControls']
+  ]){
+    const overlay=$(overlayId),controls=$(controlsId);
+    if(!overlay||!controls)continue;
+    const update=()=>{
+      const height=Math.ceil(controls.getBoundingClientRect().height);
+      if(height>0)overlay.style.setProperty('--call-toolbar-height',height+'px');
+    };
+    if(typeof ResizeObserver==='function'){
+      const observer=new ResizeObserver(update);
+      observer.observe(controls);
+    }else{
+      const observer=new MutationObserver(update);
+      observer.observe(overlay,{attributes:true,subtree:true,attributeFilter:['class']});
+      window.addEventListener('resize',update);
+    }
+    update();
+  }
+}
+initializeCallToolbarLayout();
 
 $('auth').classList.add('hidden');
 $('app').classList.add('hidden');
