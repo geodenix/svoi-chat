@@ -840,3 +840,51 @@ body.drawer-open{overflow:hidden}
   z-index:20;
   margin-top:auto
 }
+
+/* Invitation occupies its own row inside the bottom toolbar. */
+.call-controls,.group-call-controls{flex-shrink:0}
+.group-call-controls{flex-wrap:wrap;gap:10px 12px}
+.call-controls > .call-invite-action-wrap,
+.group-call-controls > .group-call-invite-wrap{
+  position:static;
+  flex:0 0 100%;
+  grid-column:1 / -1;
+  min-width:0;
+  margin:0;
+  padding:0;
+  border:0;
+  background:transparent;
+  display:flex;
+  justify-content:center
+}
+.call-controls .call-invite-action,
+.group-call-controls .group-call-invite-action{
+  width:min(100%,260px);
+  height:auto;
+  min-height:44px;
+  border:1px solid #4f82bd;
+  border-radius:999px;
+  font-size:13px;
+  line-height:1.25;
+  padding:8px 12px
+}
+.group-call-controls > button{
+  width:clamp(44px,11vw,56px);
+  height:clamp(44px,11vw,56px);
+  flex-shrink:0
+}
+.group-call-overlay.group-focused-mode .group-call-controls > .group-call-invite-wrap{
+  position:static;
+  margin:0
+}
+.group-call-overlay.group-focused-mode .group-call-strip:not(.hidden){
+  bottom:calc(var(--call-toolbar-height,94px) + 10px)
+}
+@media(max-width:720px){
+  .call-overlay.active-call-state .call-info{
+    bottom:calc(var(--call-toolbar-height,210px) + 20px)
+  }
+  .call-overlay.active-call-state .call-stage{
+    padding-bottom:calc(var(--call-toolbar-height,210px) + 12px)
+  }
+}
