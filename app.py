@@ -8348,6 +8348,24 @@ def app_javascript():
     )
 
 
+@app.get("/call-masks.js")
+def call_masks_javascript():
+    return FileResponse(
+        BASE_DIR / "call-masks.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/admin-call-masks.js")
+def admin_call_masks_javascript():
+    return FileResponse(
+        BASE_DIR / "admin-call-masks.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/sw.js")
 def service_worker():
     return FileResponse(
