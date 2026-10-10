@@ -9155,7 +9155,8 @@ $('switchCamera').onclick=async()=>{
     for(const stream of pendingStreams){
       stream.getTracks().forEach(track=>track.stop())
     }
-    button.disabled=false
+    button.disabled=false;
+    window.SvoiAdminMasks?.schedulePrivate();
   }
 };
 
