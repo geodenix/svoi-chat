@@ -75,6 +75,10 @@
 .admin-card{min-width:0;border:1px solid #29415f;background:#14263d;border-radius:15px;padding:12px}
 .admin-card small{display:block;color:#8fa3be;font-size:12px}.admin-card strong{display:block;font-size:21px;margin-top:5px;overflow-wrap:anywhere}.admin-card span{display:block;color:#aebfd4;font-size:11px;margin-top:4px}
 .admin-section{margin-top:16px}.admin-section h3{margin:0 0 9px;font-size:15px;color:#dce8f8}
+.admin-mask-choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
+.admin-mask-choice{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-height:68px;border:1px solid #29415f;border-radius:12px;background:#14263d;color:#dce8f8;font:inherit;cursor:pointer}
+.admin-mask-choice span{font-size:26px}.admin-mask-choice.active{border-color:#5db9ff;background:#1c4063;box-shadow:0 0 0 1px #5db9ff inset}
+.admin-mask-choice:focus-visible{outline:2px solid #8bd1ff;outline-offset:2px}
 .admin-services,.admin-users{display:grid;gap:7px}
 .admin-service,.admin-user{display:flex;align-items:center;gap:10px;border-radius:13px;background:#17283f;padding:10px 12px}
 .admin-service strong,.admin-user-copy{min-width:0;flex:1}.admin-user-copy strong,.admin-user-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.admin-user-copy small{color:#8fa3be;margin-top:2px}

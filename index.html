@@ -11,7 +11,7 @@
 <link rel="icon" href="/icon-192.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon-512.svg">
 <title>Свои</title>
-<link rel="stylesheet" href="/app.css?v=117">
+<link rel="stylesheet" href="/app.css?v=118">
 
 
 
@@ -501,6 +501,11 @@
   </div>
   <div class="admin-body">
     <div id="adminStatus" class="admin-status">Загрузка…</div>
+    <section class="admin-section" id="adminMaskSection">
+      <h3>🎭 Маски видеозвонков (только администратор)</h3>
+      <div id="adminMaskChoices" class="admin-mask-choices" role="group" aria-label="Выбор маски"></div>
+      <small class="admin-stats-note" id="adminMaskNote">Маска применяется к вашей камере в личных и групповых видеозвонках.</small>
+    </section>
     <div id="adminMetrics" class="admin-grid"></div>
     <section class="admin-section">
       <div class="admin-stats-head">
@@ -584,4 +589,6 @@
 </dialog>
 
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.22.3/dist/livekit-client.umd.min.js"></script>
-<script src="/app.js?v=117"></script></body></html>
+<script src="/call-masks.js?v=118"></script>
+<script src="/admin-call-masks.js?v=118"></script>
+<script src="/app.js?v=118"></script></body></html>
