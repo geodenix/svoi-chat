@@ -1257,6 +1257,7 @@ async function enter(){
     $('meUser').textContent='@'+me.username;
     setAvatar($('meAvatar'),me);
     $('adminNav').classList.toggle('hidden',!me.is_server_admin);
+    window.SvoiAdminMasks?.init();
     $('authError').textContent='';
     $('auth').classList.add('hidden');
     $('app').classList.remove('hidden');
@@ -6354,7 +6355,8 @@ async function renderGroupLocalTracks(){
     const name=tile.querySelector('.tile-name');
     if(name)name.textContent=(p.name||p.identity||'Вы')+' · вы'
   }
-  updateGroupMicBadge(p,true)
+  updateGroupMicBadge(p,true);
+  window.SvoiAdminMasks?.scheduleGroup();
 }
 
 let groupCallJoining=false;
@@ -6664,6 +6666,7 @@ function leaveGroupCall(disconnect=true,endReason='local_leave'){
     state.pendingVideoNetworkCap=''
   }
   groupCallState=null;
+  window.SvoiAdminMasks?.scheduleGroup();
   if(state&&disconnect){
     try{state.room.disconnect()}catch{}
   }
@@ -7445,6 +7448,7 @@ function updatePrivateVideoControls(){
   if(hasVideo&&enabled){
     requestAnimationFrame(()=>applyPrivateLocalVideoPosition())
   }
+  window.SvoiAdminMasks?.schedulePrivate();
 }
 
 async function upgradeCurrentCallToVideo(){
@@ -8190,6 +8194,7 @@ function showCallUi(name,status,video,incoming=false,avatarUrl=null,nativeSystem
 }
 
 function resetCallUi(){
+  window.SvoiAdminMasks?.stopPrivate();
   stopCallPing();
   exitEarMode();
   hideMiniCallBar();
