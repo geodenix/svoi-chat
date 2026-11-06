@@ -6059,6 +6059,11 @@ function ensureGroupTile(participant,isLocal=false){
   mic.textContent='🔇';
   const speaking=document.createElement('div');
   speaking.className='tile-speaking-status hidden';
+  // Restore speaking state if this tile appears after the LiveKit speaker event.
+  if(groupCallState?.activeSpeakerIds?.has(String(identity))){
+    tile.classList.add('speaking');
+    speaking.classList.remove('hidden');
+  }
   speaking.setAttribute('aria-label','Сейчас говорит');
   speaking.textContent='🎙 Говорит';
   const ping=document.createElement('div');
@@ -6212,7 +6217,7 @@ function refreshGroupCount(){
 function updateGroupActiveSpeakers(speakers=[]){
   const state=groupCallState;
   if(!state)return;
-  state.pendingSpeakers=speakers.slice(0,3);
+  state.pendingSpeakers=Array.isArray(speakers)?speakers.slice():[];
   if(state.speakerFrame)return;
   state.speakerFrame=requestAnimationFrame(()=>{
     if(groupCallState!==state)return;
