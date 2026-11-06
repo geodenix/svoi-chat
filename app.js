@@ -6592,11 +6592,24 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
         if(navigator.onLine)recoverGroupCall(state).catch(()=>{})
       });
 
-    await room.connect(
-      credentials.server_url,
-      credentials.participant_token
-    );
-    if(groupCallState?.room!==room)throw new Error('Подключение к конференции отменено');
+    // A stalled media connection should not trap users on the transition UI.
+    let connectTimeout=null;
+    try{
+      await Promise.race([
+        room.connect(credentials.server_url,credentials.participant_token),
+        new Promise((_,reject)=>{
+          connectTimeout=setTimeout(
+            ()=>reject(new Error('Подключение к конференции превысило 20 секунд')),
+            20000
+          )
+        })
+      ]);
+    }finally{
+      if(connectTimeout)clearTimeout(connectTimeout)
+    }
+    if(groupCallState?.room!==room||groupCallState.manualLeave){
+      throw new Error('Подключение к конференции отменено')
+    }
 
     if(groupCallState&&!groupCallState.connectedAt){
       groupCallState.connectedAt=Date.now();
@@ -6623,12 +6636,18 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
 
     if(migrationCall){
       if(!canMigratePrivateCall())throw new Error('Личный звонок завершился во время перехода');
+      if(groupCallState?.room!==room||groupCallState.manualLeave){
+        throw new Error('Переход в конференцию был отменён')
+      }
       // The initiator activates the peer's switch here. If this request fails,
       // we have not yet closed the original call, so the handoff rolls back.
       if(typeof options?.onConferenceReady==='function'){
         await options.onConferenceReady();
       }
       if(!canMigratePrivateCall())throw new Error('Личный звонок завершился во время перехода');
+      if(groupCallState?.room!==room||groupCallState.manualLeave){
+        throw new Error('Переход в конференцию был отменён')
+      }
       closePrivateCallForConference();
     }
 
@@ -6668,8 +6687,11 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
     startGroupQualityMonitoring(groupCallState);
     return true
   }catch(err){
+    if(groupCallState?.room===room){
+      groupCallState.manualLeave=true;
+      groupCallState=null;
+    }
     try{room?.disconnect()}catch{}
-    if(groupCallState?.room===room)groupCallState=null;
     $('groupCallOverlay').classList.add('hidden');
     if(migrationCall&&currentCall===migrationCall){
       // Pre-commit failure: the existing peer connection remains intact.
@@ -8248,13 +8270,17 @@ function showCallUi(name,status,video,incoming=false,avatarUrl=null,nativeSystem
   updatePrivateInviteButton()
 }
 
-function resetCallUi(){
+function resetCallUi(options={}){
   window.SvoiAdminMasks?.stopPrivate();
   stopCallPing();
   exitEarMode();
   hideMiniCallBar();
-  stopNativeCallService().catch(()=>{});
-  resetNativeAudioRoute().catch(()=>{});
+  // Do not asynchronously stop the native audio service when handing off
+  // to LiveKit: a late stop() could kill the newly started group call.
+  if(!options.preserveNativeSession){
+    stopNativeCallService().catch(()=>{});
+    resetNativeAudioRoute().catch(()=>{});
+  }
   stopRingtone();
   stopOutgoingTone();
   $('callOverlay').classList.add('hidden');
@@ -8828,7 +8854,7 @@ function closePrivateCallForConference(){
   pendingCall=null;
   pendingIce=[];
   acceptingCall=false;
-  resetCallUi();
+  resetCallUi({preserveNativeSession:true});
   return call
 }
 
