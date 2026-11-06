@@ -6265,14 +6265,13 @@ async function recoverGroupCall(state){
   state.recovering=true;
   state.reconnectAttempts=(state.reconnectAttempts||0)+1;
 
-  if(state.reconnectAttempts>5){
-    setGroupCallStatus('Не удалось восстановить соединение');
-    state.recovering=false;
-    return
-  }
-
-  const delay=Math.min(8000,1500*state.reconnectAttempts);
-  setGroupCallStatus('Восстанавливаем соединение…');
+  // Keep retrying transient failures; five attempts could permanently strand
+  // a call on a weak mobile connection. Back off to at most 30 seconds.
+  const delay=Math.min(
+    30000,
+    Math.round(1200*Math.pow(1.8,Math.min(state.reconnectAttempts-1,6)))
+  );
+  setGroupCallStatus('Восстанавливаем соединение… попытка '+state.reconnectAttempts);
   await new Promise(resolve=>setTimeout(resolve,delay));
 
   if(groupCallState!==state||state.manualLeave){
@@ -6311,13 +6310,24 @@ async function recoverGroupCall(state){
       return
     }
 
-    await state.room.localParticipant.setMicrophoneEnabled(!state.muted);
+    try{
+      await state.room.localParticipant.setMicrophoneEnabled(!state.muted);
+    }catch(err){
+      state.muted=true;
+      console.warn('Could not restore conference microphone',err);
+    }
     updateGroupMicBadge(
       state.room.localParticipant,
       true,
       state.muted
     );
-    await state.room.localParticipant.setCameraEnabled(!state.cameraOff);
+    try{
+      await state.room.localParticipant.setCameraEnabled(!state.cameraOff);
+    }catch(err){
+      state.cameraOff=true;
+      updateGroupCameraControls(state);
+      console.warn('Could not restore conference camera',err);
+    }
     if(!state.cameraOff){
       let track=null;
       for(const pub of state.room.localParticipant.videoTrackPublications.values()){
@@ -6336,6 +6346,12 @@ async function recoverGroupCall(state){
     requestAnimationFrame(()=>scheduleGroupRemoteVideoQualitySync())
   }catch(err){
     state.recovering=false;
+    if(groupCallState!==state||state.manualLeave)return;
+    if([401,403,404,410].includes(Number(err?.status))){
+      state.needsRecovery=false;
+      setGroupCallStatus('Доступ к конференции истёк — начни новый звонок');
+      return
+    }
     state.needsRecovery=true;
     recoverGroupCall(state).catch(()=>{})
   }
@@ -6361,10 +6377,17 @@ async function renderGroupLocalTracks(){
 
 let groupCallJoining=false;
 
-async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',invitationVideo=null){
-  if(groupCallJoining||groupCallState)return;
-  if(currentCall||pendingCall){
-    alert('Сначала заверши текущий личный звонок');return
+async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',invitationVideo=null,options={}){
+  // During a 1:1 -> conference handoff, keep the old peer connection alive
+  // until LiveKit is connected AND the server approves the switch.
+  const migrationCall=options?.migrationCall||null;
+  const canMigratePrivateCall=()=>!!migrationCall
+    &&currentCall===migrationCall
+    &&!!migrationCall.answered
+    &&!pendingCall;
+  if(groupCallJoining||groupCallState)return false;
+  if((currentCall||pendingCall)&&!canMigratePrivateCall()){
+    alert('Сначала заверши текущий личный звонок');return false
   }
   if(!window.LivekitClient){
     alert('Модуль групповых звонков не загрузился');return
@@ -6380,7 +6403,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
       method:'POST',
       body:{video:!!video,invite:!!invite}
     });
-    if(currentCall||pendingCall){
+    if((currentCall||pendingCall)&&!canMigratePrivateCall()){
       alert('Сначала заверши текущий личный звонок');return false
     }
     const callVideo=invitationVideo==null?(linkedToken?!!credentials.video:!!video):!!invitationVideo;
@@ -6573,6 +6596,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
       credentials.server_url,
       credentials.participant_token
     );
+    if(groupCallState?.room!==room)throw new Error('Подключение к конференции отменено');
 
     if(groupCallState&&!groupCallState.connectedAt){
       groupCallState.connectedAt=Date.now();
@@ -6597,9 +6621,28 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
       )
     }
 
-    await room.localParticipant.setMicrophoneEnabled(true);
-    groupCallState.muted=false;
-    updateGroupMicBadge(room.localParticipant,true,false);
+    if(migrationCall){
+      if(!canMigratePrivateCall())throw new Error('Личный звонок завершился во время перехода');
+      // The initiator activates the peer's switch here. If this request fails,
+      // we have not yet closed the original call, so the handoff rolls back.
+      if(typeof options?.onConferenceReady==='function'){
+        await options.onConferenceReady();
+      }
+      if(!canMigratePrivateCall())throw new Error('Личный звонок завершился во время перехода');
+      closePrivateCallForConference();
+    }
+
+    try{
+      await room.localParticipant.setMicrophoneEnabled(true);
+      groupCallState.muted=false;
+    }catch(err){
+      // A microphone permission/device error must not drop a connected room.
+      groupCallState.muted=true;
+      console.warn('Conference microphone could not start',err);
+    }
+    updateGroupMicBadge(room.localParticipant,true,groupCallState.muted);
+    $('groupMuteBtn')?.classList.toggle('off',groupCallState.muted);
+    if($('groupMuteBtn'))$('groupMuteBtn').textContent=groupCallState.muted?'🔇':'🎤';
     await startNativeCallService(credentials.group_name,callVideo,true).catch(()=>{});
     if(nativeAudioRoutePlugin()){
       await applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
@@ -6617,17 +6660,28 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
       }
     }
 
-    await renderGroupLocalTracks();
+    try{await renderGroupLocalTracks()}catch(err){
+      console.warn('Could not render local conference tracks',err);
+    }
     refreshGroupCount();
     startGroupPingMonitoring(groupCallState);
     startGroupQualityMonitoring(groupCallState);
     return true
   }catch(err){
     try{room?.disconnect()}catch{}
-    groupCallState=null;
-    hideMiniCallBar();
-    stopNativeCallService().catch(()=>{});
+    if(groupCallState?.room===room)groupCallState=null;
     $('groupCallOverlay').classList.add('hidden');
+    if(migrationCall&&currentCall===migrationCall){
+      // Pre-commit failure: the existing peer connection remains intact.
+      $('callOverlay')?.classList.remove('hidden');
+      updatePrivateInviteButton();
+      updateMiniCallBar();
+    }else{
+      hideMiniCallBar();
+      stopNativeCallService().catch(()=>{});
+    }
+    stopLiveCallDurationTimerIfIdle();
+    if(migrationCall)throw err;
     alert(err?.message||'Не удалось подключиться к групповому звонку');
     return false
   }finally{
@@ -6856,9 +6910,10 @@ async function inviteContactToCall(user){
       $('callInviteStatus').textContent='Подключаем конференцию…';
       const result=await api('/api/calls/'+encodeURIComponent(context.call.callId)+'/invite-link',{method:'POST'});
       if(currentCall!==context.call)throw new Error('Личный звонок уже завершён');
-      const promoted=await promotePrivateCallToConference(result.invite_token,!!result.video);
-      await api('/api/calls/'+encodeURIComponent(promoted.callId)+'/activate-conference',
-        {method:'POST',body:{invite_token:result.invite_token}});
+      await promotePrivateCallToConference(result.invite_token,!!result.video,()=>api(
+        '/api/calls/'+encodeURIComponent(context.call.callId)+'/activate-conference',
+        {method:'POST',body:{invite_token:result.invite_token}}
+      ));
       callInviteContext={kind:'group',state:groupCallState};
     }
     const state=callInviteContext.state;
@@ -8777,19 +8832,30 @@ function closePrivateCallForConference(){
   return call
 }
 
-async function promotePrivateCallToConference(inviteToken,video=false){
+let privateConferenceMigrationPromise=null;
+async function promotePrivateCallToConference(inviteToken,video=false,onConferenceReady=null){
+  // Duplicate WebSocket notifications must not start two room connections.
+  if(privateConferenceMigrationPromise)return privateConferenceMigrationPromise;
   const call=currentCall;
   if(!call?.answered)throw new Error('Личный звонок уже завершён');
+  if(!inviteToken)throw new Error('Не получен токен конференции');
   const callId=call.callId;
   const callVideo=!!(video||call.video);
-  closePrivateCallForConference();
-  await new Promise(resolve=>setTimeout(resolve,250));
-  try{
-    const joined=await joinGroupCall(null,callVideo,false,inviteToken);
+  const migration=(async()=>{
+    const joined=await joinGroupCall(null,callVideo,false,inviteToken,null,{
+      migrationCall:call,
+      onConferenceReady
+    });
     if(!joined)throw new Error('Не удалось перейти в конференцию');
     return {callId,video:callVideo}
-  }catch(err){
-    throw err
+  })();
+  privateConferenceMigrationPromise=migration;
+  try{
+    return await migration
+  }finally{
+    if(privateConferenceMigrationPromise===migration){
+      privateConferenceMigrationPromise=null
+    }
   }
 }
 
