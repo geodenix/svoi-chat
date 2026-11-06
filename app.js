@@ -5451,13 +5451,28 @@ function scheduleGroupSpeakerFocus(identity){
 
   if(state.speakerFocusTimer)clearTimeout(state.speakerFocusTimer);
   state.autoSpeakerIdentity=next;
+  // Stabilize the featured speaker while keeping the speaking indicator instant.
+  const elapsed=Date.now()-(state.lastAutoSpeakerFocusAt||0);
+  const delay=Math.max(900,2300-elapsed);
   state.speakerFocusTimer=setTimeout(()=>{
     if(groupCallState!==state||state.pinnedIdentity)return;
     state.speakerFocusTimer=null;
     if(state.groupGridRequested||state.groupFocusSource==='manual')return;
+    const localId=String(state.room?.localParticipant?.identity||'');
+    const primary=(state.pendingSpeakers||[]).find(p=>{
+      const id=String(p?.identity||'');
+      return id&&id!==localId
+    });
+    if(String(primary?.identity||'')!==next){
+      state.autoSpeakerIdentity='';
+      return
+    }
     const tile=$(groupTileId(next));
-    if(tile?.isConnected)showGroupFocusedTile(tile,'auto')
-  },650)
+    if(tile?.isConnected){
+      showGroupFocusedTile(tile,'auto');
+      state.lastAutoSpeakerFocusAt=Date.now()
+    }
+  },delay)
 }
 
 function focusGroupTile(tile){
@@ -5583,13 +5598,36 @@ function groupVideoNetworkCapForQuality(quality,current='medium'){
   return current||'medium'
 }
 
+function syncGroupOutgoingVideoQuality(state=groupCallState){
+  if(!state?.room||groupCallState!==state||state.manualLeave)return;
+  const qualities=LivekitClient.VideoQuality||{};
+  const level=state.videoNetworkCap==='low'?qualities.LOW
+    :(state.videoNetworkCap==='medium'?qualities.MEDIUM:qualities.HIGH);
+  if(level==null)return;
+  if(!state.outgoingVideoQualityByTrack)state.outgoingVideoQualityByTrack=new WeakMap();
+  for(const publication of state.room.localParticipant.videoTrackPublications.values()){
+    // Screen shares are not camera thumbnails and must remain readable.
+    if(publication.source&&publication.source!==LivekitClient.Track.Source.Camera)continue;
+    const track=publication.track;
+    if(!track||typeof track.setPublishingQuality!=='function')continue;
+    if(state.outgoingVideoQualityByTrack.get(track)===level)continue;
+    try{
+      track.setPublishingQuality(level);
+      state.outgoingVideoQualityByTrack.set(track,level)
+    }catch(err){
+      console.warn('Could not adapt outgoing camera quality',err)
+    }
+  }
+}
+
 function applyGroupVideoNetworkCap(state,next){
   if(!state||groupCallState!==state)return;
   state.pendingVideoNetworkCap='';
   if(state.videoNetworkCap===next)return;
   state.videoNetworkCap=next;
   state.lastVideoNetworkCapChangeAt=Date.now();
-  scheduleGroupRemoteVideoQualitySync()
+  scheduleGroupRemoteVideoQualitySync();
+  syncGroupOutgoingVideoQuality(state)
 }
 
 function updateGroupVideoNetworkCap(quality,participant){
@@ -6059,6 +6097,10 @@ function ensureGroupTile(participant,isLocal=false){
   mic.textContent='🔇';
   const speaking=document.createElement('div');
   speaking.className='tile-speaking-status hidden';
+  if(groupCallState?.activeSpeakerIds?.has(String(identity))){
+    tile.classList.add('speaking');
+    speaking.classList.remove('hidden');
+  }
   speaking.setAttribute('aria-label','Сейчас говорит');
   speaking.textContent='🎙 Говорит';
   const ping=document.createElement('div');
@@ -6212,7 +6254,7 @@ function refreshGroupCount(){
 function updateGroupActiveSpeakers(speakers=[]){
   const state=groupCallState;
   if(!state)return;
-  state.pendingSpeakers=speakers.slice(0,3);
+  state.pendingSpeakers=Array.isArray(speakers)?speakers.slice():[];
   if(state.speakerFrame)return;
   state.speakerFrame=requestAnimationFrame(()=>{
     if(groupCallState!==state)return;
@@ -6265,14 +6307,13 @@ async function recoverGroupCall(state){
   state.recovering=true;
   state.reconnectAttempts=(state.reconnectAttempts||0)+1;
 
-  if(state.reconnectAttempts>5){
-    setGroupCallStatus('Не удалось восстановить соединение');
-    state.recovering=false;
-    return
-  }
-
-  const delay=Math.min(8000,1500*state.reconnectAttempts);
-  setGroupCallStatus('Восстанавливаем соединение…');
+  // Keep retrying transient failures; five attempts could permanently strand
+  // a call on a weak mobile connection. Back off to at most 30 seconds.
+  const delay=Math.min(
+    30000,
+    Math.round(1200*Math.pow(1.8,Math.min(state.reconnectAttempts-1,6)))
+  );
+  setGroupCallStatus('Восстанавливаем соединение… попытка '+state.reconnectAttempts);
   await new Promise(resolve=>setTimeout(resolve,delay));
 
   if(groupCallState!==state||state.manualLeave){
@@ -6311,13 +6352,24 @@ async function recoverGroupCall(state){
       return
     }
 
-    await state.room.localParticipant.setMicrophoneEnabled(!state.muted);
+    try{
+      await state.room.localParticipant.setMicrophoneEnabled(!state.muted);
+    }catch(err){
+      state.muted=true;
+      console.warn('Could not restore conference microphone',err);
+    }
     updateGroupMicBadge(
       state.room.localParticipant,
       true,
       state.muted
     );
-    await state.room.localParticipant.setCameraEnabled(!state.cameraOff);
+    try{
+      await state.room.localParticipant.setCameraEnabled(!state.cameraOff);
+    }catch(err){
+      state.cameraOff=true;
+      updateGroupCameraControls(state);
+      console.warn('Could not restore conference camera',err);
+    }
     if(!state.cameraOff){
       let track=null;
       for(const pub of state.room.localParticipant.videoTrackPublications.values()){
@@ -6332,10 +6384,17 @@ async function recoverGroupCall(state){
     state.needsRecovery=false;
     state.recovering=false;
     await renderGroupLocalTracks();
+    syncGroupOutgoingVideoQuality(state);
     refreshGroupCount();
     requestAnimationFrame(()=>scheduleGroupRemoteVideoQualitySync())
   }catch(err){
     state.recovering=false;
+    if(groupCallState!==state||state.manualLeave)return;
+    if([401,403,404,410].includes(Number(err?.status))){
+      state.needsRecovery=false;
+      setGroupCallStatus('Доступ к конференции истёк — начни новый звонок');
+      return
+    }
     state.needsRecovery=true;
     recoverGroupCall(state).catch(()=>{})
   }
@@ -6361,10 +6420,17 @@ async function renderGroupLocalTracks(){
 
 let groupCallJoining=false;
 
-async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',invitationVideo=null){
-  if(groupCallJoining||groupCallState)return;
-  if(currentCall||pendingCall){
-    alert('Сначала заверши текущий личный звонок');return
+async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',invitationVideo=null,options={}){
+  // During a 1:1 -> conference handoff, keep the old peer connection alive
+  // until LiveKit is connected AND the server approves the switch.
+  const migrationCall=options?.migrationCall||null;
+  const canMigratePrivateCall=()=>!!migrationCall
+    &&currentCall===migrationCall
+    &&!!migrationCall.answered
+    &&!pendingCall;
+  if(groupCallJoining||groupCallState)return false;
+  if((currentCall||pendingCall)&&!canMigratePrivateCall()){
+    alert('Сначала заверши текущий личный звонок');return false
   }
   if(!window.LivekitClient){
     alert('Модуль групповых звонков не загрузился');return
@@ -6380,7 +6446,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
       method:'POST',
       body:{video:!!video,invite:!!invite}
     });
-    if(currentCall||pendingCall){
+    if((currentCall||pendingCall)&&!canMigratePrivateCall()){
       alert('Сначала заверши текущий личный звонок');return false
     }
     const callVideo=invitationVideo==null?(linkedToken?!!credentials.video:!!video):!!invitationVideo;
@@ -6435,11 +6501,13 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
       speakerFrame:0,
       speakerFocusTimer:null,
       autoSpeakerIdentity:'',
+      lastAutoSpeakerFocusAt:0,
       pinnedIdentity:'',
       groupFocusSource:'',
       groupGridRequested:false,
       videoQualityFrame:0,
       videoNetworkCap:'high',
+      outgoingVideoQualityByTrack:new WeakMap(),
       pendingVideoNetworkCap:'',
       videoNetworkCapTimer:null,
       lastVideoNetworkCapChangeAt:0,
@@ -6485,6 +6553,18 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
     $('groupSwitchCameraBtn').classList.toggle('hidden',!callVideo);
 
     room
+      .on(LivekitClient.RoomEvent.AudioPlaybackStatusChanged,()=>{
+        if(groupCallState?.room!==room)return;
+        const blocked=!room.canPlaybackAudio;
+        $('groupSpeakerBtn')?.classList.toggle('audio-blocked',blocked);
+        if(blocked){
+          $('groupSpeakerBtn').title='Нажми, чтобы включить звук';
+          setGroupCallStatus('Нажми 🔈, чтобы включить звук');
+        }else{
+          updateSpeakerButtons();
+          refreshGroupCount()
+        }
+      })
       .on(LivekitClient.RoomEvent.TrackSubscribed,(track,publication,participant)=>{
         attachGroupTrack(track,participant,false,publication)
       })
@@ -6569,10 +6649,27 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
         if(navigator.onLine)recoverGroupCall(state).catch(()=>{})
       });
 
-    await room.connect(
-      credentials.server_url,
-      credentials.participant_token
-    );
+    // A stalled media connection should not trap users on the transition UI.
+    let connectTimeout=null;
+    try{
+      await Promise.race([
+        room.connect(credentials.server_url,credentials.participant_token),
+        new Promise((_,reject)=>{
+          connectTimeout=setTimeout(
+            ()=>reject(new Error('Подключение к конференции превысило 20 секунд')),
+            20000
+          )
+        })
+      ]);
+    }finally{
+      if(connectTimeout)clearTimeout(connectTimeout)
+    }
+    if(groupCallState?.room!==room||groupCallState.manualLeave){
+      throw new Error('Подключение к конференции отменено')
+    }
+    if(room.state!=='connected'){
+      throw new Error('Соединение LiveKit не подтверждено')
+    }
 
     if(groupCallState&&!groupCallState.connectedAt){
       groupCallState.connectedAt=Date.now();
@@ -6597,9 +6694,34 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
       )
     }
 
-    await room.localParticipant.setMicrophoneEnabled(true);
-    groupCallState.muted=false;
-    updateGroupMicBadge(room.localParticipant,true,false);
+    if(migrationCall){
+      if(!canMigratePrivateCall())throw new Error('Личный звонок завершился во время перехода');
+      if(groupCallState?.room!==room||groupCallState.manualLeave||room.state!=='connected'){
+        throw new Error('Переход в конференцию был отменён')
+      }
+      // The initiator activates the peer's switch here. If this request fails,
+      // we have not yet closed the original call, so the handoff rolls back.
+      if(typeof options?.onConferenceReady==='function'){
+        await options.onConferenceReady();
+      }
+      if(!canMigratePrivateCall())throw new Error('Личный звонок завершился во время перехода');
+      if(groupCallState?.room!==room||groupCallState.manualLeave||room.state!=='connected'){
+        throw new Error('Переход в конференцию был отменён')
+      }
+      closePrivateCallForConference();
+    }
+
+    try{
+      await room.localParticipant.setMicrophoneEnabled(true);
+      groupCallState.muted=false;
+    }catch(err){
+      // A microphone permission/device error must not drop a connected room.
+      groupCallState.muted=true;
+      console.warn('Conference microphone could not start',err);
+    }
+    updateGroupMicBadge(room.localParticipant,true,groupCallState.muted);
+    $('groupMuteBtn')?.classList.toggle('off',groupCallState.muted);
+    if($('groupMuteBtn'))$('groupMuteBtn').textContent=groupCallState.muted?'🔇':'🎤';
     await startNativeCallService(credentials.group_name,callVideo,true).catch(()=>{});
     if(nativeAudioRoutePlugin()){
       await applyNativeSpeakerMode(callSpeakerMode).catch(()=>{})
@@ -6617,17 +6739,32 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
       }
     }
 
-    await renderGroupLocalTracks();
+    try{await renderGroupLocalTracks()}catch(err){
+      console.warn('Could not render local conference tracks',err);
+    }
+    syncGroupOutgoingVideoQuality(groupCallState);
     refreshGroupCount();
     startGroupPingMonitoring(groupCallState);
     startGroupQualityMonitoring(groupCallState);
     return true
   }catch(err){
+    if(groupCallState?.room===room){
+      groupCallState.manualLeave=true;
+      groupCallState=null;
+    }
     try{room?.disconnect()}catch{}
-    groupCallState=null;
-    hideMiniCallBar();
-    stopNativeCallService().catch(()=>{});
     $('groupCallOverlay').classList.add('hidden');
+    if(migrationCall&&currentCall===migrationCall){
+      // Pre-commit failure: the existing peer connection remains intact.
+      $('callOverlay')?.classList.remove('hidden');
+      updatePrivateInviteButton();
+      updateMiniCallBar();
+    }else{
+      hideMiniCallBar();
+      stopNativeCallService().catch(()=>{});
+    }
+    stopLiveCallDurationTimerIfIdle();
+    if(migrationCall)throw err;
     alert(err?.message||'Не удалось подключиться к групповому звонку');
     return false
   }finally{
@@ -6637,9 +6774,13 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
 
 function leaveGroupCall(disconnect=true,endReason='local_leave'){
   if($('groupCallProfileDialog')?.open)$('groupCallProfileDialog').close();
-  hideMiniCallBar();
-  stopNativeCallService().catch(()=>{});
-  resetNativeAudioRoute().catch(()=>{});
+  // Canceling a pre-commit conference must not stop the still-active 1:1 call.
+  const keepPrivateCall=!!currentCall?.answered&&!!groupCallState;
+  if(!keepPrivateCall){
+    hideMiniCallBar();
+    stopNativeCallService().catch(()=>{});
+    resetNativeAudioRoute().catch(()=>{});
+  }
   const state=groupCallState;
   if(state){
     cancelOutgoingConferenceInvites(state);
@@ -6688,7 +6829,12 @@ function leaveGroupCall(disconnect=true,endReason='local_leave'){
   $('groupCallOverlay').classList.remove('group-focused-mode');
   $('groupCallOverlay').classList.add('hidden');
   $('groupInviteLinkWrap').classList.add('hidden');
-  stopLiveCallDurationTimerIfIdle()
+  stopLiveCallDurationTimerIfIdle();
+  if(keepPrivateCall){
+    $('callOverlay')?.classList.remove('hidden');
+    updatePrivateInviteButton();
+    updateMiniCallBar();
+  }
 }
 
 window.addEventListener('resize',()=>{
@@ -6856,9 +7002,10 @@ async function inviteContactToCall(user){
       $('callInviteStatus').textContent='Подключаем конференцию…';
       const result=await api('/api/calls/'+encodeURIComponent(context.call.callId)+'/invite-link',{method:'POST'});
       if(currentCall!==context.call)throw new Error('Личный звонок уже завершён');
-      const promoted=await promotePrivateCallToConference(result.invite_token,!!result.video);
-      await api('/api/calls/'+encodeURIComponent(promoted.callId)+'/activate-conference',
-        {method:'POST',body:{invite_token:result.invite_token}});
+      await promotePrivateCallToConference(result.invite_token,!!result.video,()=>api(
+        '/api/calls/'+encodeURIComponent(context.call.callId)+'/activate-conference',
+        {method:'POST',body:{invite_token:result.invite_token}}
+      ));
       callInviteContext={kind:'group',state:groupCallState};
     }
     const state=callInviteContext.state;
@@ -6950,7 +7097,23 @@ $('groupMuteBtn').onclick=async()=>{
   }catch(err){alert(err.message||'Не удалось изменить микрофон')}
 };
 
-$('groupSpeakerBtn').onclick=()=>chooseSpeakerOutput();
+$('groupSpeakerBtn').onclick=()=>{
+  const room=groupCallState?.room;
+  // On iOS / PWA the first user tap may be needed before audio can play.
+  if(room&&!room.canPlaybackAudio&&typeof room.startAudio==='function'){
+    room.startAudio().then(()=>{
+      if(groupCallState?.room===room){
+        $('groupSpeakerBtn')?.classList.remove('audio-blocked');
+        updateSpeakerButtons();
+        refreshGroupCount()
+      }
+    }).catch(err=>{
+      if(groupCallState?.room===room)setGroupCallStatus('Не удалось включить звук: '+(err?.message||'ошибка'))
+    });
+    return
+  }
+  chooseSpeakerOutput()
+};
 
 
 $('groupCameraBtn').onclick=async()=>{
@@ -6969,6 +7132,7 @@ $('groupCameraBtn').onclick=async()=>{
     state.cameraOff=nextOff;
     if(!nextOff)startNativeCallService($('groupCallName').textContent,true,true).catch(()=>{});
     await renderGroupLocalTracks();
+    syncGroupOutgoingVideoQuality(state);
     updateGroupScreenShareControls();
   }catch(err){
     if(groupCallState===state)alert(cameraStartErrorMessage(err,'Не удалось изменить камеру'));
@@ -8193,13 +8357,17 @@ function showCallUi(name,status,video,incoming=false,avatarUrl=null,nativeSystem
   updatePrivateInviteButton()
 }
 
-function resetCallUi(){
+function resetCallUi(options={}){
   window.SvoiAdminMasks?.stopPrivate();
   stopCallPing();
   exitEarMode();
   hideMiniCallBar();
-  stopNativeCallService().catch(()=>{});
-  resetNativeAudioRoute().catch(()=>{});
+  // Do not asynchronously stop the native audio service when handing off
+  // to LiveKit: a late stop() could kill the newly started group call.
+  if(!options.preserveNativeSession){
+    stopNativeCallService().catch(()=>{});
+    resetNativeAudioRoute().catch(()=>{});
+  }
   stopRingtone();
   stopOutgoingTone();
   $('callOverlay').classList.add('hidden');
@@ -8773,23 +8941,34 @@ function closePrivateCallForConference(){
   pendingCall=null;
   pendingIce=[];
   acceptingCall=false;
-  resetCallUi();
+  resetCallUi({preserveNativeSession:true});
   return call
 }
 
-async function promotePrivateCallToConference(inviteToken,video=false){
+let privateConferenceMigrationPromise=null;
+async function promotePrivateCallToConference(inviteToken,video=false,onConferenceReady=null){
+  // Duplicate WebSocket notifications must not start two room connections.
+  if(privateConferenceMigrationPromise)return privateConferenceMigrationPromise;
   const call=currentCall;
   if(!call?.answered)throw new Error('Личный звонок уже завершён');
+  if(!inviteToken)throw new Error('Не получен токен конференции');
   const callId=call.callId;
   const callVideo=!!(video||call.video);
-  closePrivateCallForConference();
-  await new Promise(resolve=>setTimeout(resolve,250));
-  try{
-    const joined=await joinGroupCall(null,callVideo,false,inviteToken);
+  const migration=(async()=>{
+    const joined=await joinGroupCall(null,callVideo,false,inviteToken,null,{
+      migrationCall:call,
+      onConferenceReady
+    });
     if(!joined)throw new Error('Не удалось перейти в конференцию');
     return {callId,video:callVideo}
-  }catch(err){
-    throw err
+  })();
+  privateConferenceMigrationPromise=migration;
+  try{
+    return await migration
+  }finally{
+    if(privateConferenceMigrationPromise===migration){
+      privateConferenceMigrationPromise=null
+    }
   }
 }
 

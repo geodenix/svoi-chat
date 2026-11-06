@@ -908,3 +908,6 @@ body.drawer-open{overflow:hidden}
 .call-invite-contact:disabled{opacity:.6}
 .call-invite-empty{padding:22px 10px;text-align:center;color:#9fb0c8}
 .call-invite-status{min-height:22px;padding-top:12px;font-size:13px;overflow-wrap:anywhere}
+
+/* iOS/PWA: explicitly show when a user tap is required to play call audio. */
+#groupSpeakerBtn.audio-blocked{background:#835018;outline:2px solid #ffc26a;outline-offset:2px}
