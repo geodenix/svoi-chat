@@ -6610,6 +6610,9 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
     if(groupCallState?.room!==room||groupCallState.manualLeave){
       throw new Error('Подключение к конференции отменено')
     }
+    if(room.state!=='connected'){
+      throw new Error('Соединение LiveKit не подтверждено')
+    }
 
     if(groupCallState&&!groupCallState.connectedAt){
       groupCallState.connectedAt=Date.now();
@@ -6636,7 +6639,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
 
     if(migrationCall){
       if(!canMigratePrivateCall())throw new Error('Личный звонок завершился во время перехода');
-      if(groupCallState?.room!==room||groupCallState.manualLeave){
+      if(groupCallState?.room!==room||groupCallState.manualLeave||room.state!=='connected'){
         throw new Error('Переход в конференцию был отменён')
       }
       // The initiator activates the peer's switch here. If this request fails,
@@ -6645,7 +6648,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
         await options.onConferenceReady();
       }
       if(!canMigratePrivateCall())throw new Error('Личный звонок завершился во время перехода');
-      if(groupCallState?.room!==room||groupCallState.manualLeave){
+      if(groupCallState?.room!==room||groupCallState.manualLeave||room.state!=='connected'){
         throw new Error('Переход в конференцию был отменён')
       }
       closePrivateCallForConference();
