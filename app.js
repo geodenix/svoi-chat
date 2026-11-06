@@ -5451,13 +5451,28 @@ function scheduleGroupSpeakerFocus(identity){
 
   if(state.speakerFocusTimer)clearTimeout(state.speakerFocusTimer);
   state.autoSpeakerIdentity=next;
+  // Stabilize the featured speaker while keeping the speaking indicator instant.
+  const elapsed=Date.now()-(state.lastAutoSpeakerFocusAt||0);
+  const delay=Math.max(900,2300-elapsed);
   state.speakerFocusTimer=setTimeout(()=>{
     if(groupCallState!==state||state.pinnedIdentity)return;
     state.speakerFocusTimer=null;
     if(state.groupGridRequested||state.groupFocusSource==='manual')return;
+    const localId=String(state.room?.localParticipant?.identity||'');
+    const primary=(state.pendingSpeakers||[]).find(p=>{
+      const id=String(p?.identity||'');
+      return id&&id!==localId
+    });
+    if(String(primary?.identity||'')!==next){
+      state.autoSpeakerIdentity='';
+      return
+    }
     const tile=$(groupTileId(next));
-    if(tile?.isConnected)showGroupFocusedTile(tile,'auto')
-  },650)
+    if(tile?.isConnected){
+      showGroupFocusedTile(tile,'auto');
+      state.lastAutoSpeakerFocusAt=Date.now()
+    }
+  },delay)
 }
 
 function focusGroupTile(tile){
@@ -5583,13 +5598,36 @@ function groupVideoNetworkCapForQuality(quality,current='medium'){
   return current||'medium'
 }
 
+function syncGroupOutgoingVideoQuality(state=groupCallState){
+  if(!state?.room||groupCallState!==state||state.manualLeave)return;
+  const qualities=LivekitClient.VideoQuality||{};
+  const level=state.videoNetworkCap==='low'?qualities.LOW
+    :(state.videoNetworkCap==='medium'?qualities.MEDIUM:qualities.HIGH);
+  if(level==null)return;
+  if(!state.outgoingVideoQualityByTrack)state.outgoingVideoQualityByTrack=new WeakMap();
+  for(const publication of state.room.localParticipant.videoTrackPublications.values()){
+    // Screen shares are not camera thumbnails and must remain readable.
+    if(publication.source&&publication.source!==LivekitClient.Track.Source.Camera)continue;
+    const track=publication.track;
+    if(!track||typeof track.setPublishingQuality!=='function')continue;
+    if(state.outgoingVideoQualityByTrack.get(track)===level)continue;
+    try{
+      track.setPublishingQuality(level);
+      state.outgoingVideoQualityByTrack.set(track,level)
+    }catch(err){
+      console.warn('Could not adapt outgoing camera quality',err)
+    }
+  }
+}
+
 function applyGroupVideoNetworkCap(state,next){
   if(!state||groupCallState!==state)return;
   state.pendingVideoNetworkCap='';
   if(state.videoNetworkCap===next)return;
   state.videoNetworkCap=next;
   state.lastVideoNetworkCapChangeAt=Date.now();
-  scheduleGroupRemoteVideoQualitySync()
+  scheduleGroupRemoteVideoQualitySync();
+  syncGroupOutgoingVideoQuality(state)
 }
 
 function updateGroupVideoNetworkCap(quality,participant){
@@ -6059,6 +6097,10 @@ function ensureGroupTile(participant,isLocal=false){
   mic.textContent='🔇';
   const speaking=document.createElement('div');
   speaking.className='tile-speaking-status hidden';
+  if(groupCallState?.activeSpeakerIds?.has(String(identity))){
+    tile.classList.add('speaking');
+    speaking.classList.remove('hidden');
+  }
   speaking.setAttribute('aria-label','Сейчас говорит');
   speaking.textContent='🎙 Говорит';
   const ping=document.createElement('div');
@@ -6212,7 +6254,7 @@ function refreshGroupCount(){
 function updateGroupActiveSpeakers(speakers=[]){
   const state=groupCallState;
   if(!state)return;
-  state.pendingSpeakers=speakers.slice(0,3);
+  state.pendingSpeakers=Array.isArray(speakers)?speakers.slice():[];
   if(state.speakerFrame)return;
   state.speakerFrame=requestAnimationFrame(()=>{
     if(groupCallState!==state)return;
@@ -6342,6 +6384,7 @@ async function recoverGroupCall(state){
     state.needsRecovery=false;
     state.recovering=false;
     await renderGroupLocalTracks();
+    syncGroupOutgoingVideoQuality(state);
     refreshGroupCount();
     requestAnimationFrame(()=>scheduleGroupRemoteVideoQualitySync())
   }catch(err){
@@ -6458,11 +6501,13 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
       speakerFrame:0,
       speakerFocusTimer:null,
       autoSpeakerIdentity:'',
+      lastAutoSpeakerFocusAt:0,
       pinnedIdentity:'',
       groupFocusSource:'',
       groupGridRequested:false,
       videoQualityFrame:0,
       videoNetworkCap:'high',
+      outgoingVideoQualityByTrack:new WeakMap(),
       pendingVideoNetworkCap:'',
       videoNetworkCapTimer:null,
       lastVideoNetworkCapChangeAt:0,
@@ -6508,6 +6553,18 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
     $('groupSwitchCameraBtn').classList.toggle('hidden',!callVideo);
 
     room
+      .on(LivekitClient.RoomEvent.AudioPlaybackStatusChanged,()=>{
+        if(groupCallState?.room!==room)return;
+        const blocked=!room.canPlaybackAudio;
+        $('groupSpeakerBtn')?.classList.toggle('audio-blocked',blocked);
+        if(blocked){
+          $('groupSpeakerBtn').title='Нажми, чтобы включить звук';
+          setGroupCallStatus('Нажми 🔈, чтобы включить звук');
+        }else{
+          updateSpeakerButtons();
+          refreshGroupCount()
+        }
+      })
       .on(LivekitClient.RoomEvent.TrackSubscribed,(track,publication,participant)=>{
         attachGroupTrack(track,participant,false,publication)
       })
@@ -6685,6 +6742,7 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
     try{await renderGroupLocalTracks()}catch(err){
       console.warn('Could not render local conference tracks',err);
     }
+    syncGroupOutgoingVideoQuality(groupCallState);
     refreshGroupCount();
     startGroupPingMonitoring(groupCallState);
     startGroupQualityMonitoring(groupCallState);
@@ -7030,7 +7088,23 @@ $('groupMuteBtn').onclick=async()=>{
   }catch(err){alert(err.message||'Не удалось изменить микрофон')}
 };
 
-$('groupSpeakerBtn').onclick=()=>chooseSpeakerOutput();
+$('groupSpeakerBtn').onclick=()=>{
+  const room=groupCallState?.room;
+  // On iOS / PWA the first user tap may be needed before audio can play.
+  if(room&&!room.canPlaybackAudio&&typeof room.startAudio==='function'){
+    room.startAudio().then(()=>{
+      if(groupCallState?.room===room){
+        $('groupSpeakerBtn')?.classList.remove('audio-blocked');
+        updateSpeakerButtons();
+        refreshGroupCount()
+      }
+    }).catch(err=>{
+      if(groupCallState?.room===room)setGroupCallStatus('Не удалось включить звук: '+(err?.message||'ошибка'))
+    });
+    return
+  }
+  chooseSpeakerOutput()
+};
 
 
 $('groupCameraBtn').onclick=async()=>{
@@ -7049,6 +7123,7 @@ $('groupCameraBtn').onclick=async()=>{
     state.cameraOff=nextOff;
     if(!nextOff)startNativeCallService($('groupCallName').textContent,true,true).catch(()=>{});
     await renderGroupLocalTracks();
+    syncGroupOutgoingVideoQuality(state);
     updateGroupScreenShareControls();
   }catch(err){
     if(groupCallState===state)alert(cameraStartErrorMessage(err,'Не удалось изменить камеру'));
