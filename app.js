@@ -6774,9 +6774,13 @@ async function joinGroupCall(groupId,video=false,invite=false,linkedToken='',inv
 
 function leaveGroupCall(disconnect=true,endReason='local_leave'){
   if($('groupCallProfileDialog')?.open)$('groupCallProfileDialog').close();
-  hideMiniCallBar();
-  stopNativeCallService().catch(()=>{});
-  resetNativeAudioRoute().catch(()=>{});
+  // Canceling a pre-commit conference must not stop the still-active 1:1 call.
+  const keepPrivateCall=!!currentCall?.answered&&!!groupCallState;
+  if(!keepPrivateCall){
+    hideMiniCallBar();
+    stopNativeCallService().catch(()=>{});
+    resetNativeAudioRoute().catch(()=>{});
+  }
   const state=groupCallState;
   if(state){
     cancelOutgoingConferenceInvites(state);
@@ -6825,7 +6829,12 @@ function leaveGroupCall(disconnect=true,endReason='local_leave'){
   $('groupCallOverlay').classList.remove('group-focused-mode');
   $('groupCallOverlay').classList.add('hidden');
   $('groupInviteLinkWrap').classList.add('hidden');
-  stopLiveCallDurationTimerIfIdle()
+  stopLiveCallDurationTimerIfIdle();
+  if(keepPrivateCall){
+    $('callOverlay')?.classList.remove('hidden');
+    updatePrivateInviteButton();
+    updateMiniCallBar();
+  }
 }
 
 window.addEventListener('resize',()=>{
